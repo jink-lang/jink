@@ -1,0 +1,12 @@
+# Rust/cargo
+debug/
+target/
+Cargo.lock
+**/*.rs.bk
+
+# Code
+.vscode
+.idea
+
+# Test file
+test.jk

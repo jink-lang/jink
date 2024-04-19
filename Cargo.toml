@@ -1,0 +1,11 @@
+[package]
+name = "jink"
+version = "0.1.0"
+license="GPLv3"
+license-file="LICENSE"
+repository = "https://github.com/jink-lang/jink"
+authors = ["jink-lang", "Jacob"]
+edition = "2021"
+
+[dependencies]
+strum_macros = "0.26"
