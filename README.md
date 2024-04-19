@@ -1,7 +1,7 @@
-# Jink
+# Jink 
 The Jink programming language
 
-![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/jink-lang/jink/rust.yml?style=for-the-badge&label=Tests&link=https%3A%2F%2Fgithub.com%2Fjink-lang%2Fjink%2Factions%2Fworkflows%2Frust.yml)
+[![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/jink-lang/jink/rust.yml?style=for-the-badge&label=Tests)](https://github.com/jink-lang/jink/actions/workflows/rust.yml)
 ![GitHub last commit](https://img.shields.io/github/last-commit/jink-lang/jink?style=for-the-badge)
 ![GitHub contributors](https://img.shields.io/github/contributors-anon/jink-lang/jink?style=for-the-badge)
 [![Discord](https://img.shields.io/discord/365599795886161941?label=Discord&style=for-the-badge)](https://discord.gg/cWzcQz2)
