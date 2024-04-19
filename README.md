@@ -1,11 +1,12 @@
 # Jink
 The Jink programming language
 
-[![Discord](https://img.shields.io/discord/365599795886161941?label=Discord)](https://discord.gg/cWzcQz2)
-![License](https://img.shields.io/github/license/jink-lang/jink)
-![GitHub contributors](https://img.shields.io/github/contributors-anon/jink-lang/jink)
-![GitHub Repo stars](https://img.shields.io/github/stars/jink-lang/jink?style=social)
----
+![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/jink-lang/jink/rust.yml?style=for-the-badge&label=Tests&link=https%3A%2F%2Fgithub.com%2Fjink-lang%2Fjink%2Factions%2Fworkflows%2Frust.yml)
+![GitHub last commit](https://img.shields.io/github/last-commit/jink-lang/jink?style=for-the-badge)
+![GitHub contributors](https://img.shields.io/github/contributors-anon/jink-lang/jink?style=for-the-badge)
+[![Discord](https://img.shields.io/discord/365599795886161941?label=Discord&style=for-the-badge)](https://discord.gg/cWzcQz2)
+![License](https://img.shields.io/github/license/jink-lang/jink?style=for-the-badge)
+![GitHub Repo stars](https://img.shields.io/github/stars/jink-lang/jink?style=for-the-badge)
 
 ## About
 This is the home of the Rust compiler of the [Jink](https://github.com/jink-lang/jink) programming language. This is a WIP and any contributions are welcome. Read more in the Contributions section below.
