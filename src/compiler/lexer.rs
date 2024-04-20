@@ -24,7 +24,7 @@ impl Lexer {
   pub fn lex(&mut self, code: String) -> Vec<Token> {
     self.code = code;
     let code = self.code.chars().collect::<Vec<char>>();
-    self.code_end = code.iter().count();
+    self.code_end = code.len();
     let mut iter = code.iter().peekable();
 
     self.parse_tokens(&mut iter)
@@ -37,7 +37,7 @@ impl Lexer {
       self.line_pos += 1;
 
       let char = iter.next();
-      if char == None {
+      if char.is_none() {
         self.tokens.push(Token { of_type: TokenTypes::EOF, value: None, line: self.line });
         break;
       }
@@ -73,11 +73,11 @@ impl Lexer {
       } else if char.unwrap().is_numeric() || (*char.unwrap() == '.' && iter.peek().unwrap().is_numeric()) {
         self.parse_number(iter, char.unwrap());
 
-      } else if char.unwrap().is_alphabetic() || ['$', '_'].contains(&char.unwrap()) {
-        self.parse_identifier(iter, &char.unwrap());
+      } else if char.unwrap().is_alphabetic() || ['$', '_'].contains(char.unwrap()) {
+        self.parse_identifier(iter, char.unwrap());
 
       } else if OPERATORS.contains(&&*char.unwrap().to_string()) {
-        self.parse_operator(iter, &char.unwrap());
+        self.parse_operator(iter, char.unwrap());
 
       } else {
         let cur = match char.unwrap() {
@@ -144,7 +144,7 @@ impl Lexer {
 
     // Single-line comments
     if *char == '/' {
-      while iter.peek() != None && !['\r', '\n'].contains(&iter.peek().unwrap()) {
+      while iter.peek().is_some() && !['\r', '\n'].contains(iter.peek().unwrap()) {
         iter.next();
         self.pos += 1;
         self.line_pos += 1;
@@ -156,7 +156,7 @@ impl Lexer {
       self.pos += 1;
       self.line_pos += 1;
 
-      while cur != None && iter.peek() != None && *cur.unwrap() != '*' && *iter.peek().unwrap() != &'/' {
+      while cur.is_some() && iter.peek().is_some() && *cur.unwrap() != '*' && *iter.peek().unwrap() != &'/' {
         cur = iter.next();
         self.pos += 1;
 
@@ -172,7 +172,7 @@ impl Lexer {
       self.pos += 1;
       self.line_pos += 1;
 
-      if end == None || *end.unwrap() != '/' {
+      if end.is_none() || *end.unwrap() != '/' {
         panic!("Block comment not closed at {}:{}\n  {}\n  {}",
           start_line, start_pos, self.code.lines().nth(usize::try_from(start_line - 1).unwrap()).unwrap(), " ".repeat(usize::try_from(start_pos - 1).unwrap()) + "^"
         );
@@ -211,7 +211,7 @@ impl Lexer {
     self.pos += 1;
     self.line_pos += 1;
 
-    while cur != None {
+    while cur.is_some() {
       // Closing the string
       if cur.unwrap() == char {
         end = true;
@@ -249,7 +249,7 @@ impl Lexer {
     }
 
     // String was not properly enclosed
-    if cur == None && end == false {
+    if cur.is_none() && !end {
       panic!("A string was not properly enclosed at {}:{}\n  {}\n  {}",
         self.line, start, self.code.lines().nth(usize::try_from(self.line - 1).unwrap()).unwrap(), " ".repeat(usize::try_from(start - 1).unwrap()) + "^"
       );
@@ -263,7 +263,7 @@ impl Lexer {
     let start = self.line_pos;
 
     // While we are still working with the number
-    while iter.peek() != None && (iter.peek().unwrap().is_numeric() || iter.peek().unwrap() == &&'.') {
+    while iter.peek().is_some() && (iter.peek().unwrap().is_numeric() || iter.peek().unwrap() == &&'.') {
       // Push next to number string
       number.push(*iter.next().unwrap());
       self.pos += 1;
