@@ -3,7 +3,7 @@
 
 <b>Thank you for considering contributing to Jink!</b> Please refer to the [Table of Contents](#table-of-contents) for various ways to contribute and get involved or understand the processes behind doing so. Please familiarize yourself with the process before making your contribution. This will ensure a smoother experience for everyone involved. Thank you!
 
-###### If you have any suggestions for improving this guide, let us know. If you like the project and aren't able to or interested in contributing directly, please consider giving us a :star:!<3
+###### If you have any suggestions for improving this guide, let us know. If you like the project and aren't able to or interested in contributing directly, please consider giving us a ⭐!❤️
 
 ## Table of Contents
 
@@ -35,7 +35,7 @@ If after checking existing issues you still feel the need to ask a question or n
 
 Someone can then help you as soon as possible.
 
-Optionally, you can also join Jacob's project [Discord server](https://discord.gg/8Q7QvzQ) and ask your question or open a discussion there, in the Jink category chat.
+Optionally, you can also join Jacob's project [Discord server](https://discord.gg/cWzcQz2) and ask your question or open a discussion there, in the Jink category chat.
 
 ## I Want To Contribute
 
@@ -83,7 +83,7 @@ This section guides you through submitting an enhancement suggestion for Jink, *
 - Make sure that you are using the latest version.
 <!-- - Read the [documentation]() carefully and find out if the functionality is already covered, maybe by an individual configuration.-->
 - Perform a [search](https://github.com/jink-lang/jink/labels/enhancement) to see if the enhancement has already been suggested. If it has, add a comment to the existing issue instead of opening a new one.
-- Find out whether your idea fits with the scope and aims of the project. It's up to you to make a strong case to convince us of the merits of this feature. Keep in mind that we want features that will be useful to the majority of users and not just a small subset. If you are unsure, you can open a discussion in Jacob's project [Discord server](https://discord.gg/8Q7QvzQ) or in the issue itself.
+- Find out whether your idea fits with the scope and aims of the project. It's up to you to make a strong case to convince us of the merits of this feature. Keep in mind that we want features that will be useful to the majority of users and not just a small subset. If you are unsure, you can open a discussion in Jacob's project [Discord server](https://discord.gg/cWzcQz2) or in the issue itself.
 
 #### How Do I Submit a Good Enhancement Suggestion?
 
