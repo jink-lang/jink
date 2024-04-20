@@ -115,7 +115,7 @@ This will help you see the output of the lexer and parser and debug any issues y
 
 ## Contributing
 
-Contributions are very welcome. Please read the [CONTRIBUTING.md](CONTRIBUTING.md) file to get acquainted with the process and guidelines. If you have any questions, feel free to ask in Jacob's project [Discord server](https://discord.gg/cWzcQz2).
+Contributions are very welcome. Please read the [CONTRIBUTING.md](./.github/docs/CONTRIBUTING.md) file to get acquainted with the process and guidelines. If you have any questions, feel free to ask in Jacob's project [Discord server](https://discord.gg/cWzcQz2).
 
 ## License
 
