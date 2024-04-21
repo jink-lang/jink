@@ -34,7 +34,7 @@ impl Display for Token {
 }
 
 pub const OPERATORS: &[&str] = &[
-  "+", "-", "*", "/", "//", "%", "^", "=", 
+  "+", "-", "*", "/", "//", "%", "^", "=", "->",
   ">", "<", ">=", "<=", "==", "!=",
   "-=", "+=", "*=", "/=", "//=", "%=",
   "!", "&", "?", "|", "::", "~", "#", ".",
@@ -46,7 +46,7 @@ pub const KEYWORDS: &[&str] = &[
   "import", "return", "del",
   "true", "false", "null",
   "fun", "let", "const", "type",
-  "pub",
+  "cls", "pub"
 ];
 
 #[derive(Debug, PartialEq)]
@@ -97,13 +97,16 @@ pub enum Expression {
 
   // func name; args
   Call(Name, Box<Vec<Expression>>),
-  // func name; params; body
-  Function(Name, Option<Box<Vec<Expression>>>, Option<Box<Vec<Expression>>>),
+  // func name; return type; params; body
+  Function(Name, Option<Literals>, Option<Box<Vec<Expression>>>, Option<Box<Vec<Expression>>>),
   // type or let/const; ident; default
   // TODO?: Refactor Type here so that we don't have to rely on distinguishing between ident and let/const
   FunctionParam(Type, Literals, Option<Box<Expression>>),
   // value
   Return(Box<Expression>),
+
+  // class name; parent classes; body
+  Class(Name, Option<Vec<Name>>, Option<Box<Vec<Expression>>>)
 
   // name; index
   // Module(Name, )

@@ -102,6 +102,9 @@ impl Parser {
     } else if init.unwrap().value.as_ref().unwrap() == "if" {
       return self.parse_conditional();
 
+    } else if init.unwrap().value.as_ref().unwrap() == "cls" {
+      return self.parse_class();
+
     } else if init.unwrap().value.as_ref().unwrap() == "type" {
       self.iter.next();
       return self.parse_type();
@@ -412,7 +415,7 @@ impl Parser {
       if type_tok.is_none() {
         return Expression::Literal(Literals::Object(Box::new(obj)));
 
-      // ypedef / struct
+      // typedef / struct
       } else {
         return Expression::TypeDef(
           Literals::Identifier(Name(String::from(type_tok.unwrap().value.unwrap())), None),
@@ -432,8 +435,33 @@ impl Parser {
   fn parse_function(&mut self) -> Expression {
     let identifier = self.consume(&[TokenTypes::Identifier], false);
     let params = self.parse_args_params("params");
+
+    // Get return type
+    let mut return_type: Option<Token> = None;
+    if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator
+      && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "->" {
+      self.iter.next();
+      // Identifier for now
+      return_type = Some(self.consume(&[TokenTypes::Identifier], false));
+    }
+
     let body = self.parse_block();
-    return Expression::Function(Name(identifier.value.unwrap().to_owned()), Some(Box::new(params)), Some(Box::new(body)));
+
+    if return_type.is_some() {
+      return Expression::Function(
+        Name(identifier.value.unwrap().to_owned()),
+        Some(Literals::Identifier(Name(return_type.unwrap().value.unwrap()), None)),
+        Some(Box::new(params)),
+        Some(Box::new(body))
+      );
+    } else {
+      return Expression::Function(
+        Name(identifier.value.unwrap().to_owned()),
+        None,
+        Some(Box::new(params)),
+        Some(Box::new(body))
+      )
+    }
   }
 
   fn parse_args_params(&mut self, parse_type: &str) -> Vec<Expression> {
@@ -468,12 +496,12 @@ impl Parser {
               None
             ));
 
-          // Expect comma or colon
-          } else if [TokenTypes::Comma, TokenTypes::Colon, TokenTypes::Operator].contains(&self.iter.current.as_ref().unwrap().of_type)
-            && [",", ":"].contains(&self.iter.current.as_ref().unwrap().value.as_ref().unwrap().as_str()) {
+          // Expect colon for param defaults
+          // fun num(int a: 1) {}
+          // Operator check here in case we make colon an operator
+          } else if [TokenTypes::Colon, TokenTypes::Operator].contains(&self.iter.current.as_ref().unwrap().of_type)
+            && [":"].contains(&self.iter.current.as_ref().unwrap().value.as_ref().unwrap().as_str()) {
 
-            // Distinguish param defaults
-            // fun num(int a: 1) {}
             if self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == ":" {
               self.iter.next();
               let default = self.parse_expression(0);
@@ -484,22 +512,27 @@ impl Parser {
               ));
             }
 
-            // Skip by one newline if there is one
-            self.skip_newlines(Some(1));
-
-            // Multiple params
-            // fun add(int a, int b) {}
+            // We have comma, continue to next param
             if self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "," {
               self.iter.next();
-              list.push(Expression::FunctionParam(
-                Type(String::from(cur.value.as_ref().unwrap())),
-                Literals::Identifier(Name(String::from(ident.value.as_ref().unwrap())), None),
-                None
-              ));
+              // Skip by one newline if there is one
+              self.skip_newlines(Some(1));
+              continue;
             }
+
+          // Expect comma for multiple params without defaults
+          // fun add(int a, int b) {}
+          } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Comma {
+            self.iter.next();
 
             // Skip by one newline if there is one
             self.skip_newlines(Some(1));
+
+            list.push(Expression::FunctionParam(
+              Type(String::from(cur.value.as_ref().unwrap())),
+              Literals::Identifier(Name(String::from(ident.value.as_ref().unwrap())), None),
+              None
+            ));
 
           } else {
             panic!("Expected \")\", \",\" or \":\", got {:?} on line {}.", self.iter.current.as_ref().unwrap().value.as_ref().unwrap(), self.iter.current.as_ref().unwrap().line);
@@ -581,6 +614,9 @@ impl Parser {
     )
   }
 
+  // TODO: Move actual block parsing to its own func (see block parsing for classes)
+  // and rename this to parse function block bc it clearly caters just to functions
+  // and then change the call to this from function calls because oops that makes no sense
   fn parse_block(&mut self) -> Vec<Expression> {
     let mut body: Vec<Expression> = Vec::new();
 
@@ -611,7 +647,70 @@ impl Parser {
     }
 
     return body;
+  }
 
+  fn parse_class(&mut self) -> Expression {
+    self.iter.next();
+    let ident = self.consume(&[TokenTypes::Identifier], false);
+
+    // Specifying parent classes
+    let mut parents: Option<Vec<Name>> = None;
+    if self.iter.current.as_ref().unwrap().of_type == TokenTypes::LParen {
+      self.iter.next();
+
+      // cls Child(Parent, OtherParent) = {}
+      while self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type != TokenTypes::RParen {
+        if self.iter.current.is_none() {
+          panic!("Unexpected end of file."); // clean up
+        }
+        let name = self.consume(&[TokenTypes::Identifier], false);
+        // Add name to list of parents or start new list
+        if let Some(ref mut vec) = parents {
+          vec.push(Name(name.value.unwrap()));
+        } else {
+          parents = Some(vec![Name(name.value.unwrap())]);
+        }
+
+        // Expect right paren or comma for additional parent(s)
+        if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RParen {
+          break;
+        } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Comma {
+          self.iter.next();
+        }
+      }
+      self.consume(&[TokenTypes::RParen], false);
+    }
+
+    if self.iter.current.as_ref().unwrap().of_type != TokenTypes::Operator || self.iter.current.as_ref().unwrap().value.as_ref().unwrap() != "=" {
+      panic!("Expected class assignment, got {:?} on line {}.", self.iter.current.as_ref().unwrap().of_type, self.iter.current.as_ref().unwrap().line);
+    } else {
+      self.iter.next();
+    }
+
+    // Class body
+    self.consume(&[TokenTypes::LBrace], false);
+    let mut body: Vec<Expression> = vec![];
+    while self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type != TokenTypes::RBrace {
+      self.skip_newlines(None);
+      body.push(self.parse_top());
+      self.consume(&[TokenTypes::Semicolon, TokenTypes::Newline], false);
+      self.skip_newlines(None);
+    }
+    self.consume(&[TokenTypes::RBrace], false);
+
+    if parents.is_some() {
+      return Expression::Class(
+        Name(ident.value.unwrap()),
+        parents,
+        Some(Box::new(body))
+      );
+    } else {
+      return Expression::Class(
+        Name(ident.value.unwrap()),
+        None,
+        Some(Box::new(body))
+      );
+    }
   }
 }
 
@@ -620,14 +719,28 @@ mod tests {
   use super::*;
 
   #[test]
-  fn test_parse_assignment() {
+  fn test_parse_assignments() {
     let tokens = vec![
       Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
       Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
       Token { of_type: TokenTypes::Operator, value: Some(String::from("=")), line: 1 },
       Token { of_type: TokenTypes::Number, value: Some(String::from("1")), line: 1 },
       Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 1 },
-      Token { of_type: TokenTypes::EOF, value: None, line: 1 }
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 1 },
+
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("const")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("name")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("=")), line: 2 },
+      Token { of_type: TokenTypes::String, value: Some(String::from("\"Jink\"")), line: 2 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
+
+      // Type alias
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("type")), line: 3 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("Number")), line: 3 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("=")), line: 3 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 3 },
+      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 3 },
+      Token { of_type: TokenTypes::EOF, value: None, line: 3 }
     ];
     let mut parser = Parser::new(tokens);
     let ast = parser.parse(false);
@@ -668,11 +781,13 @@ mod tests {
       Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
       Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
       Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 1 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 1 },
       Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 2 },
       Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 2 },
       Token { of_type: TokenTypes::Operator, value: Some(String::from("+")), line: 2 },
       Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 2 },
       Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 2 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
       Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 3 },
       Token { of_type: TokenTypes::EOF, value: None, line: 3 }
     ];
@@ -680,6 +795,7 @@ mod tests {
     let ast = parser.parse(false);
     assert_eq!(ast[0], Expression::Function(
       Name(String::from("add")),
+      None,
       Some(Box::new(vec![
         Expression::FunctionParam(
           Type(String::from("let")),
@@ -706,7 +822,7 @@ mod tests {
   fn test_parse_function_def_inline() {
     let tokens = vec![
       Token { of_type: TokenTypes::Keyword, value: Some(String::from("fun")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("add")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("sub")), line: 1 },
       Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
       Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
       Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
@@ -716,7 +832,7 @@ mod tests {
       Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
       Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 1 },
       Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("+")), line: 1 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("-")), line: 1 },
       Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
       Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 1 },
       Token { of_type: TokenTypes::EOF, value: None, line: 1 }
@@ -724,7 +840,8 @@ mod tests {
     let mut parser = Parser::new(tokens);
     let ast = parser.parse(false);
     assert_eq!(ast[0], Expression::Function(
-      Name(String::from("add")),
+      Name(String::from("sub")),
+      None,
       Some(Box::new(vec![
         Expression::FunctionParam(
           Type(String::from("let")),
@@ -733,6 +850,129 @@ mod tests {
         ),
         Expression::FunctionParam(
           Type(String::from("let")),
+          Literals::Identifier(Name(String::from("b")), None),
+          None
+        )
+      ])),
+      Some(Box::new(vec![
+        Expression::Return(Box::new(Expression::BinaryOperator(
+          Operator(String::from("-")),
+          Box::new(Expression::Literal(Literals::Identifier(Name(String::from("a")), None))),
+          Box::new(Expression::Literal(Literals::Identifier(Name(String::from("b")), None)))
+        )))
+      ]))
+    ));
+  }
+
+  #[test]
+  fn test_parse_function_with_defaults() {
+    let tokens = vec![
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("fun")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("pow")), line: 1 },
+      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
+      Token { of_type: TokenTypes::Colon, value: Some(String::from(":")), line: 1 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("1")), line: 1 },
+      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
+      Token { of_type: TokenTypes::Colon, value: Some(String::from(":")), line: 1 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("2")), line: 1 },
+      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("c")), line: 1 },
+      Token { of_type: TokenTypes::Colon, value: Some(String::from(":")), line: 1 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("3")), line: 1 },
+      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
+      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 1 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 1 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("^")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("^")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("c")), line: 2 },
+      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 2 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
+      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 3 },
+      Token { of_type: TokenTypes::EOF, value: None, line: 3 }
+    ];
+    let mut parser = Parser::new(tokens);
+    let ast = parser.parse(false);
+    assert_eq!(ast[0], Expression::Function(
+      Name(String::from("pow")),
+      None,
+      Some(Box::new(vec![
+        Expression::FunctionParam(
+          Type(String::from("let")),
+          Literals::Identifier(Name(String::from("a")), None),
+          Some(Box::new(Expression::Literal(Literals::Integer(1))))
+        ),
+        Expression::FunctionParam(
+          Type(String::from("let")),
+          Literals::Identifier(Name(String::from("b")), None),
+          Some(Box::new(Expression::Literal(Literals::Integer(2))))
+        ),
+        Expression::FunctionParam(
+          Type(String::from("let")),
+          Literals::Identifier(Name(String::from("c")), None),
+          Some(Box::new(Expression::Literal(Literals::Integer(3))))
+        )
+      ])),
+      Some(Box::new(vec![
+        Expression::Return(Box::new(Expression::BinaryOperator(
+          Operator(String::from("^")),
+          Box::new(Expression::BinaryOperator(
+            Operator(String::from("^")),
+            Box::new(Expression::Literal(Literals::Identifier(Name(String::from("a")), None))),
+            Box::new(Expression::Literal(Literals::Identifier(Name(String::from("b")), None)))
+          )),
+          Box::new(Expression::Literal(Literals::Identifier(Name(String::from("c")), None)))
+        )))
+      ]))
+    ));
+  }
+
+  #[test]
+  fn test_parse_function_with_return_type() {
+    let tokens = vec![
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("fun")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("add")), line: 1 },
+      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
+      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
+      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("->")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
+      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 1 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 1 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("+")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 2 },
+      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 2 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
+      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 3 },
+      Token { of_type: TokenTypes::EOF, value: None, line: 3 }
+    ];
+    let mut parser = Parser::new(tokens);
+    let ast = parser.parse(false);
+
+    assert_eq!(ast[0], Expression::Function(
+      Name(String::from("add")),
+      Some(Literals::Identifier(Name(String::from("int")), None)),
+      Some(Box::new(vec![
+        Expression::FunctionParam(
+          Type(String::from("int")),
+          Literals::Identifier(Name(String::from("a")), None),
+          None
+        ),
+        Expression::FunctionParam(
+          Type(String::from("int")),
           Literals::Identifier(Name(String::from("b")), None),
           None
         )
