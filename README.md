@@ -71,9 +71,9 @@ type address = {
 };
 
 pub cls Business = {
-  fun new(let name: string, let address: address) -> self {
+  fun new(string name, address addr) -> self {
     self.name = name;
-    self.address = address;
+    self.address = addr;
   };
 
   pub fun get_address() -> address {
