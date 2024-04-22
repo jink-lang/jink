@@ -11,7 +11,7 @@ The Jink programming language
 ## About
 This is the home of the Rust compiler of the [Jink](https://github.com/jink-lang/jink) programming language. This is a WIP and any contributions are welcome. Read more in the [Contributing](#contributing) section below.
 
-## Goal Checklist
+## Goal Checklist / TODOs
 
 (Not in or by any particular order or specification)
 
@@ -28,9 +28,12 @@ This is the home of the Rust compiler of the [Jink](https://github.com/jink-lang
 - [x] Parse type definitions
 - [x] Parse objects
 - [x] Parse arrays
-- [ ] Parse classes
-- [ ] Parse function defaults
+- [x] Parse classes
+- [x] Parse function defaults
 - [ ] Parse string templates
+- [ ] Parse pub keyword on definitions
+- [ ] Parse indexing (arrays)
+- [ ] Parse indexing (object properties and methods)
 
 ## Examples
 
