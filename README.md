@@ -34,6 +34,8 @@ This is the home of the Rust compiler of the [Jink](https://github.com/jink-lang
 - [ ] Parse pub keyword on definitions
 - [ ] Parse indexing (arrays)
 - [ ] Parse indexing (object properties and methods)
+- [ ] Parse del statements
+- [ ] Parse module imports
 
 ## Examples
 
