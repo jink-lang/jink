@@ -271,18 +271,28 @@ impl Parser {
 
   fn is_unary_operator(&mut self, token: &Token) -> bool {
     if token.of_type != TokenTypes::Operator { return false; }
-    return ["+", "-", "++", "--", "!"].contains(&token.value.as_ref().unwrap().as_str());
+    return [
+      "+", "-", "++", "--", "!"
+    ].contains(&token.value.as_ref().unwrap().as_str());
   }
 
   fn is_left_associative(&mut self, operator: Token) -> bool {
-    return !["++", "--", "+=", "-=", "*=", "/=", "//=", "%=", "="].contains(&operator.value.unwrap().as_str());
+    return ![
+      "++", "--", "+=", "-=", "*=", "/=", "//=", "%=",
+      ">", "<", ">=", "<=", "==", "!=",
+      "=", "!", "+", "-", "->", ".", "&&", "||",
+    ].contains(&operator.value.unwrap().as_str());
   }
 
   fn get_precedence(&mut self, operator: Token) -> i8 {
     match operator.value.as_ref().unwrap().as_str() {
-      "+" | "-" => 1,
-      "*" | "/" | "%" => 2,
-      "^" => 3,
+      "+=" | "-=" | "*=" | "/=" | "//=" | "%=" => 1,
+      "||" => 2,
+      "&&" => 3,
+      "^" => 4,
+      "==" | "!=" => 5,
+      "+" | "-" => 6,
+      "*" | "/" | "//" | "%" => 7,
       _ => 0
     }
   }
@@ -599,7 +609,6 @@ impl Parser {
     let body = self.parse_block();
 
     // If an else case is next
-    self.skip_newlines(None);
     if self.iter.current.is_some()
       && self.iter.current.as_ref().unwrap().of_type == TokenTypes::Keyword
       && ["elseif", "else"].contains(&self.iter.current.as_ref().unwrap().value.as_ref().unwrap().as_str()) {
@@ -625,6 +634,10 @@ impl Parser {
       self.skip_newlines(None);
       while self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type != TokenTypes::RBrace {
         body.push(self.parse_top());
+        // Break if early end of block
+        if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RBrace {
+          break;
+        }
         self.consume(&[TokenTypes::Semicolon, TokenTypes::Newline], false);
         self.skip_newlines(None);
       }
@@ -644,6 +657,7 @@ impl Parser {
         panic!("Empty function body on line {}.", init.line);
       }
       body.push(self.parse_top());
+      self.consume(&[TokenTypes::Semicolon, TokenTypes::Newline], false);
     }
 
     return body;
@@ -749,6 +763,57 @@ mod tests {
       Box::new(Literals::Identifier(Name(String::from("a")), None)),
       Some(Box::new(Expression::Literal(Literals::Integer(1)))
     )));
+  }
+
+  #[test]
+  fn test_parse_conditional() {
+    let tokens = vec![
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("if")), line: 1 },
+      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("==")), line: 1 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("1")), line: 1 },
+      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
+      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 1 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 1 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 2 },
+      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 2 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
+      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 3 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("else")), line: 3 },
+      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 3 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 3 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 4 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 4 },
+      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 4 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 4 },
+      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 5 },
+      Token { of_type: TokenTypes::EOF, value: None, line: 5 }
+    ];
+    let mut parser = Parser::new(tokens);
+    let ast = parser.parse(false);
+    assert_eq!(ast[0], Expression::Conditional(
+      Type(String::from("if")),
+      Some(Box::new(Expression::BinaryOperator(
+        Operator(String::from("==")),
+        Box::new(Expression::Literal(Literals::Identifier(Name(String::from("a")), None))),
+        Box::new(Expression::Literal(Literals::Integer(1)))
+      ))),
+      Some(Box::new(vec![
+        Expression::Return(Box::new(Expression::Literal(Literals::Identifier(Name(String::from("a")), None))))
+      ])),
+      Some(Box::new(vec![
+        Expression::Conditional(
+          Type(String::from("else")),
+          None,
+          Some(Box::new(vec![
+            Expression::Return(Box::new(Expression::Literal(Literals::Identifier(Name(String::from("b")), None))))
+          ])),
+          None
+        )
+      ]))
+    ));
   }
 
   #[test]
@@ -935,7 +1000,7 @@ mod tests {
   }
 
   #[test]
-  fn test_parse_function_with_return_type() {
+  fn test_parse_function_def_with_return_type() {
     let tokens = vec![
       Token { of_type: TokenTypes::Keyword, value: Some(String::from("fun")), line: 1 },
       Token { of_type: TokenTypes::Identifier, value: Some(String::from("add")), line: 1 },
@@ -983,6 +1048,107 @@ mod tests {
           Box::new(Expression::Literal(Literals::Identifier(Name(String::from("a")), None))),
           Box::new(Expression::Literal(Literals::Identifier(Name(String::from("b")), None)))
         )))
+      ]))
+    ));
+  }
+
+  #[test]
+  fn test_parse_function_def_with_inline_conditional() {
+    let tokens = vec![
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("fun")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("are_even")), line: 1 },
+      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
+      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
+      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("->")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
+      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 1 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 1 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("if")), line: 2 },
+      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("%")), line: 2 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("2")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("==")), line: 2 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("0")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("&&")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("%")), line: 2 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("2")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("==")), line: 2 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("0")), line: 2 },
+      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 2 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 2 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("true")), line: 2 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("else")), line: 3 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 3 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("false")), line: 3 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 3 },
+      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 4 },
+      Token { of_type: TokenTypes::EOF, value: None, line: 4 }
+    ];
+    let mut parser = Parser::new(tokens);
+    let ast = parser.parse(false);
+    assert_eq!(ast[0], Expression::Function(
+      Name(String::from("are_even")),
+      Some(Literals::Identifier(Name(String::from("int")), None)),
+      Some(Box::new(vec![
+        Expression::FunctionParam(
+          Type(String::from("int")),
+          Literals::Identifier(Name(String::from("a")), None),
+          None
+        ),
+        Expression::FunctionParam(
+          Type(String::from("int")),
+          Literals::Identifier(Name(String::from("b")), None),
+          None
+        )
+      ])),
+      Some(Box::new(vec![
+        Expression::Conditional(
+          Type(String::from("if")),
+          Some(Box::new(
+            Expression::BinaryOperator(
+              Operator(String::from("&&")),
+              Box::new(Expression::BinaryOperator(
+                Operator(String::from("==")),
+                Box::new(Expression::BinaryOperator(
+                  Operator(String::from("%")),
+                  Box::new(Expression::Literal(Literals::Identifier(Name(String::from("a")), None))),
+                  Box::new(Expression::Literal(Literals::Integer(2)))
+                )),
+                Box::new(Expression::Literal(Literals::Integer(0)))
+              )),
+              Box::new(Expression::BinaryOperator(
+                Operator(String::from("==")),
+                Box::new(Expression::BinaryOperator(
+                  Operator(String::from("%")),
+                  Box::new(Expression::Literal(Literals::Identifier(Name(String::from("b")), None))),
+                  Box::new(Expression::Literal(Literals::Integer(2)))
+                )),
+                Box::new(Expression::Literal(Literals::Integer(0)))
+              ))
+            )
+          )),
+          Some(Box::new(vec![
+            Expression::Return(Box::new(Expression::Literal(Literals::Boolean(true))))
+          ])),
+          Some(Box::new(vec![
+            Expression::Conditional(
+              Type(String::from("else")),
+              None,
+              Some(Box::new(vec![
+                Expression::Return(Box::new(Expression::Literal(Literals::Boolean(false))))
+              ])),
+              None
+            )
+          ]))
+        )
       ]))
     ));
   }
