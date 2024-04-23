@@ -43,10 +43,11 @@ pub const OPERATORS: &[&str] = &[
 
 pub const KEYWORDS: &[&str] = &[
   "if", "else", "elseif",
-  "import", "return", "del",
+  "return", "del",
   "true", "false", "null",
   "fun", "let", "const", "type",
-  "cls", "pub"
+  "cls", "self", "pub",
+  "import", "from", "as"
 ];
 
 #[derive(Debug, PartialEq)]
@@ -67,49 +68,63 @@ pub enum Literals {
   FloatingPoint(f64),
   String(String),
   Boolean(bool),
-  Object(Box<Vec<Literals>>),
+  Object(Box<Vec<Self>>),
   ObjectProperty(Option<Name>, Box<Expression>),
-  Identifier(Name, Option<Box<Literals>>),
+  Identifier(Name, Option<Box<Self>>),
   Null,
   EOF
 }
 
 #[derive(Debug, PartialEq)]
 pub enum Expression {
-  // literal expr
+  /// literal expr
   Literal(Literals),
 
-  // op; left; right
-  BinaryOperator(Operator, Box<Expression>, Box<Expression>),
-  // op; value
-  UnaryOperator(Operator, Box<Expression>),
+  /// op; left; right
+  BinaryOperator(Operator, Box<Self>, Box<Self>),
+  /// op; value
+  UnaryOperator(Operator, Box<Self>),
 
-  // type or let/const; ident; value
-  Assignment(Option<Type>, Box<Literals>, Option<Box<Expression>>),
+  /// type or let/const; ident; value
+  Assignment(Option<Type>, Box<Literals>, Option<Box<Self>>),
 
-  Array(Box<Vec<Expression>>),
+  Array(Box<Vec<Self>>),
 
-  // name; literal
+  /// name; literal
   TypeDef(Literals, Box<Literals>),
 
-  // if/else/elseif; expression; body; else-body
-  Conditional(Type, Option<Box<Expression>>, Option<Box<Vec<Expression>>>, Option<Box<Vec<Expression>>>),
+  /// if/else/elseif; expression; body; else-body
+  Conditional(Type, Option<Box<Self>>, Option<Box<Vec<Self>>>, Option<Box<Vec<Self>>>),
 
-  // func name; args
-  Call(Name, Box<Vec<Expression>>),
-  // func name; return type; params; body
-  Function(Name, Option<Literals>, Option<Box<Vec<Expression>>>, Option<Box<Vec<Expression>>>),
-  // type or let/const; ident; default
-  // TODO?: Refactor Type here so that we don't have to rely on distinguishing between ident and let/const
-  FunctionParam(Type, Literals, Option<Box<Expression>>),
-  // value
-  Return(Box<Expression>),
+  /// func name; args
+  Call(Name, Box<Vec<Self>>),
+  /// func name; return type; params; body
+  Function(Name, Option<Literals>, Option<Box<Vec<Self>>>, Option<Box<Vec<Self>>>),
+  /// type or let/const; ident; default
+  /// 
+  /// TODO?: Refactor Type here so that we don't have to rely on distinguishing between ident and let/const
+  FunctionParam(Type, Literals, Option<Box<Self>>),
+  /// value
+  Return(Box<Self>),
 
-  // class name; parent classes; body
-  Class(Name, Option<Vec<Name>>, Option<Box<Vec<Expression>>>)
+  /// class name; parent classes; body
+  Class(Name, Option<Vec<Name>>, Option<Box<Vec<Self>>>),
 
-  // name; index
-  // Module(Name, )
+  /// parent; child
+  /// 
+  /// top level we don't need option but last child will be empty
+  ObjectIndex(Box<Self>, Option<Box<Self>>),
+
+  /// index; aliases<parent; opt child>[]
+  /// 
+  /// index is list of names in import ["std", "io"]
+  /// 
+  /// aliases is optional list of tuples of names and optional alias
+  /// 
+  /// for modules with no aliases, it will be none
+  /// 
+  /// only `from` imports will have multiple aliases, regular imports can only have one
+  Module(Vec<Name>, Option<Vec<(Name, Option<Name>)>>),
 }
 
 pub struct FutureIter {
@@ -134,7 +149,7 @@ impl FutureIter {
   pub fn next(&mut self) -> Option<Token> {
     let current = self.current.take();
     self.current = self.iter.next();
-    current
+    return current;
   }
 }
 

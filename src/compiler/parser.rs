@@ -89,8 +89,14 @@ impl Parser {
         || [TokenTypes::Newline, TokenTypes::Semicolon].contains(&self.iter.current.as_ref().unwrap().of_type) {
         return self.parse_assignment(Some(&assignment), identifier);
       } else {
-        panic!("Expected \"=\", got {} on line {}.", self.iter.current.as_ref().unwrap().of_type, self.iter.current.as_ref().unwrap().line);
+        panic!("Expected \"=\", got {} on line {}.",
+          self.iter.current.as_ref().unwrap().of_type,
+          self.iter.current.as_ref().unwrap().line
+        );
       }
+
+    } else if init.unwrap().value.as_ref().unwrap() == "import" {
+      return self.parse_module();
 
     } else if init.unwrap().value.as_ref().unwrap() == "fun" {
       self.iter.next();
@@ -165,7 +171,10 @@ impl Parser {
       let operator = self.iter.next().unwrap();
 
       if ![TokenTypes::Identifier, TokenTypes::Number, TokenTypes::LParen].contains(&self.iter.current.as_ref().unwrap().of_type) {
-        panic!("Unexpected token {:?} on line {}.", self.iter.current.as_ref().unwrap().value.as_ref().unwrap(), self.iter.current.as_ref().unwrap().line);
+        panic!("Unexpected token {:?} on line {}.",
+          self.iter.current.as_ref().unwrap().value.as_ref().unwrap(),
+          self.iter.current.as_ref().unwrap().line
+        );
       }
 
       if ["+", "-", "!"].contains(&operator.clone().value.unwrap().as_str()) {
@@ -264,7 +273,10 @@ impl Parser {
       }
 
     } else {
-      panic!("Unexpected token {:?} on line {}.", self.iter.current.as_ref().unwrap().value.as_ref().unwrap(), self.iter.current.as_ref().unwrap().line);
+      panic!("Unexpected token {:?} on line {}.",
+        self.iter.current.as_ref().unwrap().value.as_ref().unwrap(),
+        self.iter.current.as_ref().unwrap().line
+      );
     }
 
   }
@@ -346,7 +358,10 @@ impl Parser {
       } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RBracket {
         break;
       } else {
-        panic!("Expected \",\" or \"]\", got {:?} on line {}.", self.iter.current.as_ref().unwrap().value.as_ref().unwrap(), self.iter.current.as_ref().unwrap().line);
+        panic!("Expected \",\" or \"]\", got {:?} on line {}.",
+          self.iter.current.as_ref().unwrap().value.as_ref().unwrap(),
+          self.iter.current.as_ref().unwrap().line
+        );
       }
     }
 
@@ -433,7 +448,9 @@ impl Parser {
         );
       }
     } else {
-      panic!("Expected \",\" or \"}}\", got {:?} following object definition on line {}.", init.value.as_ref().unwrap(), init.line);
+      panic!("Expected \",\" or \"}}\", got {:?} following object definition on line {}.",
+        init.value.as_ref().unwrap(), init.line
+      );
     }
   }
 
@@ -545,7 +562,10 @@ impl Parser {
             ));
 
           } else {
-            panic!("Expected \")\", \",\" or \":\", got {:?} on line {}.", self.iter.current.as_ref().unwrap().value.as_ref().unwrap(), self.iter.current.as_ref().unwrap().line);
+            panic!("Expected \")\", \",\" or \":\", got {:?} on line {}.",
+              self.iter.current.as_ref().unwrap().value.as_ref().unwrap(),
+              self.iter.current.as_ref().unwrap().line
+            );
           }
         } else {
           panic!("Expected type, \"let\" or \"const\", got {:?} on line {}.", cur.of_type, cur.line);
@@ -695,8 +715,12 @@ impl Parser {
       self.consume(&[TokenTypes::RParen], false);
     }
 
-    if self.iter.current.as_ref().unwrap().of_type != TokenTypes::Operator || self.iter.current.as_ref().unwrap().value.as_ref().unwrap() != "=" {
-      panic!("Expected class assignment, got {:?} on line {}.", self.iter.current.as_ref().unwrap().of_type, self.iter.current.as_ref().unwrap().line);
+    if self.iter.current.as_ref().unwrap().of_type != TokenTypes::Operator
+      || self.iter.current.as_ref().unwrap().value.as_ref().unwrap() != "=" {
+      panic!("Expected class assignment, got {:?} on line {}.",
+        self.iter.current.as_ref().unwrap().of_type,
+        self.iter.current.as_ref().unwrap().line
+      );
     } else {
       self.iter.next();
     }
@@ -723,6 +747,157 @@ impl Parser {
         Name(ident.value.unwrap()),
         None,
         Some(Box::new(body))
+      );
+    }
+  }
+
+  fn parse_import_name_or_alias(&mut self, has_name: Option<Token>) -> (Name, Option<Name>) {
+    let name: Token;
+    if has_name.is_none()  {
+      name = self.consume(&[TokenTypes::Identifier], false);
+    } else {
+      name = has_name.unwrap();
+    }
+
+    // Has alias
+    if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Keyword
+      && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "as" {
+      self.iter.next();
+      let alias = self.consume(&[TokenTypes::Identifier], false);
+      return (Name(name.value.unwrap()), Some(Name(alias.value.unwrap())));
+
+    // No alias
+    } else {
+      return (Name(name.value.unwrap()), None);
+    }
+  }
+
+  fn parse_import_dot_index(&mut self) -> Vec<Token> {
+    let mut names = vec![];
+
+    // Get initial name
+    names.push(self.consume(&[TokenTypes::Identifier], false));
+
+    while self.iter.current.is_some() && ![
+      TokenTypes::LBrace, TokenTypes::Semicolon, TokenTypes::Newline, TokenTypes::Keyword
+    ].contains(&self.iter.current.as_ref().unwrap().of_type) {
+      // Expect "."
+      if self.iter.current.as_ref().unwrap().of_type != TokenTypes::Operator
+        || self.iter.current.as_ref().unwrap().value.as_ref().unwrap() != "." {
+        panic!("Expected \".\", got {:?} on line {:?}",
+          self.iter.current.as_ref().unwrap().of_type,
+          self.iter.current.as_ref().unwrap().line
+        );
+
+      } else {
+        // Get rid of .
+        self.iter.next();
+
+        // If wildcard import
+        if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator
+          && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "*" {
+          names.push(self.iter.next().unwrap());
+          break;
+        }
+
+        // Get name
+        names.push(self.consume(&[TokenTypes::Identifier], false));
+      }
+    }
+
+    return names;
+  }
+
+  // Rules to capture
+  // import module;
+  // import module.abc.def;
+  // import module.abc.*;
+  // import module.abc as xyz;
+  // import from module.abc { def as xyz, ghi as jkl, mno };
+  fn parse_module(&mut self) -> Expression {
+    self.iter.next();
+
+    // No "from"
+    if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Identifier {
+      let index = self.parse_import_dot_index();
+
+      // No index, importing whole module - check for alias and return
+      if index.iter().len() == 1 {
+        let (name, alias) = self.parse_import_name_or_alias(Some(index[0].clone()));
+
+        // No alias
+        if alias.is_none() {
+          return Expression::Module(vec![Name(String::from(index[0].value.as_ref().unwrap()))], None);
+        }
+
+        // Alias
+        return Expression::Module(
+          vec![Name(String::from(index[0].value.as_ref().unwrap()))],
+          Some(vec![(name, alias)])
+        );
+      }
+
+      // Has index //
+
+      // If last name in index has an alias
+      let (name, alias) = self.parse_import_name_or_alias(Some(index[index.iter().len() - 1].clone()));
+
+      // No alias
+      if alias.is_none() {
+        return Expression::Module(
+          index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
+          None
+        );
+      }
+
+      // Alias
+      return Expression::Module(
+        index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
+        Some(vec![(name, alias)])
+      );
+
+    // Has "from"
+    } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Keyword
+      && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "from" {
+      self.iter.next();
+      let index = self.parse_import_dot_index();
+
+      // Expect grouping import
+      self.consume(&[TokenTypes::LBrace], false);
+      self.skip_newlines(Some(1));
+      let mut names = vec![];
+
+      while self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type != TokenTypes::RBrace {
+        let (name, alias) = self.parse_import_name_or_alias(None);
+        names.push((name, alias));
+        self.skip_newlines(Some(1));
+
+        // Expect comma or end of import
+        if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Comma {
+          self.iter.next();
+          self.skip_newlines(Some(1));
+          continue;
+        } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RBrace {
+          break;
+        } else {
+          panic!("Expected \",\" or \"}}\", got {:?} on line {}.",
+            self.iter.current.as_ref().unwrap().value.as_ref().unwrap(),
+            self.iter.current.as_ref().unwrap().line
+          );
+        }
+      }
+      self.consume(&[TokenTypes::RBrace], false);
+
+      return Expression::Module(
+        index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
+        Some(names)
+      );
+
+    // No "from" or identifier
+    } else {
+      panic!("Expected module or \"from\", got {:?} on line {}.",
+        self.iter.current.as_ref().unwrap().value.as_ref().unwrap(),
+        self.iter.current.as_ref().unwrap().line
       );
     }
   }
