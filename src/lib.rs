@@ -1,7 +1,8 @@
 use std::fmt::{ Display, Formatter, Result };
 
-#[derive(strum_macros::Display, Debug, Eq, PartialEq, Clone)]
+#[derive(strum_macros::Display, Debug, Eq, PartialEq, Clone, Default)]
 pub enum TokenTypes {
+  #[default]
   EOF,
   Newline,
   Keyword,
@@ -20,11 +21,15 @@ pub enum TokenTypes {
   Comma
 }
 
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct Token {
   pub of_type: TokenTypes,
   pub value: Option<String>,
-  pub line: i32
+  pub line: i32,
+  /// Start position of token on the line
+  pub start_pos: Option<i32>,
+  /// End position of token on the line
+  pub end_pos: Option<i32>
 }
 
 impl Display for Token {
