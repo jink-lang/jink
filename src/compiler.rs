@@ -12,16 +12,8 @@ pub fn compile(code: String, verbose: bool) {
     }
   }
 
-  let mut lexer = Lexer {
-    code: String::new(),
-    pos: 0,
-    line: 1,
-    line_pos: 0,
-    code_end: 0,
-    tokens: vec![]
-  };
-
-  let lexed = lexer.lex(code);
+  let mut lexer = Lexer::new();
+  let lexed = lexer.lex(code.clone(), false);
   if verbose {
     println!("Tokens:");
     let mut cur = 0;
@@ -50,8 +42,8 @@ pub fn compile(code: String, verbose: bool) {
     }
   }
 
-  let mut parser = Parser::new(lexed);
-  let parsed = parser.parse(verbose);
+  let mut parser = Parser::new();
+  let parsed = parser.parse(code.clone(), verbose);
   println!("AST:");
   println!("{:?}", parsed);
 }

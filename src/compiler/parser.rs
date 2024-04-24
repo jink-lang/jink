@@ -9,9 +9,10 @@ use jink::Literals;
 use jink::Expression;
 use jink::Type;
 
-use crate::compiler::lexer::Lexer;
+use super::lexer::Lexer;
 
 pub struct Parser {
+  pub code: String,
   pub iter: FutureIter,
   // pub pos: usize,
   // pub tok_end: usize,
@@ -19,33 +20,23 @@ pub struct Parser {
 }
 
 impl Parser {
-  pub fn new(tokens: Vec<Token>) -> Self {
-    let iterator = FutureIter::new(tokens);
+  pub fn new() -> Self {
     Parser {
-      iter: iterator,
+      code: String::new(),
+      iter: FutureIter::new(vec![]),
       // pos: 0,
       // tok_end: iterator.input.len(),
       ast: Vec::new(),
     }
   }
 
-  // Removes expected token, given a type or a multiple types
-  fn consume(&mut self, tokens: &[TokenTypes], soft: bool) -> Token {
-    let current = self.iter.next().unwrap();
-
-    // Soft consume doesn't error if the token isn't found
-    if soft { return current; }
-
-    if !tokens.contains(&current.of_type) {
-      let formatted = tokens.iter().map(|t| format!("{:?}", t)).collect::<Vec<String>>().join(" or ");
-      panic!("Expected {}, got {} on line {}.", formatted, current.clone().of_type, current.line);
-    }
-
-    current
-  }
-
   // Build AST
-  pub fn parse(&mut self, _verbose: bool) -> Vec<Expression> {
+  pub fn parse(&mut self, code: String, _verbose: bool) -> Vec<Expression> {
+    let tokens = Lexer::new().lex(code.clone(), false);
+    let iterator = FutureIter::new(tokens);
+    self.code = code;
+    self.iter = iterator;
+
     let mut ast: Vec<Expression> = Vec::new();
     while self.iter.current.is_some() {
       self.skip_newlines(None);
@@ -62,7 +53,22 @@ impl Parser {
       ast.push(parsed);
     }
 
-    ast
+    return ast;
+  }
+
+  // Removes expected token, given a type or a multiple types
+  fn consume(&mut self, tokens: &[TokenTypes], soft: bool) -> Token {
+    let current = self.iter.next().unwrap();
+
+    // Soft consume doesn't error if the token isn't found
+    if soft { return current; }
+
+    if !tokens.contains(&current.of_type) {
+      let formatted = tokens.iter().map(|t| format!("{:?}", t)).collect::<Vec<String>>().join(" or ");
+      panic!("Expected {}, got {} on line {}.", formatted, current.clone().of_type, current.line);
+    }
+
+    return current;
   }
 
   // Skip all newlines or a specific amount
@@ -911,22 +917,9 @@ mod tests {
 
   #[test]
   fn test_parse_assignments() {
-    let mut lexer = Lexer {
-      code: String::new(),
-      pos: 0,
-      line: 1,
-      line_pos: 0,
-      code_end: 0,
-      tokens: vec![]
-    };
-
-    let tokens = lexer.lex(
-      "let a = 1;
-      const name = \"Jink\"
-      type Number = int;".to_string()
-    );
-    let mut parser = Parser::new(tokens);
-    let ast = parser.parse(false);
+    let ast = Parser::new().parse("let a = 1;
+    const name = \"Jink\"
+    type Number = int;".to_string(), false);
     assert_eq!(ast, vec![
       Expression::Assignment(
         Some(Type(String::from("let"))),
@@ -948,22 +941,11 @@ mod tests {
 
   #[test]
   fn test_parse_conditional() {
-    let mut lexer = Lexer {
-      code: String::new(),
-      pos: 0,
-      line: 1,
-      line_pos: 0,
-      code_end: 0,
-      tokens: vec![]
-    };
-
-    let tokens = lexer.lex("if (a == 1) {
+    let ast = Parser::new().parse("if (a == 1) {
       return a;
     } else {
       return b;
-    }".to_string());
-    let mut parser = Parser::new(tokens);
-    let ast = parser.parse(false);
+    }".to_string(), false);
     assert_eq!(ast[0], Expression::Conditional(
       Type(String::from("if")),
       Some(Box::new(Expression::BinaryOperator(
@@ -989,18 +971,7 @@ mod tests {
 
   #[test]
   fn test_parse_function_call() {
-    let mut lexer = Lexer {
-      code: String::new(),
-      pos: 0,
-      line: 1,
-      line_pos: 0,
-      code_end: 0,
-      tokens: vec![]
-    };
-
-    let tokens = lexer.lex("print(\"Hello, world!\");".to_string());
-    let mut parser = Parser::new(tokens);
-    let ast = parser.parse(false);
+    let ast = Parser::new().parse("print(\"Hello, world!\");".to_string(), false);
     assert_eq!(ast[0], Expression::Call(
       Name(String::from("print")),
       Box::new(vec![Expression::Literal(Literals::String(String::from("Hello, world!")))])
@@ -1009,20 +980,9 @@ mod tests {
 
   #[test]
   fn test_parse_function_def() {
-    let mut lexer = Lexer {
-      code: String::new(),
-      pos: 0,
-      line: 1,
-      line_pos: 0,
-      code_end: 0,
-      tokens: vec![]
-    };
-
-    let tokens = lexer.lex("fun add(let a, let b) {
+    let ast = Parser::new().parse("fun add(let a, let b) {
       return a + b;
-    }".to_string());
-    let mut parser = Parser::new(tokens);
-    let ast = parser.parse(false);
+    }".to_string(), false);
     assert_eq!(ast[0], Expression::Function(
       Name(String::from("add")),
       None,
@@ -1050,18 +1010,7 @@ mod tests {
 
   #[test]
   fn test_parse_function_def_inline() {
-    let mut lexer = Lexer {
-      code: String::new(),
-      pos: 0,
-      line: 1,
-      line_pos: 0,
-      code_end: 0,
-      tokens: vec![]
-    };
-
-    let tokens = lexer.lex("fun sub(let a, let b) return a - b;".to_string());
-    let mut parser = Parser::new(tokens);
-    let ast = parser.parse(false);
+    let ast = Parser::new().parse("fun sub(let a, let b) return a - b;".to_string(), false);
     assert_eq!(ast[0], Expression::Function(
       Name(String::from("sub")),
       None,
@@ -1089,20 +1038,9 @@ mod tests {
 
   #[test]
   fn test_parse_function_with_defaults() {
-    let mut lexer = Lexer {
-      code: String::new(),
-      pos: 0,
-      line: 1,
-      line_pos: 0,
-      code_end: 0,
-      tokens: vec![]
-    };
-
-    let tokens = lexer.lex("fun pow(let a: 1, let b: 2, let c: 3) {
+    let ast = Parser::new().parse("fun pow(let a: 1, let b: 2, let c: 3) {
       return a ^ b ^ c;
-    }".to_string());
-    let mut parser = Parser::new(tokens);
-    let ast = parser.parse(false);
+    }".to_string(), false);
     assert_eq!(ast[0], Expression::Function(
       Name(String::from("pow")),
       None,
@@ -1139,21 +1077,9 @@ mod tests {
 
   #[test]
   fn test_parse_function_def_with_return_type() {
-    let mut lexer = Lexer {
-      code: String::new(),
-      pos: 0,
-      line: 1,
-      line_pos: 0,
-      code_end: 0,
-      tokens: vec![]
-    };
-
-    let tokens = lexer.lex("fun add(int a, int b) -> int {
+    let ast = Parser::new().parse("fun add(int a, int b) -> int {
       return a + b;
-    }".to_string());
-    let mut parser = Parser::new(tokens);
-    let ast = parser.parse(false);
-
+    }".to_string(), false);
     assert_eq!(ast[0], Expression::Function(
       Name(String::from("add")),
       Some(Literals::Identifier(Name(String::from("int")), None)),
@@ -1181,22 +1107,10 @@ mod tests {
 
   #[test]
   fn test_parse_function_def_with_inline_conditional() {
-    let mut lexer = Lexer {
-      code: String::new(),
-      pos: 0,
-      line: 1,
-      line_pos: 0,
-      code_end: 0,
-      tokens: vec![]
-    };
-
-    let tokens = lexer.lex("fun are_even(int a, int b) -> int {
+    let ast = Parser::new().parse("fun are_even(int a, int b) -> int {
       if (a % 2 == 0 && b % 2 == 0) return true
       else return false
-    }".to_string());
-
-    let mut parser = Parser::new(tokens);
-    let ast = parser.parse(false);
+    }".to_string(), false);
     assert_eq!(ast[0], Expression::Function(
       Name(String::from("are_even")),
       Some(Literals::Identifier(Name(String::from("int")), None)),
