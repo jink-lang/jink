@@ -319,7 +319,7 @@ mod tests {
   }
 
   #[test]
-  fn test_lex_function() {
+  fn test_lex_assignments() {
     let mut lexer = Lexer {
       code: String::new(),
       pos: 0,
@@ -329,22 +329,296 @@ mod tests {
       tokens: vec![]
     };
 
-    assert_eq!(lexer.lex("fun add(a, b) { return a + b; }".to_string()), vec![
-      Token { of_type: TokenTypes::Keyword, value: Some("fun".to_string()), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some("add".to_string()), line: 1 },
-      Token { of_type: TokenTypes::LParen, value: Some("(".to_string()), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some("a".to_string()), line: 1 },
-      Token { of_type: TokenTypes::Comma, value: Some(",".to_string()), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some("b".to_string()), line: 1 },
-      Token { of_type: TokenTypes::RParen, value: Some(")".to_string()), line: 1 },
-      Token { of_type: TokenTypes::LBrace, value: Some("{".to_string()), line: 1 },
-      Token { of_type: TokenTypes::Keyword, value: Some("return".to_string()), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some("a".to_string()), line: 1 },
-      Token { of_type: TokenTypes::Operator, value: Some("+".to_string()), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some("b".to_string()), line: 1 },
-      Token { of_type: TokenTypes::Semicolon, value: Some(";".to_string()), line: 1 },
-      Token { of_type: TokenTypes::RBrace, value: Some("}".to_string()), line: 1 },
+    assert_eq!(lexer.lex("let a = 1;
+    const name = \"Jink\"
+    type Number = int;".to_string()), vec![
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("=")), line: 1 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("1")), line: 1 },
+      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 1 },
+
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("const")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("name")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("=")), line: 2 },
+      Token { of_type: TokenTypes::String, value: Some(String::from("Jink")), line: 2 },
+
+      // Type alias
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 3 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("type")), line: 3 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("Number")), line: 3 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("=")), line: 3 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 3 },
+      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 3 },
+      Token { of_type: TokenTypes::EOF, value: None, line: 3 }
+    ]);
+  }
+
+  #[test]
+  fn test_lex_conditional() {
+    let mut lexer = Lexer {
+      code: String::new(),
+      pos: 0,
+      line: 1,
+      line_pos: 0,
+      code_end: 0,
+      tokens: vec![]
+    };
+
+    assert_eq!(lexer.lex("if (a == 1) {
+      return a;
+    } else {
+      return b;
+    }".to_string()), vec![
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("if")), line: 1 },
+      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("==")), line: 1 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("1")), line: 1 },
+      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
+      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 1 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 2 },
+      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 2 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 3 },
+      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 3 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("else")), line: 3 },
+      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 3 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 4 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 4 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 4 },
+      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 4 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 5 },
+      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 5 },
+      Token { of_type: TokenTypes::EOF, value: None, line: 5 }
+    ]);
+  }
+
+  #[test]
+  fn test_lex_function_call() {
+    let mut lexer = Lexer {
+      code: String::new(),
+      pos: 0,
+      line: 1,
+      line_pos: 0,
+      code_end: 0,
+      tokens: vec![]
+    };
+
+    assert_eq!(lexer.lex("print(\"Hello, world!\")".to_string()), vec![
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("print")), line: 1 },
+      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
+      Token { of_type: TokenTypes::String, value: Some(String::from("Hello, world!")), line: 1 },
+      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
       Token { of_type: TokenTypes::EOF, value: None, line: 1 }
+    ]);
+  }
+
+  #[test]
+  fn test_lex_function_def() {
+    let mut lexer = Lexer {
+      code: String::new(),
+      pos: 0,
+      line: 1,
+      line_pos: 0,
+      code_end: 0,
+      tokens: vec![]
+    };
+
+    assert_eq!(lexer.lex("fun add(let a, let b) {
+      return a + b;
+    }".to_string()), vec![
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("fun")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("add")), line: 1 },
+      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
+      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
+      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
+      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 1 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("+")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 2 },
+      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 2 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 3 },
+      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 3 },
+      Token { of_type: TokenTypes::EOF, value: None, line: 3 }
+    ]);
+  }
+
+  #[test]
+  fn test_lex_function_def_inline() {
+    let mut lexer = Lexer {
+      code: String::new(),
+      pos: 0,
+      line: 1,
+      line_pos: 0,
+      code_end: 0,
+      tokens: vec![]
+    };
+
+    assert_eq!(lexer.lex("fun sub(let a, let b) return a - b;".to_string()), vec![
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("fun")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("sub")), line: 1 },
+      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
+      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
+      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("-")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
+      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 1 },
+      Token { of_type: TokenTypes::EOF, value: None, line: 1 }
+    ]);
+  }
+
+  #[test]
+  fn test_lex_function_with_defaults() {
+    let mut lexer = Lexer {
+      code: String::new(),
+      pos: 0,
+      line: 1,
+      line_pos: 0,
+      code_end: 0,
+      tokens: vec![]
+    };
+
+    assert_eq!(lexer.lex("fun pow(let a: 1, let b: 2, let c: 3) {
+      return a ^ b ^ c;
+    }".to_string()), vec![
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("fun")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("pow")), line: 1 },
+      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
+      Token { of_type: TokenTypes::Colon, value: Some(String::from(":")), line: 1 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("1")), line: 1 },
+      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
+      Token { of_type: TokenTypes::Colon, value: Some(String::from(":")), line: 1 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("2")), line: 1 },
+      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("c")), line: 1 },
+      Token { of_type: TokenTypes::Colon, value: Some(String::from(":")), line: 1 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("3")), line: 1 },
+      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
+      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 1 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("^")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("^")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("c")), line: 2 },
+      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 2 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 3 },
+      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 3 },
+      Token { of_type: TokenTypes::EOF, value: None, line: 3 }
+    ]);
+  }
+
+
+  #[test]
+  fn test_lex_function_with_return_type() {
+    let mut lexer = Lexer {
+      code: String::new(),
+      pos: 0,
+      line: 1,
+      line_pos: 0,
+      code_end: 0,
+      tokens: vec![]
+    };
+
+    assert_eq!(lexer.lex("fun add(int a, int b) -> int {
+      return a + b;
+    }".to_string()), vec![
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("fun")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("add")), line: 1 },
+      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
+      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
+      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("->")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
+      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 1 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("+")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 2 },
+      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 2 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 3 },
+      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 3 },
+      Token { of_type: TokenTypes::EOF, value: None, line: 3 }
+    ]);
+  }
+
+  #[test]
+  fn test_lex_function_with_inline_conditional() {
+    let mut lexer = Lexer {
+      code: String::new(),
+      pos: 0,
+      line: 1,
+      line_pos: 0,
+      code_end: 0,
+      tokens: vec![]
+    };
+
+    assert_eq!(lexer.lex("fun are_even(int a, int b) -> int {
+      if (a % 2 == 0 && b % 2 == 0) return true
+      else return false
+    }".to_string()), vec![
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("fun")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("are_even")), line: 1 },
+      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
+      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
+      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("->")), line: 1 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
+      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 1 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("if")), line: 2 },
+      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("%")), line: 2 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("2")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("==")), line: 2 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("0")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("&&")), line: 2 },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("%")), line: 2 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("2")), line: 2 },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("==")), line: 2 },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("0")), line: 2 },
+      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 2 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 2 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("true")), line: 2 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 3 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("else")), line: 3 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 3 },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("false")), line: 3 },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 4 },
+      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 4 },
+      Token { of_type: TokenTypes::EOF, value: None, line: 4 }
     ]);
   }  
 }
