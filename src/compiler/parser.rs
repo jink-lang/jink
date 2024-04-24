@@ -9,6 +9,8 @@ use jink::Literals;
 use jink::Expression;
 use jink::Type;
 
+use crate::compiler::lexer::Lexer;
+
 pub struct Parser {
   pub iter: FutureIter,
   // pub pos: usize,
@@ -909,63 +911,57 @@ mod tests {
 
   #[test]
   fn test_parse_assignments() {
-    let tokens = vec![
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("=")), line: 1 },
-      Token { of_type: TokenTypes::Number, value: Some(String::from("1")), line: 1 },
-      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 1 },
-      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 1 },
+    let mut lexer = Lexer {
+      code: String::new(),
+      pos: 0,
+      line: 1,
+      line_pos: 0,
+      code_end: 0,
+      tokens: vec![]
+    };
 
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("const")), line: 2 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("name")), line: 2 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("=")), line: 2 },
-      Token { of_type: TokenTypes::String, value: Some(String::from("\"Jink\"")), line: 2 },
-      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
-
-      // Type alias
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("type")), line: 3 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("Number")), line: 3 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("=")), line: 3 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 3 },
-      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 3 },
-      Token { of_type: TokenTypes::EOF, value: None, line: 3 }
-    ];
+    let tokens = lexer.lex(
+      "let a = 1;
+      const name = \"Jink\"
+      type Number = int;".to_string()
+    );
     let mut parser = Parser::new(tokens);
     let ast = parser.parse(false);
-    assert_eq!(ast[0], Expression::Assignment(
-      Some(Type(String::from("let"))),
-      Box::new(Literals::Identifier(Name(String::from("a")), None)),
-      Some(Box::new(Expression::Literal(Literals::Integer(1)))
-    )));
+    assert_eq!(ast, vec![
+      Expression::Assignment(
+        Some(Type(String::from("let"))),
+        Box::new(Literals::Identifier(Name(String::from("a")), None)),
+        Some(Box::new(Expression::Literal(Literals::Integer(1)))
+      )),
+      Expression::Assignment(
+        Some(Type(String::from("const"))),
+        Box::new(Literals::Identifier(Name(String::from("name")), None)),
+        Some(Box::new(Expression::Literal(Literals::String(String::from("Jink"))))
+      )),
+      Expression::TypeDef(
+        Literals::Identifier(Name(String::from("Number")), None),
+        Box::new(Literals::Identifier(Name(String::from("int")), None))
+      ),
+      Expression::Literal(Literals::EOF)
+    ]);
   }
 
   #[test]
   fn test_parse_conditional() {
-    let tokens = vec![
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("if")), line: 1 },
-      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("==")), line: 1 },
-      Token { of_type: TokenTypes::Number, value: Some(String::from("1")), line: 1 },
-      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
-      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 1 },
-      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 1 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 2 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 2 },
-      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 2 },
-      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
-      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 3 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("else")), line: 3 },
-      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 3 },
-      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 3 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 4 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 4 },
-      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 4 },
-      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 4 },
-      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 5 },
-      Token { of_type: TokenTypes::EOF, value: None, line: 5 }
-    ];
+    let mut lexer = Lexer {
+      code: String::new(),
+      pos: 0,
+      line: 1,
+      line_pos: 0,
+      code_end: 0,
+      tokens: vec![]
+    };
+
+    let tokens = lexer.lex("if (a == 1) {
+      return a;
+    } else {
+      return b;
+    }".to_string());
     let mut parser = Parser::new(tokens);
     let ast = parser.parse(false);
     assert_eq!(ast[0], Expression::Conditional(
@@ -993,44 +989,38 @@ mod tests {
 
   #[test]
   fn test_parse_function_call() {
-    let tokens = vec![
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("print")), line: 1 },
-      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
-      Token { of_type: TokenTypes::String, value: Some(String::from("\"Hello, world!\"")), line: 1 },
-      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
-      Token { of_type: TokenTypes::EOF, value: None, line: 1 }
-    ];
+    let mut lexer = Lexer {
+      code: String::new(),
+      pos: 0,
+      line: 1,
+      line_pos: 0,
+      code_end: 0,
+      tokens: vec![]
+    };
+
+    let tokens = lexer.lex("print(\"Hello, world!\");".to_string());
     let mut parser = Parser::new(tokens);
     let ast = parser.parse(false);
     assert_eq!(ast[0], Expression::Call(
       Name(String::from("print")),
-      Box::new(vec![Expression::Literal(Literals::String(String::from("\"Hello, world!\"")))])
+      Box::new(vec![Expression::Literal(Literals::String(String::from("Hello, world!")))])
     ));
   }
 
   #[test]
   fn test_parse_function_def() {
-    let tokens = vec![
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("fun")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("add")), line: 1 },
-      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
-      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
-      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
-      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 1 },
-      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 1 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 2 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 2 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("+")), line: 2 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 2 },
-      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 2 },
-      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
-      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 3 },
-      Token { of_type: TokenTypes::EOF, value: None, line: 3 }
-    ];
+    let mut lexer = Lexer {
+      code: String::new(),
+      pos: 0,
+      line: 1,
+      line_pos: 0,
+      code_end: 0,
+      tokens: vec![]
+    };
+
+    let tokens = lexer.lex("fun add(let a, let b) {
+      return a + b;
+    }".to_string());
     let mut parser = Parser::new(tokens);
     let ast = parser.parse(false);
     assert_eq!(ast[0], Expression::Function(
@@ -1060,23 +1050,16 @@ mod tests {
 
   #[test]
   fn test_parse_function_def_inline() {
-    let tokens = vec![
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("fun")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("sub")), line: 1 },
-      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
-      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
-      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("-")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
-      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 1 },
-      Token { of_type: TokenTypes::EOF, value: None, line: 1 }
-    ];
+    let mut lexer = Lexer {
+      code: String::new(),
+      pos: 0,
+      line: 1,
+      line_pos: 0,
+      code_end: 0,
+      tokens: vec![]
+    };
+
+    let tokens = lexer.lex("fun sub(let a, let b) return a - b;".to_string());
     let mut parser = Parser::new(tokens);
     let ast = parser.parse(false);
     assert_eq!(ast[0], Expression::Function(
@@ -1106,38 +1089,18 @@ mod tests {
 
   #[test]
   fn test_parse_function_with_defaults() {
-    let tokens = vec![
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("fun")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("pow")), line: 1 },
-      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
-      Token { of_type: TokenTypes::Colon, value: Some(String::from(":")), line: 1 },
-      Token { of_type: TokenTypes::Number, value: Some(String::from("1")), line: 1 },
-      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
-      Token { of_type: TokenTypes::Colon, value: Some(String::from(":")), line: 1 },
-      Token { of_type: TokenTypes::Number, value: Some(String::from("2")), line: 1 },
-      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("c")), line: 1 },
-      Token { of_type: TokenTypes::Colon, value: Some(String::from(":")), line: 1 },
-      Token { of_type: TokenTypes::Number, value: Some(String::from("3")), line: 1 },
-      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
-      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 1 },
-      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 1 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 2 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 2 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("^")), line: 2 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 2 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("^")), line: 2 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("c")), line: 2 },
-      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 2 },
-      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
-      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 3 },
-      Token { of_type: TokenTypes::EOF, value: None, line: 3 }
-    ];
+    let mut lexer = Lexer {
+      code: String::new(),
+      pos: 0,
+      line: 1,
+      line_pos: 0,
+      code_end: 0,
+      tokens: vec![]
+    };
+
+    let tokens = lexer.lex("fun pow(let a: 1, let b: 2, let c: 3) {
+      return a ^ b ^ c;
+    }".to_string());
     let mut parser = Parser::new(tokens);
     let ast = parser.parse(false);
     assert_eq!(ast[0], Expression::Function(
@@ -1176,29 +1139,18 @@ mod tests {
 
   #[test]
   fn test_parse_function_def_with_return_type() {
-    let tokens = vec![
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("fun")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("add")), line: 1 },
-      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
-      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
-      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("->")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
-      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 1 },
-      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 1 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 2 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 2 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("+")), line: 2 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 2 },
-      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 2 },
-      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
-      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 3 },
-      Token { of_type: TokenTypes::EOF, value: None, line: 3 }
-    ];
+    let mut lexer = Lexer {
+      code: String::new(),
+      pos: 0,
+      line: 1,
+      line_pos: 0,
+      code_end: 0,
+      tokens: vec![]
+    };
+
+    let tokens = lexer.lex("fun add(int a, int b) -> int {
+      return a + b;
+    }".to_string());
     let mut parser = Parser::new(tokens);
     let ast = parser.parse(false);
 
@@ -1229,44 +1181,20 @@ mod tests {
 
   #[test]
   fn test_parse_function_def_with_inline_conditional() {
-    let tokens = vec![
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("fun")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("are_even")), line: 1 },
-      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1 },
-      Token { of_type: TokenTypes::Comma, value: Some(String::from(",")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 1 },
-      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 1 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("->")), line: 1 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("int")), line: 1 },
-      Token { of_type: TokenTypes::LBrace, value: Some(String::from("{")), line: 1 },
-      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 1 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("if")), line: 2 },
-      Token { of_type: TokenTypes::LParen, value: Some(String::from("(")), line: 2 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 2 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("%")), line: 2 },
-      Token { of_type: TokenTypes::Number, value: Some(String::from("2")), line: 2 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("==")), line: 2 },
-      Token { of_type: TokenTypes::Number, value: Some(String::from("0")), line: 2 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("&&")), line: 2 },
-      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 2 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("%")), line: 2 },
-      Token { of_type: TokenTypes::Number, value: Some(String::from("2")), line: 2 },
-      Token { of_type: TokenTypes::Operator, value: Some(String::from("==")), line: 2 },
-      Token { of_type: TokenTypes::Number, value: Some(String::from("0")), line: 2 },
-      Token { of_type: TokenTypes::RParen, value: Some(String::from(")")), line: 2 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 2 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("true")), line: 2 },
-      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("else")), line: 3 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("return")), line: 3 },
-      Token { of_type: TokenTypes::Keyword, value: Some(String::from("false")), line: 3 },
-      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 3 },
-      Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 4 },
-      Token { of_type: TokenTypes::EOF, value: None, line: 4 }
-    ];
+    let mut lexer = Lexer {
+      code: String::new(),
+      pos: 0,
+      line: 1,
+      line_pos: 0,
+      code_end: 0,
+      tokens: vec![]
+    };
+
+    let tokens = lexer.lex("fun are_even(int a, int b) -> int {
+      if (a % 2 == 0 && b % 2 == 0) return true
+      else return false
+    }".to_string());
+
     let mut parser = Parser::new(tokens);
     let ast = parser.parse(false);
     assert_eq!(ast[0], Expression::Function(
