@@ -163,3 +163,81 @@ impl std::fmt::Display for FutureIter {
     write!(f, "{:?}", self.input)
   }
 }
+
+#[derive(Debug)]
+pub struct ErrorCtx {
+  pub token: Option<Token>,
+  pub line: String,
+  pub start_pos: Option<i32>,
+  pub end_pos: Option<i32>,
+  pub message: String
+}
+
+#[derive(Debug)]
+pub enum Error {
+  UnexpectedToken(ErrorCtx),
+  UnexpectedEOF(ErrorCtx),
+  EmptyFunctionBody(ErrorCtx),
+}
+
+impl Error {
+  pub fn new(err: fn(ErrorCtx) -> Error, token: Option<Token>, line: &str, start_pos: Option<i32>, end_pos: Option<i32>, message: String) -> Error {
+    return err(ErrorCtx {
+      token,
+      line: line.to_string(),
+      start_pos,
+      end_pos,
+      message: message.to_string()
+    });
+  }
+}
+
+// Original error format here temporarily
+// panic!("Unexpected token {:?} at {}:{}\n  {}\n  {}", init.unwrap().of_type,
+//   init.unwrap().line, init.unwrap().start_pos.unwrap() + 1,
+//   self.code.lines().nth((init.unwrap().line - 1) as usize).unwrap(),
+//   " ".repeat((init.unwrap().start_pos.unwrap()) as usize) + "^"
+// );
+
+impl std::fmt::Display for Error {
+  fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    match self {
+      Error::UnexpectedToken(err) => {
+        let spaces;
+        if err.token.as_ref().unwrap().start_pos.unwrap() > 0 {
+          spaces = " ".repeat(err.token.as_ref().unwrap().start_pos.unwrap() as usize);
+        } else {
+          spaces = "".to_string();
+        }
+
+        let underline;
+        if err.token.as_ref().unwrap().end_pos.unwrap() - err.token.as_ref().unwrap().start_pos.unwrap() > 1 {
+          underline = "-".repeat((err.token.as_ref().unwrap().end_pos.unwrap() - err.token.as_ref().unwrap().start_pos.unwrap()) as usize);
+        } else {
+          underline = "-".to_string();
+        }
+
+        return write!(f, "{} {:?} at {}:{}\n  {}\n  {}\n  {}", err.message, err.token.as_ref().unwrap().of_type,
+          err.token.as_ref().unwrap().line, err.token.as_ref().unwrap().start_pos.unwrap() + 1,
+          err.line,
+          spaces.to_string() + underline.as_str(),
+          spaces + "^",
+        );
+      },
+      Error::UnexpectedEOF(err) => {
+        return write!(f, "Unexpected EOF at {}:{}\n  {}\n  {}", err.line, err.start_pos.unwrap() + 1,
+          " ".repeat((err.start_pos.unwrap()) as usize) + "^",
+          err.message
+        );
+      },
+      Error::EmptyFunctionBody(err) => {
+        let underline = "-".repeat(err.line.split("\n").collect::<Vec<&str>>()[0].len());
+        return write!(f, "Empty function body at {}:{}\n  {}\n  {}\n  {}", err.token.as_ref().unwrap().line,
+          err.start_pos.unwrap() + 1, err.line,
+          underline,
+          " ".repeat((err.start_pos.unwrap()) as usize) + "^"
+        );
+      }
+    }
+  }
+}
