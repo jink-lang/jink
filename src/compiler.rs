@@ -44,6 +44,11 @@ pub fn compile(code: String, verbose: bool) {
 
   let mut parser = Parser::new();
   let parsed = parser.parse(code.clone(), verbose);
+  if let Err(err) = parsed {
+    println!("{}", err);
+    return;
+  }
+
   println!("AST:");
-  println!("{:?}", parsed);
+  println!("{:?}", parsed.unwrap());
 }

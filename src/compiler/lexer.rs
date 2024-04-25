@@ -78,7 +78,7 @@ impl Lexer {
         if char.unwrap() == &'\n' {
           self.line += 1;
           self.line_pos = 0;
-          self.add_token(TokenTypes::Newline, Some("\n".to_string()), self.line, Some(self.pos), Some(self.pos));
+          self.add_token(TokenTypes::Newline, Some("\n".to_string()), self.line, Some(self.line_pos), Some(self.line_pos));
         }
         continue;
       }
@@ -102,23 +102,23 @@ impl Lexer {
 
       } else {
         match char.unwrap() {
-          '(' => { self.add_token(TokenTypes::LParen, Some(char.unwrap().to_string()), self.line, Some(self.pos), Some(self.pos)); },
-          ')' => { self.add_token(TokenTypes::RParen, Some(char.unwrap().to_string()), self.line, Some(self.pos), Some(self.pos)); },
-          '[' => { self.add_token(TokenTypes::LBracket, Some(char.unwrap().to_string()), self.line, Some(self.pos), Some(self.pos)); },
-          ']' => { self.add_token(TokenTypes::RBracket, Some(char.unwrap().to_string()), self.line, Some(self.pos), Some(self.pos)); },
-          '{' => { self.add_token(TokenTypes::LBrace, Some(char.unwrap().to_string()), self.line, Some(self.pos), Some(self.pos)); },
-          '}' => { self.add_token(TokenTypes::RBrace, Some(char.unwrap().to_string()), self.line, Some(self.pos), Some(self.pos)); },
-          ';' => { self.add_token(TokenTypes::Semicolon, Some(char.unwrap().to_string()), self.line, Some(self.pos), Some(self.pos)); },
-          ':' => { self.add_token(TokenTypes::Colon, Some(char.unwrap().to_string()), self.line, Some(self.pos), Some(self.pos)); },
-          ',' => { self.add_token(TokenTypes::Comma, Some(char.unwrap().to_string()), self.line, Some(self.pos), Some(self.pos)); },
+          '(' => { self.add_token(TokenTypes::LParen, Some(char.unwrap().to_string()), self.line, Some(self.line_pos - 1), Some(self.line_pos - 1)); },
+          ')' => { self.add_token(TokenTypes::RParen, Some(char.unwrap().to_string()), self.line, Some(self.line_pos - 1), Some(self.line_pos - 1)); },
+          '[' => { self.add_token(TokenTypes::LBracket, Some(char.unwrap().to_string()), self.line, Some(self.line_pos - 1), Some(self.line_pos - 1)); },
+          ']' => { self.add_token(TokenTypes::RBracket, Some(char.unwrap().to_string()), self.line, Some(self.line_pos - 1), Some(self.line_pos - 1)); },
+          '{' => { self.add_token(TokenTypes::LBrace, Some(char.unwrap().to_string()), self.line, Some(self.line_pos - 1), Some(self.line_pos - 1)); },
+          '}' => { self.add_token(TokenTypes::RBrace, Some(char.unwrap().to_string()), self.line, Some(self.line_pos - 1), Some(self.line_pos - 1)); },
+          ';' => { self.add_token(TokenTypes::Semicolon, Some(char.unwrap().to_string()), self.line, Some(self.line_pos - 1), Some(self.line_pos - 1)); },
+          ':' => { self.add_token(TokenTypes::Colon, Some(char.unwrap().to_string()), self.line, Some(self.line_pos - 1), Some(self.line_pos - 1)); },
+          ',' => { self.add_token(TokenTypes::Comma, Some(char.unwrap().to_string()), self.line, Some(self.line_pos - 1), Some(self.line_pos - 1)); },
           '\'' | '"' => self.parse_string(iter, char.unwrap()),
-          _ => self.add_token(TokenTypes::EOF, None, self.line, None, None)
+          _ => self.add_token(TokenTypes::EOF, None, self.line, Some(self.line_pos), Some(self.line_pos))
         };
       }
     }
 
-    if self.tokens.last().unwrap().of_type != TokenTypes::EOF {
-      self.add_token(TokenTypes::EOF, None, self.line, None, None);
+    if self.tokens.last().is_none() || self.tokens.last().unwrap().of_type != TokenTypes::EOF {
+      self.add_token(TokenTypes::EOF, None, self.line, Some(self.line_pos), Some(self.line_pos));
     }
 
     return self.tokens.clone();
@@ -126,30 +126,20 @@ impl Lexer {
 
   fn parse_identifier(&mut self, iter: &mut Peekable<Iter<char>>, init: &char) {
     // Prep string to hold identifier
-    let mut identifier = String::new();
+    let mut identifier: String = init.to_string();
   
-    // Hold current char
-    let mut char: Option<&char> = Some(init);
-
-    while iter.peek().is_some() && (char.unwrap().is_alphabetic() || *char.unwrap() == '_') {
-      // Add char to identifier
-      identifier.push(*char.unwrap());
-
-      // Check next character
-      if iter.peek().is_some() && (iter.peek().unwrap().is_alphabetic() || *iter.peek().unwrap() == &'_') {
-        char = iter.next();
-        self.pos += 1;
-        self.line_pos += 1;
-      } else {
-        break;
-      }
+    // Build identifier
+    while iter.peek().is_some() && (iter.peek().unwrap().is_alphabetic() || iter.peek().unwrap() == &&'_') {
+      identifier.push(*iter.next().unwrap());
+      self.pos += 1;
+      self.line_pos += 1;
     }
 
     // If identifier is a keyword
     if KEYWORDS.contains(&&*identifier) {
-      self.add_token(TokenTypes::Keyword, Some(identifier.clone()), self.line, Some(self.pos - identifier.len() as i32), Some(self.pos));
+      self.add_token(TokenTypes::Keyword, Some(identifier.clone()), self.line, Some(self.line_pos - identifier.len() as i32), Some(self.line_pos));
     } else {
-      self.add_token(TokenTypes::Identifier, Some(identifier.clone()), self.line, Some(self.pos - identifier.len() as i32), Some(self.pos));
+      self.add_token(TokenTypes::Identifier, Some(identifier.clone()), self.line, Some(self.line_pos - identifier.len() as i32), Some(self.line_pos));
     }
   }
 
@@ -219,7 +209,7 @@ impl Lexer {
       );
     }
 
-    self.add_token(TokenTypes::Operator, Some(operator.clone()), self.line, Some(self.pos - operator.len() as i32), Some(self.pos));
+    self.add_token(TokenTypes::Operator, Some(operator.clone()), self.line, Some(start - 1), Some(self.line_pos));
   }
 
   fn parse_string(&mut self, iter: &mut Peekable<Iter<char>>, char: &char) {
@@ -246,7 +236,6 @@ impl Lexer {
 
         // Handle case of newlines
         if ['\n', 'n'].contains(escaped.unwrap()) {
-          println!("Making sure newlines escape correctly in strings.");
           string.push('\n');
           self.line += 1;
           self.line_pos = 0;
@@ -275,7 +264,7 @@ impl Lexer {
       );
     }
 
-    self.add_token(TokenTypes::String, Some(string.clone()), self.line, Some(self.pos - string.len() as i32), Some(self.pos));
+    self.add_token(TokenTypes::String, Some(string.clone()), self.line, Some(self.line_pos - string.len() as i32), Some(self.line_pos));
   }
 
   fn parse_number(&mut self, iter: &mut Peekable<Iter<char>>, init: &char) {
@@ -296,7 +285,7 @@ impl Lexer {
       );
     }
 
-    self.add_token(TokenTypes::Number, Some(number.clone()), self.line, Some(self.pos - number.len() as i32), Some(self.pos));
+    self.add_token(TokenTypes::Number, Some(number.clone()), self.line, Some(self.line_pos - number.len() as i32), Some(self.line_pos));
   }
 }
 
