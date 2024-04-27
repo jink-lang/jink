@@ -13,29 +13,32 @@ This is the home of the Rust compiler of the [Jink](https://github.com/jink-lang
 
 ## Goal Checklist / TODOs
 
-(Not in or by any particular order or specification)
+The lexer and parser are now up to snuff with and surpass the original interpreted implementation. Here are a list of goals that scope out the new project, not in or by any particular order or specification.
 
 ##### General
-- [x] Build lexer
-- [x] Build parser
 - [ ] Build optimizer
 - [ ] Build bytecode/IR
 - [ ] Build VM / compile steps
+- [ ] Design standard for modules
+- [ ] Build standard library
+- [ ] Start bootstrapping compiler
+- [ ] Add examples
+- [ ] Add documentation / tutorials
+- [ ] Add issue templates
+- [ ] Add pull request templates
 ##### Lexer
 - [ ] Lex string templates
 ##### Parser
-- [x] Parse functions
 - [x] Parse type definitions
 - [x] Parse objects
 - [x] Parse arrays
 - [x] Parse classes
-- [x] Parse function defaults
+- [x] Parse module imports
 - [ ] Parse string templates
 - [ ] Parse pub keyword on definitions
 - [ ] Parse indexing (arrays)
 - [ ] Parse indexing (object properties and methods)
 - [ ] Parse del statements
-- [x] Parse module imports
 - [ ] Parse while loops
 - [ ] Parse for loops
 
