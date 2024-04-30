@@ -55,18 +55,18 @@ pub const KEYWORDS: &[&str] = &[
   "import", "from", "as"
 ];
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 // May need specific type information if operators ever have different behaviour in different contexts
 // pub struct Operator { of_type: String }
 pub struct Operator(pub String);
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Name(pub String);
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Type(pub String);
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Literals {
   Integer(i64),
   UnsignedInteger(u64),
@@ -80,45 +80,45 @@ pub enum Literals {
   EOF
 }
 
-#[derive(Debug, PartialEq)]
-pub enum Expression {
+#[derive(Debug, PartialEq, Clone)]
+pub enum Expr {
   /// literal expr
   Literal(Literals),
 
   /// op; left; right
-  BinaryOperator(Operator, Box<Self>, Box<Self>),
+  BinaryOperator(Operator, Box<Expression>, Box<Expression>),
   /// op; value
-  UnaryOperator(Operator, Box<Self>),
+  UnaryOperator(Operator, Box<Expression>),
 
   /// type or let/const; ident; value
-  Assignment(Option<Type>, Box<Literals>, Option<Box<Self>>),
+  Assignment(Option<Type>, Box<Literals>, Option<Box<Expression>>),
 
-  Array(Box<Vec<Self>>),
+  Array(Box<Vec<Expression>>),
 
   /// name; literal
   TypeDef(Literals, Box<Literals>),
 
   /// if/else/elseif; expression; body; else-body
-  Conditional(Type, Option<Box<Self>>, Option<Box<Vec<Self>>>, Option<Box<Vec<Self>>>),
+  Conditional(Type, Option<Box<Expression>>, Option<Box<Vec<Expression>>>, Option<Box<Vec<Expression>>>),
 
   /// func name; args
-  Call(Name, Box<Vec<Self>>),
+  Call(Name, Box<Vec<Expression>>),
   /// func name; return type; params; body
-  Function(Name, Option<Literals>, Option<Box<Vec<Self>>>, Option<Box<Vec<Self>>>),
+  Function(Name, Option<Literals>, Option<Box<Vec<Expression>>>, Option<Box<Vec<Expression>>>),
   /// type or let/const; ident; default
   /// 
   /// TODO?: Refactor Type here so that we don't have to rely on distinguishing between ident and let/const
-  FunctionParam(Type, Literals, Option<Box<Self>>),
+  FunctionParam(Type, Literals, Option<Box<Expression>>),
   /// value
-  Return(Box<Self>),
+  Return(Box<Expression>),
 
   /// class name; parent classes; body
-  Class(Name, Option<Vec<Name>>, Option<Box<Vec<Self>>>),
+  Class(Name, Option<Vec<Name>>, Option<Box<Vec<Expression>>>),
 
   /// parent; child
   /// 
   /// top level we don't need option but last child will be empty
-  ObjectIndex(Box<Self>, Option<Box<Self>>),
+  ObjectIndex(Box<Expression>, Option<Box<Expression>>),
 
   /// index; aliases<parent; opt child>[]
   /// 
@@ -130,6 +130,14 @@ pub enum Expression {
   /// 
   /// only `from` imports will have multiple aliases, regular imports can only have one
   Module(Vec<Name>, Option<Vec<(Name, Option<Name>)>>),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Expression {
+  pub expr: Expr,
+  pub first_line: Option<i32>,
+  pub first_pos: Option<i32>,
+  pub last_line: Option<i32>,
 }
 
 pub struct FutureIter {
@@ -178,6 +186,7 @@ pub enum Error {
   UnexpectedToken(ErrorCtx),
   UnexpectedEOF(ErrorCtx),
   EmptyFunctionBody(ErrorCtx),
+  UnexpectedExpression(ErrorCtx)
 }
 
 impl Error {
@@ -222,6 +231,14 @@ impl std::fmt::Display for Error {
           err.line,
           spaces.to_string() + underline.as_str(),
           spaces + "^",
+        );
+      },
+      Error::UnexpectedExpression(err) => {
+        let underline = "-".repeat(err.line.split("\n").collect::<Vec<&str>>()[0].len());
+        return write!(f, "Unexpected expression at {}:{}\n  {}\n  {}\n  {}", err.token.as_ref().unwrap().line,
+          err.start_pos.unwrap() + 1, err.line,
+          underline,
+          " ".repeat((err.start_pos.unwrap()) as usize) + "^"
         );
       },
       Error::UnexpectedEOF(err) => {

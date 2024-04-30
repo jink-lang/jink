@@ -18,7 +18,7 @@ pub fn compile(code: String, verbose: bool) {
     println!("Tokens:");
     let mut cur = 0;
     let mut line: Vec<String> = vec![];
-    for (_i, token) in lexed.clone().iter().enumerate() {
+    for token in lexed.clone().iter() {
       if token.of_type == TokenTypes::Newline { continue; }
 
       if line.len() > 0 as usize {
@@ -43,12 +43,12 @@ pub fn compile(code: String, verbose: bool) {
   }
 
   let mut parser = Parser::new();
-  let parsed = parser.parse(code.clone(), verbose);
+  let parsed = parser.parse(code.clone(), verbose, false);
   if let Err(err) = parsed {
     println!("{}", err);
     return;
   }
 
   println!("AST:");
-  println!("{:?}", parsed.unwrap());
+  println!("{:?}", parsed.as_ref().unwrap());
 }
