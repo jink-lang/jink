@@ -6,6 +6,7 @@ use jink::Operator;
 use jink::Name;
 use jink::Literals;
 use jink::Expression;
+use jink::Expr;
 use jink::Type;
 
 use super::lexer::Lexer;
@@ -13,9 +14,7 @@ use super::lexer::Lexer;
 pub struct Parser {
   pub code: String,
   pub iter: FutureIter,
-  // pub pos: usize,
-  // pub tok_end: usize,
-  pub ast: Vec<Expression>
+  pub testing: bool,
 }
 
 impl Parser {
@@ -23,18 +22,17 @@ impl Parser {
     Parser {
       code: String::new(),
       iter: FutureIter::new(vec![]),
-      // pos: 0,
-      // tok_end: iterator.input.len(),
-      ast: Vec::new(),
+      testing: false,
     }
   }
 
   // Build AST
-  pub fn parse(&mut self, code: String, _verbose: bool) -> Result<Vec<Expression>, Error> {
+  pub fn parse(&mut self, code: String, _verbose: bool, testing: bool) -> Result<Vec<Expression>, Error> {
     let tokens = Lexer::new().lex(code.clone(), false);
     let iterator = FutureIter::new(tokens);
     self.code = code;
     self.iter = iterator;
+    self.testing = testing;
 
     let mut ast: Vec<Expression> = Vec::new();
     while self.iter.current.is_some() {
@@ -44,6 +42,30 @@ impl Parser {
       // Error
       if let Err(err) = parsed {
         return Err(err);
+      }
+
+      // Validate top level expressions
+      if parsed.as_ref().unwrap().expr != Expr::Literal(Literals::EOF) {
+        match parsed.as_ref().unwrap().expr {
+          Expr::Function(_, _, _, _) => {},
+          Expr::Call(_, _) => {},
+          Expr::TypeDef(_, _) => {},
+          Expr::Class(_, _, _) => {},
+          Expr::Module(_, _) => {},
+          Expr::Assignment(_, _, _) => {},
+          Expr::Conditional(_, _, _, _) => {},
+          Expr::UnaryOperator(_, _) => {},
+          _ => {
+            return Err(Error::new(
+              Error::UnexpectedExpression,
+              Some(self.iter.current.as_ref().unwrap().clone()),
+              self.code.lines().nth((parsed.as_ref().unwrap().first_line.unwrap() - 1) as usize).unwrap(),
+              parsed.as_ref().unwrap().first_pos,
+              parsed.as_ref().unwrap().last_line,
+              "Unexpected expression".to_string()
+            ));
+          }
+        }
       }
 
       // End of file
@@ -58,6 +80,14 @@ impl Parser {
     }
 
     return Ok(ast);
+  }
+
+  fn get_expr(&self, expr: Expr, first_line: Option<i32>, first_pos: Option<i32>, last_line: Option<i32>) -> Expression {
+    if self.testing {
+      return Expression { expr, first_line: None, first_pos: None, last_line: None };
+    } else {
+      return Expression { expr, first_line, first_pos, last_line };
+    }
   }
 
   // Removes expected token, given a type or a multiple types
@@ -102,8 +132,12 @@ impl Parser {
   fn parse_top(&mut self) -> Result<Expression, Error> {
     let init = self.iter.current.as_ref().clone();
 
-    if init.is_none() || init.unwrap().of_type == TokenTypes::EOF {
-      return Ok(Expression::Literal(Literals::EOF));
+    if init.is_none() {
+      return Ok(self.get_expr(Expr::Literal(Literals::EOF), None, None, None));
+    } else if init.unwrap().of_type == TokenTypes::EOF {
+      return Ok(self.get_expr(Expr::Literal(Literals::EOF),
+        Some(init.unwrap().line), init.unwrap().start_pos, Some(init.unwrap().line)
+      ));
 
     } else if init.unwrap().of_type != TokenTypes::Keyword {
       return self.parse_expression(0);
@@ -130,7 +164,6 @@ impl Parser {
       return self.parse_module();
 
     } else if init.unwrap().value.as_ref().unwrap() == "fun" {
-      self.iter.next();
       return self.parse_function();
 
     } else if init.unwrap().value.as_ref().unwrap() == "return" {
@@ -156,11 +189,10 @@ impl Parser {
         "Unexpected token".to_string()
       ));
     }
-
-    //   self.ast
   }
 
   fn parse_expression(&mut self, precedence: i8) -> Result<Expression, Error> {
+    let init = self.iter.current.as_ref().unwrap().clone();
     let mut left = self.parse_primary();
 
     while self.iter.current.is_some()
@@ -169,21 +201,21 @@ impl Parser {
 
       let operator = self.iter.next().unwrap();
       if ["++", "--"].contains(&&operator.value.as_ref().unwrap().as_str()) {
-        return Ok(Expression::UnaryOperator(
+        return Ok(self.get_expr(Expr::UnaryOperator(
           Operator(String::from(operator.value.as_ref().unwrap().to_owned() + ":post")),
           Box::new(left?)
-        ));
+        ), Some(init.line), init.start_pos, Some(operator.line)));
       }
 
       let mut next_precedence = self.get_precedence(operator.clone());
       if self.is_left_associative(operator.clone()) { next_precedence += 1; }
 
       let right = self.parse_expression(next_precedence);
-      left = Ok(Expression::BinaryOperator(
+      left = Ok(self.get_expr(Expr::BinaryOperator(
         Operator((*operator.to_owned().value.unwrap()).to_string()),
         Box::new(left?),
-        Box::new(right?)
-      ));
+        Box::new(right.as_ref().unwrap().to_owned())
+      ), Some(init.line), init.start_pos, right.unwrap().last_line));
     }
 
     // if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type == TokenTypes::Semicolon {
@@ -224,15 +256,18 @@ impl Parser {
 
       if ["+", "-", "!"].contains(&operator.clone().value.unwrap().as_str()) {
         let value = self.parse_primary().unwrap();
-        return Ok(Expression::UnaryOperator(Operator(operator.clone().value.unwrap()), Box::new(value)));
+        return Ok(self.get_expr(
+          Expr::UnaryOperator(Operator(operator.clone().value.unwrap()), Box::new(value.clone())),
+          Some(operator.line), operator.start_pos, value.last_line
+        ));
       }
 
       let precedence = self.get_precedence(operator.clone());
       let value = self.parse_expression(precedence);
-      return Ok(Expression::UnaryOperator(
+      return Ok(self.get_expr(Expr::UnaryOperator(
         Operator(operator.clone().to_string()),
-        Box::new(value?)
-      ));
+        Box::new(value.as_ref().unwrap().to_owned())
+      ), Some(operator.line), operator.start_pos, value.unwrap().last_line));
 
     // Parentheses
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::LParen {
@@ -256,14 +291,23 @@ impl Parser {
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Number {
       let cur = self.iter.next().unwrap();
       if cur.clone().value.unwrap().contains(".") {
-        return Ok(Expression::Literal(Literals::FloatingPoint(cur.value.unwrap().parse::<f64>().unwrap())));
+        return Ok(self.get_expr(Expr::Literal(Literals::FloatingPoint(cur.value.unwrap().parse::<f64>().unwrap())),
+          Some(cur.line), cur.start_pos, Some(cur.line)
+        ));
       } else {
-        return Ok(Expression::Literal(Literals::Integer(cur.value.unwrap().parse::<i64>().unwrap())));
+        return Ok(self.get_expr(Expr::Literal(Literals::Integer(cur.value.unwrap().parse::<i64>().unwrap())),
+          Some(cur.line), cur.start_pos, Some(cur.line)
+        ));
       }
 
     // Strings
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::String {
-      return Ok(Expression::Literal(Literals::String(self.iter.next().unwrap().value.unwrap().to_owned())));
+      let cur = self.iter.next();
+      return Ok(self.get_expr(Expr::Literal(Literals::String(cur.as_ref().unwrap().value.as_ref().unwrap().to_owned())),
+        Some(cur.as_ref().unwrap().line),
+        Some(cur.as_ref().unwrap().start_pos.unwrap() - 2), // backtrack quote and starting pos
+        Some(cur.as_ref().unwrap().line)
+      ));
 
     // Identifiers
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Identifier {
@@ -274,7 +318,9 @@ impl Parser {
 
       // EOF, return ident literal
       if self.iter.current.is_none() || self.iter.current.as_ref().unwrap().of_type == TokenTypes::EOF {
-        return Ok(Expression::Literal(Literals::Identifier(Name(String::from(ident.value.unwrap())), None)));
+        return Ok(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(ident.value.unwrap())), None)),
+          Some(ident.line), ident.start_pos, Some(ident.line)
+        ));
 
       // Call
       } else if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type == TokenTypes::LParen {
@@ -292,9 +338,9 @@ impl Parser {
 
       // Literal
       } else {
-        return Ok(Expression::Literal(
+        return Ok(self.get_expr(Expr::Literal(
           Literals::Identifier(Name(String::from(ident.value.unwrap())), None)
-        ));
+        ), Some(ident.line), ident.start_pos, Some(ident.line)));
       }
 
     // Keywords
@@ -307,11 +353,15 @@ impl Parser {
 
       // Booleans
       } else if ["true", "false"].contains(&keyword.value.as_ref().unwrap().as_str()) {
-        return Ok(Expression::Literal(Literals::Boolean(keyword.value.as_ref().unwrap() == "true")));
+        return Ok(self.get_expr(Expr::Literal(Literals::Boolean(keyword.value.as_ref().unwrap() == "true")),
+          Some(keyword.line), keyword.start_pos, Some(keyword.line)
+        ));
 
       // Nulls
       } else if keyword.value.as_ref().unwrap() == "null" {
-        return Ok(Expression::Literal(Literals::Null));
+        return Ok(self.get_expr(Expr::Literal(Literals::Null),
+          Some(keyword.line), keyword.start_pos, Some(keyword.line)
+        ));
 
       } else {
         return Err(Error::new(
@@ -376,30 +426,32 @@ impl Parser {
 
     // TODO: Handle comma case (multiple assignments at once)
     if [TokenTypes::Newline, TokenTypes::Semicolon].contains(&self.iter.current.as_ref().unwrap().of_type) {
-      assignment = Expression::Assignment(
+      assignment = self.get_expr(Expr::Assignment(
         assignment_type,
         Box::new(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
         None
-      );
+      ), Some(identifier.line), identifier.start_pos, Some(identifier.line));
     } else if self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "=" {
       self.iter.next();
-      assignment = Expression::Assignment(
+      let assign = self.parse_expression(0)?;
+      assignment = self.get_expr(Expr::Assignment(
         assignment_type,
         Box::new(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
-        Some(Box::new(self.parse_expression(0)?))
-      );
+        Some(Box::new(assign.clone()))
+      ), Some(identifier.line), identifier.start_pos, assign.last_line);
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RParen {
-      assignment = Expression::Assignment(
+      assignment = self.get_expr(Expr::Assignment(
         assignment_type,
         Box::new(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
         None
-      );
+      ), Some(identifier.line), identifier.start_pos, Some(identifier.line));
     } else {
-      assignment = Expression::Assignment(
+      let assign = self.parse_expression(0)?;
+      assignment = self.get_expr(Expr::Assignment(
         assignment_type,
         Box::new(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
-        Some(Box::new(self.parse_expression(0)?))
-      );
+        Some(Box::new(assign.clone()))
+      ), Some(identifier.line), identifier.start_pos, assign.last_line);
     }
 
     return Ok(assignment);
@@ -425,7 +477,11 @@ impl Parser {
       }
     }
 
-    return Ok(Expression::Array(Box::new(list)));
+    return Ok(self.get_expr(Expr::Array(Box::new(list)),
+      Some(self.iter.current.as_ref().unwrap().line),
+      self.iter.current.as_ref().unwrap().start_pos,
+      Some(self.iter.current.as_ref().unwrap().line)
+    ));
   }
 
   fn parse_type(&mut self) -> Result<Expression, Error> {
@@ -449,10 +505,10 @@ impl Parser {
     // If type alias
     if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Identifier {
       let t = self.iter.next().unwrap();
-      return Ok(Expression::TypeDef(
+      return Ok(self.get_expr(Expr::TypeDef(
         Literals::Identifier(Name(String::from(ident.value.unwrap())), None),
         Box::new(Literals::Identifier(Name(String::from(t.value.unwrap())), None))
-      ));
+      ), Some(ident.line), ident.start_pos, Some(t.line)));
 
     // If typedef / struct
     } else {
@@ -485,8 +541,9 @@ impl Parser {
         let val = self.consume(&[TokenTypes::Identifier], false)?;
         obj.push(Literals::ObjectProperty(
           Some(Name(key.value.unwrap())),
-          Box::new(Expression::Literal(
-            Literals::Identifier(Name(val.value.unwrap()), None)
+          Box::new(self.get_expr(
+            Expr::Literal(Literals::Identifier(Name(val.value.unwrap()), None)),
+            Some(val.line), val.start_pos, Some(val.line)
           ))
         ));
       }
@@ -505,14 +562,19 @@ impl Parser {
 
       // object
       if type_tok.is_none() {
-        return Ok(Expression::Literal(Literals::Object(Box::new(obj))));
+        return Ok(self.get_expr(Expr::Literal(Literals::Object(Box::new(obj))),
+          Some(init.line), init.start_pos, Some(init.line)
+        ));
 
       // typedef / struct
       } else {
-        return Ok(Expression::TypeDef(
-          Literals::Identifier(Name(String::from(type_tok.unwrap().value.unwrap())), None),
+        return Ok(self.get_expr(Expr::TypeDef(
+          Literals::Identifier(Name(String::from(type_tok.as_ref().unwrap().value.as_ref().unwrap())), None),
           Box::new(Literals::Object(Box::new(obj)))
-        ));
+        ),
+        Some(type_tok.as_ref().unwrap().line),
+        type_tok.as_ref().unwrap().start_pos,
+        Some(self.iter.current.as_ref().unwrap().line)));
       }
     } else {
       return Err(Error::new(
@@ -527,11 +589,16 @@ impl Parser {
   }
 
   fn parse_call(&mut self, identifier: Token) -> Result<Expression, Error> {
-    let args = self.parse_args_params("args");
-    return Ok(Expression::Call(Name(identifier.value.unwrap().to_owned()), Box::new(args?)));
+    let args = self.parse_args_params("args")?;
+    return Ok(self.get_expr(Expr::Call(Name(identifier.value.unwrap().to_owned()), Box::new(args)),
+      Some(identifier.line),
+      identifier.start_pos,
+      Some(self.iter.current.as_ref().unwrap().line)
+    ));
   }
 
   fn parse_function(&mut self) -> Result<Expression, Error> {
+    let init = self.iter.next(); // "fun"
     let identifier = self.consume(&[TokenTypes::Identifier], false)?;
     let params = self.parse_args_params("params")?;
 
@@ -547,18 +614,28 @@ impl Parser {
     let body = self.parse_block()?;
 
     if return_type.is_some() {
-      return Ok(Expression::Function(
-        Name(identifier.value.unwrap().to_owned()),
-        Some(Literals::Identifier(Name(return_type.unwrap().value.unwrap()), None)),
-        Some(Box::new(params)),
-        Some(Box::new(body))
+      return Ok(self.get_expr(
+        Expr::Function(
+          Name(identifier.value.unwrap().to_owned()),
+          Some(Literals::Identifier(Name(return_type.unwrap().value.unwrap()), None)),
+          Some(Box::new(params)),
+          Some(Box::new(body))
+        ),
+        Some(init.as_ref().unwrap().line),
+        init.unwrap().start_pos,
+        Some(self.iter.current.as_ref().unwrap().line)
       ));
     } else {
-      return Ok(Expression::Function(
-        Name(identifier.value.unwrap().to_owned()),
-        None,
-        Some(Box::new(params)),
-        Some(Box::new(body))
+      return Ok(self.get_expr(
+        Expr::Function(
+          Name(identifier.value.unwrap().to_owned()),
+          None,
+          Some(Box::new(params)),
+          Some(Box::new(body))
+        ),
+        Some(init.as_ref().unwrap().line),
+        init.unwrap().start_pos,
+        Some(self.iter.current.as_ref().unwrap().line)
       ));
     }
   }
@@ -589,11 +666,11 @@ impl Parser {
 
           // Close out function params
           if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RParen {
-            list.push(Expression::FunctionParam(
+            list.push(self.get_expr(Expr::FunctionParam(
               Type(String::from(cur.value.unwrap())),
               Literals::Identifier(Name(String::from(ident.value.unwrap())), None),
               None
-            ));
+            ), Some(cur.line), cur.start_pos, Some(cur.line)));
 
           // Expect colon for param defaults
           // fun num(int a: 1) {}
@@ -603,12 +680,12 @@ impl Parser {
 
             if self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == ":" {
               self.iter.next();
-              let default = self.parse_expression(0);
-              list.push(Expression::FunctionParam(
+              let default = self.parse_expression(0)?;
+              list.push(self.get_expr(Expr::FunctionParam(
                 Type(String::from(cur.value.as_ref().unwrap())),
                 Literals::Identifier(Name(String::from(ident.value.as_ref().unwrap())), None),
-                Some(Box::new(default?))
-              ));
+                Some(Box::new(default.clone()))
+              ), Some(cur.line), cur.start_pos, default.last_line));
             }
 
             // We have comma, continue to next param
@@ -627,11 +704,11 @@ impl Parser {
             // Skip by one newline if there is one
             self.skip_newlines(Some(1));
 
-            list.push(Expression::FunctionParam(
+            list.push(self.get_expr(Expr::FunctionParam(
               Type(String::from(cur.value.as_ref().unwrap())),
               Literals::Identifier(Name(String::from(ident.value.as_ref().unwrap())), None),
               None
-            ));
+            ), Some(cur.line), cur.start_pos, Some(cur.line)));
 
           } else {
             return Err(Error::new(
@@ -678,52 +755,76 @@ impl Parser {
   }
 
   fn parse_return(&mut self) -> Result<Expression, Error> {
-    self.iter.next();
+    let init = self.iter.next(); // "return"
     let ret: Expression;
     if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Semicolon {
       // self.iter.next();
-      ret = Expression::Return(Box::new(Expression::Literal(Literals::Null)));
+      ret = self.get_expr(Expr::Return(
+        Box::new(self.get_expr(Expr::Literal(Literals::Null),
+          Some(self.iter.current.as_ref().unwrap().line),
+          self.iter.current.as_ref().unwrap().start_pos,
+          Some(self.iter.current.as_ref().unwrap().line)
+        ))),
+        Some(init.as_ref().unwrap().line),
+        init.as_ref().unwrap().start_pos,
+        Some(init.unwrap().line)
+      );
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Newline {
-      ret = Expression::Return(Box::new(Expression::Literal(Literals::Null)));
+      ret = self.get_expr(Expr::Return(
+        Box::new(self.get_expr(Expr::Literal(Literals::Null),
+          Some(self.iter.current.as_ref().unwrap().line),
+          self.iter.current.as_ref().unwrap().start_pos,
+          Some(self.iter.current.as_ref().unwrap().line)
+        ))),
+        Some(init.as_ref().unwrap().line),
+        init.as_ref().unwrap().start_pos,
+        Some(init.unwrap().line)
+      );
     } else {
-      ret = Expression::Return(Box::new(self.parse_expression(0)?));
+      let expr = self.parse_expression(0)?;
+      ret = self.get_expr(Expr::Return(Box::new(expr.clone())),
+        Some(init.as_ref().unwrap().line),
+        init.as_ref().unwrap().start_pos,
+        expr.last_line
+      );
     }
 
     return Ok(ret);
   }
 
   fn parse_conditional(&mut self) -> Result<Expression, Error> {
-    let init = self.iter.next().unwrap();
+    let init = self.iter.next().unwrap(); // "if", "else", "elseif"
 
     // Parse else first because it is unlike if/elseif
     if init.value.as_ref().unwrap() == "else" {
-      return Ok(Expression::Conditional(
+      let block = self.parse_block()?;
+      return Ok(self.get_expr(Expr::Conditional(
         Type(String::from("else")),
         None,
-        Some(Box::new(self.parse_block()?)),
+        Some(Box::new(block)),
         None
-      ));
+      ), Some(init.line), init.start_pos, Some(self.iter.current.as_ref().unwrap().line)));
     }
 
     let mut else_body = vec![];
     self.consume(&[TokenTypes::LParen], false)?;
-    let expr = self.parse_expression(0);
+    let expr = self.parse_expression(0)?;
     self.consume(&[TokenTypes::RParen], false)?;
-    let body = self.parse_block().unwrap();
+    let body = self.parse_block()?;
 
     // If an else case is next
     if self.iter.current.is_some()
       && self.iter.current.as_ref().unwrap().of_type == TokenTypes::Keyword
       && ["elseif", "else"].contains(&self.iter.current.as_ref().unwrap().value.as_ref().unwrap().as_str()) {
-      else_body.push(self.parse_conditional().unwrap());
+      else_body.push(self.parse_conditional()?);
     }
 
-    return Ok(Expression::Conditional(
+    return Ok(self.get_expr(Expr::Conditional(
       Type(String::from(init.value.unwrap())),
-      Some(Box::new(expr?)),
+      Some(Box::new(expr)),
       Some(Box::new(body)),
       Some(Box::new(else_body))
-    ));
+    ), Some(init.line), init.start_pos, Some(self.iter.current.as_ref().unwrap().line)));
   }
 
   // TODO: Move actual block parsing to its own func (see block parsing for classes)
@@ -783,14 +884,13 @@ impl Parser {
         ));
       }
       body.push(self.parse_top()?);
-      self.consume(&[TokenTypes::Semicolon, TokenTypes::Newline], false)?;
     }
 
     return Ok(body);
   }
 
   fn parse_class(&mut self) -> Result<Expression, Error> {
-    self.iter.next();
+    let init = self.iter.next();
     let ident = self.consume(&[TokenTypes::Identifier], false)?;
 
     // Specifying parent classes
@@ -841,20 +941,20 @@ impl Parser {
       self.consume(&[TokenTypes::Semicolon, TokenTypes::Newline], false)?;
       self.skip_newlines(None);
     }
-    self.consume(&[TokenTypes::RBrace], false)?;
+    let end = self.consume(&[TokenTypes::RBrace], false)?;
 
     if parents.is_some() {
-      return Ok(Expression::Class(
+      return Ok(self.get_expr(Expr::Class(
         Name(ident.value.unwrap()),
         parents,
         Some(Box::new(body))
-      ));
+      ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(end.line)));
     } else {
-      return Ok(Expression::Class(
+      return Ok(self.get_expr(Expr::Class(
         Name(ident.value.unwrap()),
         None,
         Some(Box::new(body))
-      ));
+      ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(end.line)));
     }
   }
 
@@ -926,7 +1026,7 @@ impl Parser {
   // import module.abc as xyz;
   // import from module.abc { def as xyz, ghi as jkl, mno };
   fn parse_module(&mut self) -> Result<Expression, Error> {
-    self.iter.next();
+    let init = self.iter.next(); // "import"
 
     // No "from"
     if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Identifier {
@@ -938,14 +1038,18 @@ impl Parser {
 
         // No alias
         if alias.is_none() {
-          return Ok(Expression::Module(vec![Name(String::from(index[0].value.as_ref().unwrap()))], None));
+          return Ok(self.get_expr(Expr::Module(vec![Name(String::from(index[0].value.as_ref().unwrap()))], None),
+            Some(init.as_ref().unwrap().line),
+            init.unwrap().start_pos,
+            Some(index[0].line)
+          ));
         }
 
         // Alias
-        return Ok(Expression::Module(
+        return Ok(self.get_expr(Expr::Module(
           vec![Name(String::from(index[0].value.as_ref().unwrap()))],
           Some(vec![(name, alias)])
-        ));
+        ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(index[0].line)));
       }
 
       // Has index //
@@ -955,16 +1059,26 @@ impl Parser {
 
       // No alias
       if alias.is_none() {
-        return Ok(Expression::Module(
-          index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
-          None
+        return Ok(
+          self.get_expr(Expr::Module(
+            index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
+            None
+          ),
+          Some(init.as_ref().unwrap().line),
+          init.unwrap().start_pos,
+          Some(index.last().unwrap().line)
         ));
       }
 
       // Alias
-      return Ok(Expression::Module(
-        index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
-        Some(vec![(name, alias)])
+      return Ok(
+        self.get_expr(Expr::Module(
+          index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
+          Some(vec![(name, alias)])
+        ),
+        Some(init.as_ref().unwrap().line),
+        init.unwrap().start_pos,
+        Some(index.last().unwrap().line)
       ));
 
     // Has "from"
@@ -1001,11 +1115,16 @@ impl Parser {
           ));
         }
       }
-      self.consume(&[TokenTypes::RBrace], false)?;
+      let end = self.consume(&[TokenTypes::RBrace], false)?;
 
-      return Ok(Expression::Module(
-        index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
-        Some(names)
+      return Ok(
+        self.get_expr(Expr::Module(
+          index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
+          Some(names)
+        ),
+        Some(init.as_ref().unwrap().line),
+        init.unwrap().start_pos,
+        Some(end.line)
       ));
 
     // No "from" or identifier
@@ -1028,256 +1147,284 @@ mod tests {
 
   #[test]
   fn test_parse_assignments() -> Result<(), Error> {
-    let ast = Parser::new().parse("let a = 1;
+    let mut parser = Parser::new();
+    let ast = parser.parse("let a = 1;
     const name = \"Jink\"
-    type Number = int;".to_string(), false)?;
+    type Number = int;".to_string(), false, true)?;
     return Ok(assert_eq!(ast, vec![
-      Expression::Assignment(
+      parser.get_expr(Expr::Assignment(
         Some(Type(String::from("let"))),
         Box::new(Literals::Identifier(Name(String::from("a")), None)),
-        Some(Box::new(Expression::Literal(Literals::Integer(1)))
-      )),
-      Expression::Assignment(
+        Some(Box::new(
+          parser.get_expr(Expr::Literal(Literals::Integer(1)), None, None, None)
+        )
+      )), None, None, None),
+      parser.get_expr(Expr::Assignment(
         Some(Type(String::from("const"))),
         Box::new(Literals::Identifier(Name(String::from("name")), None)),
-        Some(Box::new(Expression::Literal(Literals::String(String::from("Jink"))))
-      )),
-      Expression::TypeDef(
+        Some(Box::new(
+          parser.get_expr(Expr::Literal(Literals::String(String::from("Jink"))), None, None, None)
+        )
+      )), None, None, None),
+      parser.get_expr(Expr::TypeDef(
         Literals::Identifier(Name(String::from("Number")), None),
         Box::new(Literals::Identifier(Name(String::from("int")), None))
-      ),
-      Expression::Literal(Literals::EOF)
+      ), None, None, None),
+      parser.get_expr(Expr::Literal(Literals::EOF), None, None, None)
     ]));
   }
 
   #[test]
   fn test_parse_conditional() -> Result<(), Error> {
-    let ast = Parser::new().parse("if (a == 1) {
+    let mut parser = Parser::new();
+    let ast = parser.parse("if (a == 1) {
       return a;
     } else {
       return b;
-    }".to_string(), false)?;
-    return Ok(assert_eq!(ast[0], Expression::Conditional(
+    }".to_string(), false, true)?;
+    return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Conditional(
       Type(String::from("if")),
-      Some(Box::new(Expression::BinaryOperator(
+      Some(Box::new(parser.get_expr(Expr::BinaryOperator(
         Operator(String::from("==")),
-        Box::new(Expression::Literal(Literals::Identifier(Name(String::from("a")), None))),
-        Box::new(Expression::Literal(Literals::Integer(1)))
-      ))),
+        Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)),
+        Box::new(parser.get_expr(Expr::Literal(Literals::Integer(1)), None, None, None))
+      ), None, None, None))),
       Some(Box::new(vec![
-        Expression::Return(Box::new(Expression::Literal(Literals::Identifier(Name(String::from("a")), None))))
+        parser.get_expr(Expr::Return(Box::new(
+          parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)
+        )), None, None, None)
       ])),
       Some(Box::new(vec![
-        Expression::Conditional(
+        parser.get_expr(Expr::Conditional(
           Type(String::from("else")),
           None,
           Some(Box::new(vec![
-            Expression::Return(Box::new(Expression::Literal(Literals::Identifier(Name(String::from("b")), None))))
+            parser.get_expr(Expr::Return(Box::new(
+              parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")), None)), None, None, None)
+            )), None, None, None)
           ])),
           None
-        )
+        ), None, None, None)
       ]))
-    )));
+    ), None, None, None)));
   }
 
   #[test]
   fn test_parse_function_call() -> Result<(), Error> {
-    let ast = Parser::new().parse("print(\"Hello, world!\");".to_string(), false)?;
-    return Ok(assert_eq!(ast[0], Expression::Call(
+    let mut parser = Parser::new();
+    let ast = parser.parse("print(\"Hello, world!\");".to_string(), false, true)?;
+    return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Call(
       Name(String::from("print")),
-      Box::new(vec![Expression::Literal(Literals::String(String::from("Hello, world!")))])
-    )));
+      Box::new(vec![parser.get_expr(Expr::Literal(Literals::String(String::from("Hello, world!"))), None, None, None)])
+    ), None, None, None)));
   }
 
   #[test]
   fn test_parse_function_def() -> Result<(), Error> {
-    let ast = Parser::new().parse("fun add(let a, let b) {
+    let mut parser = Parser::new();
+    let ast = parser.parse("fun add(let a, let b) {
       return a + b;
-    }".to_string(), false)?;
-    return Ok(assert_eq!(ast[0], Expression::Function(
+    }".to_string(), false, true)?;
+    return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Function(
       Name(String::from("add")),
       None,
       Some(Box::new(vec![
-        Expression::FunctionParam(
+        parser.get_expr(Expr::FunctionParam(
           Type(String::from("let")),
           Literals::Identifier(Name(String::from("a")), None),
           None
-        ),
-        Expression::FunctionParam(
+        ), None, None, None),
+        parser.get_expr(Expr::FunctionParam(
           Type(String::from("let")),
           Literals::Identifier(Name(String::from("b")), None),
           None
-        )
+        ), None, None, None)
       ])),
       Some(Box::new(vec![
-        Expression::Return(Box::new(Expression::BinaryOperator(
-          Operator(String::from("+")),
-          Box::new(Expression::Literal(Literals::Identifier(Name(String::from("a")), None))),
-          Box::new(Expression::Literal(Literals::Identifier(Name(String::from("b")), None)))
-        )))
+        parser.get_expr(Expr::Return(Box::new(
+          parser.get_expr(Expr::BinaryOperator(
+            Operator(String::from("+")),
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)),
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")), None)), None, None, None))
+          ), None, None, None)
+        )), None, None, None)
       ]))
-    )));
+    ), None, None, None)));
   }
 
   #[test]
   fn test_parse_function_def_inline() -> Result<(), Error> {
-    let ast = Parser::new().parse("fun sub(let a, let b) return a - b;".to_string(), false)?;
-    return Ok(assert_eq!(ast[0], Expression::Function(
+    let mut parser = Parser::new();
+    let ast = parser.parse("fun sub(let a, let b) return a - b;".to_string(), false, true)?;
+    return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Function(
       Name(String::from("sub")),
       None,
       Some(Box::new(vec![
-        Expression::FunctionParam(
+        parser.get_expr(Expr::FunctionParam(
           Type(String::from("let")),
           Literals::Identifier(Name(String::from("a")), None),
           None
-        ),
-        Expression::FunctionParam(
+        ), None, None, None),
+        parser.get_expr(Expr::FunctionParam(
           Type(String::from("let")),
           Literals::Identifier(Name(String::from("b")), None),
           None
-        )
+        ), None, None, None)
       ])),
       Some(Box::new(vec![
-        Expression::Return(Box::new(Expression::BinaryOperator(
-          Operator(String::from("-")),
-          Box::new(Expression::Literal(Literals::Identifier(Name(String::from("a")), None))),
-          Box::new(Expression::Literal(Literals::Identifier(Name(String::from("b")), None)))
-        )))
+        parser.get_expr(Expr::Return(Box::new(
+          parser.get_expr(Expr::BinaryOperator(
+            Operator(String::from("-")),
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)),
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")), None)), None, None, None))
+          ), None, None, None)
+        )), None, None, None)
       ]))
-    )));
+    ), None, None, None)));
   }
 
   #[test]
   fn test_parse_function_with_defaults() -> Result<(), Error> {
-    let ast = Parser::new().parse("fun pow(let a: 1, let b: 2, let c: 3) {
+    let mut parser = Parser::new();
+    let ast = parser.parse("fun pow(let a: 1, let b: 2, let c: 3) {
       return a ^ b ^ c;
-    }".to_string(), false)?;
-    return Ok(assert_eq!(ast[0], Expression::Function(
+    }".to_string(), false, true)?;
+    return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Function(
       Name(String::from("pow")),
       None,
       Some(Box::new(vec![
-        Expression::FunctionParam(
+        parser.get_expr(Expr::FunctionParam(
           Type(String::from("let")),
           Literals::Identifier(Name(String::from("a")), None),
-          Some(Box::new(Expression::Literal(Literals::Integer(1))))
-        ),
-        Expression::FunctionParam(
+          Some(Box::new(parser.get_expr(Expr::Literal(Literals::Integer(1)), None, None, None)))
+        ), None, None, None),
+        parser.get_expr(Expr::FunctionParam(
           Type(String::from("let")),
           Literals::Identifier(Name(String::from("b")), None),
-          Some(Box::new(Expression::Literal(Literals::Integer(2))))
-        ),
-        Expression::FunctionParam(
+          Some(Box::new(parser.get_expr(Expr::Literal(Literals::Integer(2)), None, None, None)))
+        ), None, None, None),
+        parser.get_expr(Expr::FunctionParam(
           Type(String::from("let")),
           Literals::Identifier(Name(String::from("c")), None),
-          Some(Box::new(Expression::Literal(Literals::Integer(3))))
-        )
+          Some(Box::new(parser.get_expr(Expr::Literal(Literals::Integer(3)), None, None, None)))
+        ), None, None, None)
       ])),
       Some(Box::new(vec![
-        Expression::Return(Box::new(Expression::BinaryOperator(
-          Operator(String::from("^")),
-          Box::new(Expression::BinaryOperator(
+        parser.get_expr(Expr::Return(Box::new(
+          parser.get_expr(Expr::BinaryOperator(
             Operator(String::from("^")),
-            Box::new(Expression::Literal(Literals::Identifier(Name(String::from("a")), None))),
-            Box::new(Expression::Literal(Literals::Identifier(Name(String::from("b")), None)))
-          )),
-          Box::new(Expression::Literal(Literals::Identifier(Name(String::from("c")), None)))
-        )))
+            Box::new(parser.get_expr(Expr::BinaryOperator(
+              Operator(String::from("^")),
+              Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)),
+              Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")), None)), None, None, None))
+            ), None, None, None)),
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("c")), None)), None, None, None))
+          ), None, None, None)
+        )), None, None, None)
       ]))
-    )));
+    ), None, None, None)));
   }
 
   #[test]
   fn test_parse_function_def_with_return_type() -> Result<(), Error> {
-    let ast = Parser::new().parse("fun add(int a, int b) -> int {
+    let mut parser = Parser::new();
+    let ast = parser.parse("fun add(int a, int b) -> int {
       return a + b;
-    }".to_string(), false)?;
-    return Ok(assert_eq!(ast[0], Expression::Function(
+    }".to_string(), false, true)?;
+    return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Function(
       Name(String::from("add")),
       Some(Literals::Identifier(Name(String::from("int")), None)),
       Some(Box::new(vec![
-        Expression::FunctionParam(
+        parser.get_expr(Expr::FunctionParam(
           Type(String::from("int")),
           Literals::Identifier(Name(String::from("a")), None),
           None
-        ),
-        Expression::FunctionParam(
+        ), None, None, None),
+        parser.get_expr(Expr::FunctionParam(
           Type(String::from("int")),
           Literals::Identifier(Name(String::from("b")), None),
           None
-        )
+        ), None, None, None)
       ])),
       Some(Box::new(vec![
-        Expression::Return(Box::new(Expression::BinaryOperator(
-          Operator(String::from("+")),
-          Box::new(Expression::Literal(Literals::Identifier(Name(String::from("a")), None))),
-          Box::new(Expression::Literal(Literals::Identifier(Name(String::from("b")), None)))
-        )))
+        parser.get_expr(Expr::Return(Box::new(
+          parser.get_expr(Expr::BinaryOperator(
+            Operator(String::from("+")),
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)),
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")), None)), None, None, None))
+          ), None, None, None)
+        )), None, None, None)
       ]))
-    )));
+    ), None, None, None)));
   }
 
   #[test]
   fn test_parse_function_def_with_inline_conditional() -> Result<(), Error> {
-    let ast = Parser::new().parse("fun are_even(int a, int b) -> int {
+    let mut parser = Parser::new();
+    let ast = parser.parse("fun are_even(int a, int b) -> int {
       if (a % 2 == 0 && b % 2 == 0) return true
       else return false
-    }".to_string(), false)?;
-    return Ok(assert_eq!(ast[0], Expression::Function(
+    }".to_string(), false, true)?;
+    return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Function(
       Name(String::from("are_even")),
       Some(Literals::Identifier(Name(String::from("int")), None)),
       Some(Box::new(vec![
-        Expression::FunctionParam(
+        parser.get_expr(Expr::FunctionParam(
           Type(String::from("int")),
           Literals::Identifier(Name(String::from("a")), None),
           None
-        ),
-        Expression::FunctionParam(
+        ), None, None, None),
+        parser.get_expr(Expr::FunctionParam(
           Type(String::from("int")),
           Literals::Identifier(Name(String::from("b")), None),
           None
-        )
+        ), None, None, None)
       ])),
       Some(Box::new(vec![
-        Expression::Conditional(
+        parser.get_expr(Expr::Conditional(
           Type(String::from("if")),
           Some(Box::new(
-            Expression::BinaryOperator(
+            parser.get_expr(Expr::BinaryOperator(
               Operator(String::from("&&")),
-              Box::new(Expression::BinaryOperator(
+              Box::new(parser.get_expr(Expr::BinaryOperator(
                 Operator(String::from("==")),
-                Box::new(Expression::BinaryOperator(
+                Box::new(parser.get_expr(Expr::BinaryOperator(
                   Operator(String::from("%")),
-                  Box::new(Expression::Literal(Literals::Identifier(Name(String::from("a")), None))),
-                  Box::new(Expression::Literal(Literals::Integer(2)))
-                )),
-                Box::new(Expression::Literal(Literals::Integer(0)))
-              )),
-              Box::new(Expression::BinaryOperator(
+                  Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)),
+                  Box::new(parser.get_expr(Expr::Literal(Literals::Integer(2)), None, None, None))
+                ), None, None, None)),
+                Box::new(parser.get_expr(Expr::Literal(Literals::Integer(0)), None, None, None))
+              ), None, None, None)),
+              Box::new(parser.get_expr(Expr::BinaryOperator(
                 Operator(String::from("==")),
-                Box::new(Expression::BinaryOperator(
+                Box::new(parser.get_expr(Expr::BinaryOperator(
                   Operator(String::from("%")),
-                  Box::new(Expression::Literal(Literals::Identifier(Name(String::from("b")), None))),
-                  Box::new(Expression::Literal(Literals::Integer(2)))
-                )),
-                Box::new(Expression::Literal(Literals::Integer(0)))
-              ))
-            )
+                  Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")), None)), None, None, None)),
+                  Box::new(parser.get_expr(Expr::Literal(Literals::Integer(2)), None, None, None))
+                ), None, None, None)),
+                Box::new(parser.get_expr(Expr::Literal(Literals::Integer(0)), None, None, None))
+              ), None, None, None))
+            ), None, None, None)
           )),
           Some(Box::new(vec![
-            Expression::Return(Box::new(Expression::Literal(Literals::Boolean(true))))
+            parser.get_expr(Expr::Return(Box::new(
+              parser.get_expr(Expr::Literal(Literals::Boolean(true)), None, None, None)
+            )), None, None, None)
           ])),
           Some(Box::new(vec![
-            Expression::Conditional(
+            parser.get_expr(Expr::Conditional(
               Type(String::from("else")),
               None,
               Some(Box::new(vec![
-                Expression::Return(Box::new(Expression::Literal(Literals::Boolean(false))))
+                parser.get_expr(Expr::Return(Box::new(
+                  parser.get_expr(Expr::Literal(Literals::Boolean(false)), None, None, None)
+                )), None, None, None)
               ])),
               None
-            )
+            ), None, None, None)
           ]))
-        )
+        ), None, None, None)
       ]))
-    )));
+    ), None, None, None)));
   }
 }
