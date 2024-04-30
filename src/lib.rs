@@ -164,6 +164,10 @@ impl FutureIter {
     self.current = self.iter.next();
     return current;
   }
+
+  pub fn peek(&mut self) -> Option<&Token> {
+    return self.iter.peek();
+  }
 }
 
 impl std::fmt::Display for FutureIter {

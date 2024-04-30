@@ -812,10 +812,22 @@ impl Parser {
     self.consume(&[TokenTypes::RParen], false)?;
     let body = self.parse_block()?;
 
-    // If an else case is next
-    if self.iter.current.is_some()
+    // If an else case is next. Handles the two following grammars:
+    // if (true) return 1
+    // else return 2
+    // &
+    // if (true) return 1
+    // return 2
+    if (
+      self.iter.current.is_some()
       && self.iter.current.as_ref().unwrap().of_type == TokenTypes::Keyword
-      && ["elseif", "else"].contains(&self.iter.current.as_ref().unwrap().value.as_ref().unwrap().as_str()) {
+      && ["elseif", "else"].contains(&self.iter.current.as_ref().unwrap().value.as_ref().unwrap().as_str())
+    ) || (
+      self.iter.peek().is_some()
+      && self.iter.peek().unwrap().of_type == TokenTypes::Keyword
+      && ["elseif", "else"].contains(&self.iter.peek().unwrap().value.as_ref().unwrap().as_str())
+    ) {
+      self.skip_newlines(Some(1));
       else_body.push(self.parse_conditional()?);
     }
 
