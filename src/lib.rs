@@ -91,7 +91,7 @@ pub enum Expr {
   UnaryOperator(Operator, Box<Expression>),
 
   /// type or let/const; ident; value
-  Assignment(Option<Type>, Box<Literals>, Option<Box<Expression>>),
+  Assignment(Option<Type>, Literals, Option<Box<Expression>>),
 
   Array(Box<Vec<Expression>>),
 
