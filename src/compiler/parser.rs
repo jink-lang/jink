@@ -55,6 +55,7 @@ impl Parser {
           Expr::Assignment(_, _, _) => {},
           Expr::Conditional(_, _, _, _) => {},
           Expr::UnaryOperator(_, _) => {},
+          Expr::BinaryOperator(_, _, _) => {},
           _ => {
             return Err(Error::new(
               Error::UnexpectedExpression,
@@ -260,6 +261,13 @@ impl Parser {
           Expr::UnaryOperator(Operator(operator.clone().value.unwrap()), Box::new(value.clone())),
           Some(operator.line), operator.start_pos, value.last_line
         ));
+
+      } else if ["++", "--"].contains(&operator.clone().value.unwrap().as_str()) {
+        let value = self.parse_primary().unwrap();
+        return Ok(self.get_expr(
+          Expr::UnaryOperator(Operator(operator.clone().value.unwrap() + ":pre"), Box::new(value.clone())),
+          Some(operator.line), operator.start_pos, value.last_line
+        ));
       }
 
       let precedence = self.get_precedence(operator.clone());
@@ -428,7 +436,7 @@ impl Parser {
     if [TokenTypes::Newline, TokenTypes::Semicolon].contains(&self.iter.current.as_ref().unwrap().of_type) {
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+        Literals::Identifier(Name(String::from(identifier.value.unwrap())), None),
         None
       ), Some(identifier.line), identifier.start_pos, Some(identifier.line));
     } else if self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "=" {
@@ -436,20 +444,20 @@ impl Parser {
       let assign = self.parse_expression(0)?;
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+        Literals::Identifier(Name(String::from(identifier.value.unwrap())), None),
         Some(Box::new(assign.clone()))
       ), Some(identifier.line), identifier.start_pos, assign.last_line);
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RParen {
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+        Literals::Identifier(Name(String::from(identifier.value.unwrap())), None),
         None
       ), Some(identifier.line), identifier.start_pos, Some(identifier.line));
     } else {
       let assign = self.parse_expression(0)?;
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+        Literals::Identifier(Name(String::from(identifier.value.unwrap())), None),
         Some(Box::new(assign.clone()))
       ), Some(identifier.line), identifier.start_pos, assign.last_line);
     }
@@ -1166,14 +1174,14 @@ mod tests {
     return Ok(assert_eq!(ast, vec![
       parser.get_expr(Expr::Assignment(
         Some(Type(String::from("let"))),
-        Box::new(Literals::Identifier(Name(String::from("a")), None)),
+        Literals::Identifier(Name(String::from("a")), None),
         Some(Box::new(
           parser.get_expr(Expr::Literal(Literals::Integer(1)), None, None, None)
         )
       )), None, None, None),
       parser.get_expr(Expr::Assignment(
         Some(Type(String::from("const"))),
-        Box::new(Literals::Identifier(Name(String::from("name")), None)),
+        Literals::Identifier(Name(String::from("name")), None),
         Some(Box::new(
           parser.get_expr(Expr::Literal(Literals::String(String::from("Jink"))), None, None, None)
         )
