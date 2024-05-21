@@ -79,6 +79,8 @@ impl Lexer {
           self.line += 1;
           self.line_pos = 0;
           self.add_token(TokenTypes::Newline, Some("\n".to_string()), self.line, Some(self.line_pos), Some(self.line_pos));
+        } else if char.unwrap() == &'\r' {
+          continue;
         }
         continue;
       }
@@ -195,9 +197,8 @@ impl Lexer {
     let mut operator = String::from(*init);
     let start = self.line_pos;
 
-    // Jink only makes use of two-char operators..fortunately
-    // Check if we have a two-char operator on our hands and add it
-    if OPERATORS.contains(&&*String::from([String::from(*init), iter.peek().unwrap().to_string()].join(""))) {
+    // While we are still working with the operator
+    while iter.peek().is_some() && OPERATORS.contains(&iter.peek().unwrap().to_string().as_str()) {
       operator.push(*iter.next().unwrap());
       self.pos += 1;
       self.line_pos += 1;
@@ -215,52 +216,67 @@ impl Lexer {
   fn parse_string(&mut self, iter: &mut Peekable<Iter<char>>, char: &char) {
     let mut string = String::new();
     let mut end = false;
-    let start = self.line_pos;
+    let start_line = self.line;
+    let start_line_pos = self.line_pos;
 
-    let mut cur = iter.next();
-    self.pos += 1;
-    self.line_pos += 1;
-
-    while cur.is_some() {
+    while iter.peek().is_some() {
       // Closing the string
-      if cur.unwrap() == char {
+      if iter.peek().unwrap() == &char {
         end = true;
+        iter.next();
+        self.pos += 1;
+        self.line_pos += 1;
         break;
       }
 
       // Handle escaped characters
-      if *cur.unwrap() == '\\' {
-        let escaped = iter.next();
+      if iter.peek().unwrap() == &&'\\' {
+        iter.next();
         self.pos += 1;
         self.line_pos += 1;
 
-        // Handle case of newlines
-        if ['\n', 'n'].contains(escaped.unwrap()) {
+        // Get escaped character
+        let escaped = iter.next();
+
+        // Literal newline
+        if escaped.unwrap() == &'n' {
           string.push('\n');
+          self.pos += 1;
+          self.line_pos = 1;
+
+        // Escaped newline
+        } else if ['\r', '\n'].contains(escaped.unwrap()) {
+          self.pos += 1;
           self.line += 1;
           self.line_pos = 0;
+
+          if escaped.unwrap() == &'\r' && iter.peek().unwrap() == &&'\n' {
+            iter.next();
+          }
 
         // All other escapes
         } else {
           string.push(*escaped.unwrap());
-          cur = iter.next();
           self.pos += 1;
           self.line_pos += 1;
         }
 
+      // Break without closing on unescaped newline
+      } else if iter.peek().unwrap() == &&'\n' {
+        break;
+
       // Add to string
       } else {
-        string.push(*cur.unwrap());
-        cur = iter.next();
+        string.push(*iter.next().unwrap());
         self.pos += 1;
         self.line_pos += 1;
       }
     }
 
     // String was not properly enclosed
-    if cur.is_none() && !end {
+    if !end {
       panic!("A string was not properly enclosed at {}:{}\n  {}\n  {}",
-        self.line, start, self.code.lines().nth(usize::try_from(self.line - 1).unwrap()).unwrap(), " ".repeat(usize::try_from(start - 1).unwrap()) + "^"
+        start_line, start_line_pos, self.code.lines().nth(usize::try_from(start_line - 1).unwrap()).unwrap(), " ".repeat(usize::try_from(start_line_pos - 1).unwrap()) + "^"
       );
     }
 

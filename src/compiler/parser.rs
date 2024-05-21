@@ -255,7 +255,7 @@ impl Parser {
         ));
       }
 
-      if ["+", "-", "!"].contains(&operator.clone().value.unwrap().as_str()) {
+      if ["+", "-", "!", "..."].contains(&operator.clone().value.unwrap().as_str()) {
         let value = self.parse_primary().unwrap();
         return Ok(self.get_expr(
           Expr::UnaryOperator(Operator(operator.clone().value.unwrap()), Box::new(value.clone())),
@@ -398,7 +398,7 @@ impl Parser {
   fn is_unary_operator(&mut self, token: &Token) -> bool {
     if token.of_type != TokenTypes::Operator { return false; }
     return [
-      "+", "-", "++", "--", "!"
+      "+", "-", "++", "--", "!", "..."
     ].contains(&token.value.as_ref().unwrap().as_str());
   }
 
@@ -670,6 +670,14 @@ impl Parser {
         if cur.of_type == TokenTypes::Identifier || (
           cur.of_type == TokenTypes::Keyword && ["let", "const"].contains(&&cur.value.as_ref().unwrap().as_str())
         ) {
+          // Spread operator
+          let mut spread = false;
+          if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator
+            && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "..." {
+            self.iter.next();
+            spread = true;
+          }
+
           let ident = self.consume(&[TokenTypes::Identifier], false)?;
 
           // Close out function params
@@ -677,7 +685,8 @@ impl Parser {
             list.push(self.get_expr(Expr::FunctionParam(
               Type(String::from(cur.value.unwrap())),
               Literals::Identifier(Name(String::from(ident.value.unwrap())), None),
-              None
+              None,
+              spread
             ), Some(cur.line), cur.start_pos, Some(cur.line)));
 
           // Expect colon for param defaults
@@ -692,7 +701,8 @@ impl Parser {
               list.push(self.get_expr(Expr::FunctionParam(
                 Type(String::from(cur.value.as_ref().unwrap())),
                 Literals::Identifier(Name(String::from(ident.value.as_ref().unwrap())), None),
-                Some(Box::new(default.clone()))
+                Some(Box::new(default.clone())),
+                spread
               ), Some(cur.line), cur.start_pos, default.last_line));
             }
 
@@ -715,7 +725,8 @@ impl Parser {
             list.push(self.get_expr(Expr::FunctionParam(
               Type(String::from(cur.value.as_ref().unwrap())),
               Literals::Identifier(Name(String::from(ident.value.as_ref().unwrap())), None),
-              None
+              None,
+              spread
             ), Some(cur.line), cur.start_pos, Some(cur.line)));
 
           } else {
@@ -1252,12 +1263,14 @@ mod tests {
         parser.get_expr(Expr::FunctionParam(
           Type(String::from("let")),
           Literals::Identifier(Name(String::from("a")), None),
-          None
+          None,
+          false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
           Type(String::from("let")),
           Literals::Identifier(Name(String::from("b")), None),
-          None
+          None,
+          false
         ), None, None, None)
       ])),
       Some(Box::new(vec![
@@ -1283,12 +1296,14 @@ mod tests {
         parser.get_expr(Expr::FunctionParam(
           Type(String::from("let")),
           Literals::Identifier(Name(String::from("a")), None),
-          None
+          None,
+          false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
           Type(String::from("let")),
           Literals::Identifier(Name(String::from("b")), None),
-          None
+          None,
+          false
         ), None, None, None)
       ])),
       Some(Box::new(vec![
@@ -1316,17 +1331,20 @@ mod tests {
         parser.get_expr(Expr::FunctionParam(
           Type(String::from("let")),
           Literals::Identifier(Name(String::from("a")), None),
-          Some(Box::new(parser.get_expr(Expr::Literal(Literals::Integer(1)), None, None, None)))
+          Some(Box::new(parser.get_expr(Expr::Literal(Literals::Integer(1)), None, None, None))),
+          false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
           Type(String::from("let")),
           Literals::Identifier(Name(String::from("b")), None),
-          Some(Box::new(parser.get_expr(Expr::Literal(Literals::Integer(2)), None, None, None)))
+          Some(Box::new(parser.get_expr(Expr::Literal(Literals::Integer(2)), None, None, None))),
+          false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
           Type(String::from("let")),
           Literals::Identifier(Name(String::from("c")), None),
-          Some(Box::new(parser.get_expr(Expr::Literal(Literals::Integer(3)), None, None, None)))
+          Some(Box::new(parser.get_expr(Expr::Literal(Literals::Integer(3)), None, None, None))),
+          false
         ), None, None, None)
       ])),
       Some(Box::new(vec![
@@ -1358,12 +1376,14 @@ mod tests {
         parser.get_expr(Expr::FunctionParam(
           Type(String::from("int")),
           Literals::Identifier(Name(String::from("a")), None),
-          None
+          None,
+          false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
           Type(String::from("int")),
           Literals::Identifier(Name(String::from("b")), None),
-          None
+          None,
+          false
         ), None, None, None)
       ])),
       Some(Box::new(vec![
@@ -1392,12 +1412,14 @@ mod tests {
         parser.get_expr(Expr::FunctionParam(
           Type(String::from("int")),
           Literals::Identifier(Name(String::from("a")), None),
-          None
+          None,
+          false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
           Type(String::from("int")),
           Literals::Identifier(Name(String::from("b")), None),
-          None
+          None,
+          false
         ), None, None, None)
       ])),
       Some(Box::new(vec![
