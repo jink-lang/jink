@@ -39,7 +39,7 @@ impl Display for Token {
 }
 
 pub const OPERATORS: &[&str] = &[
-  "+", "-", "*", "/", "//", "%", "^", "=", "->",
+  "+", "-", "*", "/", "//", "%", "^", "=", "->", "...",
   ">", "<", ">=", "<=", "==", "!=",
   "-=", "+=", "*=", "/=", "//=", "%=",
   "!", "&", "?", "|", "::", "~", "#", ".",
@@ -87,6 +87,7 @@ pub enum Expr {
 
   /// op; left; right
   BinaryOperator(Operator, Box<Expression>, Box<Expression>),
+
   /// op; value
   UnaryOperator(Operator, Box<Expression>),
 
@@ -103,12 +104,15 @@ pub enum Expr {
 
   /// func name; args
   Call(Name, Box<Vec<Expression>>),
+
   /// func name; return type; params; body
   Function(Name, Option<Literals>, Option<Box<Vec<Expression>>>, Option<Box<Vec<Expression>>>),
-  /// type or let/const; ident; default
+
+  /// type or let/const; ident; default; spread
   /// 
   /// TODO?: Refactor Type here so that we don't have to rely on distinguishing between ident and let/const
-  FunctionParam(Type, Literals, Option<Box<Expression>>),
+  FunctionParam(Type, Literals, Option<Box<Expression>>, bool),
+
   /// value
   Return(Box<Expression>),
 
@@ -190,7 +194,9 @@ pub enum Error {
   UnexpectedToken(ErrorCtx),
   UnexpectedEOF(ErrorCtx),
   EmptyFunctionBody(ErrorCtx),
-  UnexpectedExpression(ErrorCtx)
+  UnexpectedExpression(ErrorCtx),
+  ParserError(ErrorCtx),
+  CompilerError(ErrorCtx),
 }
 
 impl Error {
@@ -257,6 +263,18 @@ impl std::fmt::Display for Error {
           err.start_pos.unwrap() + 1, err.line,
           underline,
           " ".repeat((err.start_pos.unwrap()) as usize) + "^"
+        );
+      },
+      Error::ParserError(err) => {
+        return write!(f, "Parser error at {}:{}\n  {}\n  {}", err.token.as_ref().unwrap().line,
+          err.start_pos.unwrap() + 1, err.line, err.message
+        );
+      },
+      Error::CompilerError(err) => {
+        let line = err.line.split("\n").next().unwrap();
+        let underline = " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat(line.trim_start().len() - err.start_pos.unwrap() as usize);
+        return write!(f, "Compilation error at {}:{}\n  {}\n  {}\n\n{}", err.end_pos.unwrap(),
+          err.start_pos.unwrap() + 1, err.line, underline, err.message
         );
       }
     }
