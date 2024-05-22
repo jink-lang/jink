@@ -9,23 +9,33 @@ The Jink programming language
 ![GitHub Repo stars](https://img.shields.io/github/stars/jink-lang/jink?style=for-the-badge)
 
 ## About
-This is the home of the Rust compiler of the [Jink](https://github.com/jink-lang/jink) programming language. This is a WIP and any contributions are welcome. Read more in the [Contributing](#contributing) section below.
+This is the home of the [Jink](https://github.com/jink-lang/jink) programming language. This is a WIP and any contributions are welcome. Read more in the [Contributing](#contributing) section below.
 
-## Goal Checklist / TODOs
+There is a [Discord server](https://discord.gg/cWzcQz2) that hosts the project where you can ask questions, get help, and chat with other contributors.
 
-The lexer and parser are now up to snuff with and surpass the original interpreted implementation. Here are a list of goals that scope out the new project, not in or by any particular order or specification.
+## Status
+The project is in its very early stages and being actively developed. If you have familiarity with compilers and/or LLVM, your expertise would be greatly appreciated.
+
+We have begun implementing the first stage compiler in Rust. The interpreter exists solely to mess about with the language and to test/simulate it. There are a number of issues and features that need to be addressed before we can move on to the next stage.
+
+#### Goal Checklist / TODOs
+
+The lexer and parser are now up to snuff with and surpass the original interpreted implementation. Here are a list of goals that scope out the new project and repository, not in or by any particular order or specification.
 
 ##### General
-- [ ] Build optimizer
-- [ ] Build bytecode/IR
-- [ ] Build VM / compile steps
 - [ ] Design standard for modules
 - [ ] Build standard library
-- [ ] Start bootstrapping compiler
+- [ ] Start writing self-hosted compiler
 - [ ] Add examples
 - [ ] Add documentation / tutorials
 - [ ] Add issue templates
 - [ ] Add pull request templates
+##### Compiler
+- [ ] Standardize type inference
+- [ ] Fix nested conditionals
+- [ ] Add structs/types
+- [ ] Add while loops
+- [ ] Write compiler tests
 ##### Lexer
 - [ ] Lex string templates
 ##### Parser
@@ -33,6 +43,8 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [x] Parse objects
 - [x] Parse arrays
 - [x] Parse classes
+- [ ] Parse self keyword in classes
+- [ ] Parse self keyword in methods
 - [x] Parse module imports
 - [ ] Parse string templates
 - [ ] Parse pub keyword on definitions
@@ -41,34 +53,68 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [ ] Parse del statements
 - [ ] Parse while loops
 - [ ] Parse for loops
+- [ ] Parse public statements
+- [ ] Parse external statements
 
 ## Examples
 
 ##### Hello World
 ```js
-fun main() {
-  print("Hello, World!"); // Hello, World!
-}
+print("Hello, World!"); // Hello, World!
 ```
 
 ##### Variables
 ```js
-let name = "Jacob";
-let age = 1 + 100 / 4:
+const name = "Jacob";
+let age;
+age = 1 + 100 / 4;
 
 print(name); // Jacob
 print(age); // 26
 ```
 
-##### Fibonacci
+##### Functions
 ```js
-// Fibonacci sequencer
-fun Fibonacci(let number) {
-  if (number <= 1) return number
-  return Fibonacci(number - 2) + Fibonacci(number - 1)
+// Inline
+fun inline(let abc) return abc;
+fun inline_newline(let def)
+  return def;
+
+// Typed params & return types
+fun add(int a, int b) -> int {
+  return a + b;
 }
 
-print(Fibonacci(10)) // 55
+// Recursion (Fibonacci sequencer)
+fun fib(let number) {
+  if (number <= 1) return number
+  return fib(number - 2) + fib(number - 1)
+}
+
+print(fib(10)) // 55
+
+// Dynamic defaults
+fun test(let a: 5) {
+  print(a);
+}
+
+test() // 5
+```
+
+##### Modules
+```js
+import module
+import module as hi
+import module.*
+import module.abc.*
+import module.abc.def
+import module.abc.def as xyz
+import from module.abc { def as xyz, mno, ghi as jkl }
+import from module.abc.def {
+  ghi as jkl,
+  mno,
+  pqr as stu
+}
 ```
 
 ##### Classes
@@ -107,7 +153,9 @@ print(business.get_address().city); // Jinkville
 
 You will need to have Rust installed on your machine. You can follow the instructions on the [Rust website](https://www.rust-lang.org/tools/install) to install it.
 
-### Building / Running
+You will also need LLVM 16.0.0 installed on your machine. You can follow the instructions on the [LLVM website](https://releases.llvm.org/download.html) to install it.
+
+### Running
 
 To run the project, you can run the following command:
 
@@ -121,7 +169,13 @@ To run the compiler in verbose mode, you can run the following command:
 cargo run ./path/to/file.jk -v
 ```
 
-This will help you see the output of the lexer and parser and debug any issues you may have.
+This will help you see the output of the parser and IR builder and debug any issues you may have.
+
+To run the interpreter, you can run the following command:
+
+```bash
+cargo run ./path/to/file.jk -i
+```
 
 ## Contributing
 
