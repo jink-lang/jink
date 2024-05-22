@@ -9,3 +9,5 @@ edition = "2021"
 [dependencies]
 strum_macros = "0.26"
 thiserror = "1.0.59"
+indexmap = "2.2.6"
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm16-0"] }
