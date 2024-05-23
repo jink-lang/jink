@@ -566,5 +566,33 @@ mod tests {
       Token { of_type: TokenTypes::RBrace, value: Some(String::from("}")), line: 4, ..Default::default() },
       Token { of_type: TokenTypes::EOF, value: None, line: 4, ..Default::default() }
     ]);
-  }  
+  }
+
+  #[test]
+  fn test_lex_newline_inside_string() {
+    let mut lexer = Lexer::new();
+    assert_eq!(lexer.lex("\"Hello,\\nworld!\"".to_string(), true), vec![
+      Token { of_type: TokenTypes::String, value: Some(String::from("Hello,\nworld!")), line: 1, ..Default::default() },
+      Token { of_type: TokenTypes::EOF, value: None, line: 1, ..Default::default() }
+    ]);
+  }
+
+  #[test]
+  fn test_lex_ignore_windows_newline_char() {
+    let mut lexer = Lexer::new();
+    assert_eq!(lexer.lex("let a = 1;\r\nlet b = 2;".to_string(), true), vec![
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 1, ..Default::default() },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("a")), line: 1, ..Default::default() },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("=")), line: 1, ..Default::default() },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("1")), line: 1, ..Default::default() },
+      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 1, ..Default::default() },
+      Token { of_type: TokenTypes::Newline, value: Some(String::from("\n")), line: 2, ..Default::default() },
+      Token { of_type: TokenTypes::Keyword, value: Some(String::from("let")), line: 2, ..Default::default() },
+      Token { of_type: TokenTypes::Identifier, value: Some(String::from("b")), line: 2, ..Default::default() },
+      Token { of_type: TokenTypes::Operator, value: Some(String::from("=")), line: 2, ..Default::default() },
+      Token { of_type: TokenTypes::Number, value: Some(String::from("2")), line: 2, ..Default::default() },
+      Token { of_type: TokenTypes::Semicolon, value: Some(String::from(";")), line: 2, ..Default::default() },
+      Token { of_type: TokenTypes::EOF, value: None, line: 2, ..Default::default() }
+    ]);
+  }
 }
