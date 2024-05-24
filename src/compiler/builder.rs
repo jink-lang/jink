@@ -8,7 +8,7 @@ use inkwell::context::Context;
 use inkwell::execution_engine::ExecutionEngine;
 use inkwell::module::{Linkage, Module};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue, StructValue};
+use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::AddressSpace;
 
 use jink::Error;
@@ -17,13 +17,18 @@ use jink::Literals;
 use jink::Operator;
 use jink::{Expression, Name, Type};
 
+pub struct Scope<'ctx> {
+  symbols: IndexMap<String, (Option<PointerValue<'ctx>>, BasicValueEnum<'ctx>)>,
+  is_function: bool,
+}
+
 pub struct CodeGen<'ctx> {
   pub code: String,
   context: &'ctx Context,
-  module: Module<'ctx>,
+  pub module: Module<'ctx>,
   builder: Builder<'ctx>,
-  symbol_table_stack: Vec<IndexMap<String, (PointerValue<'ctx>, BasicValueEnum<'ctx>)>>,
-  types: IndexMap<String, BasicTypeEnum<'ctx>>,
+  symbol_table_stack: Vec<Scope<'ctx>>,
+  type_tags: IndexMap<String, u64>,
   execution_engine: ExecutionEngine<'ctx>
 }
 
@@ -43,63 +48,82 @@ impl<'ctx> CodeGen<'ctx> {
       module,
       builder: context.create_builder(),
       symbol_table_stack: Vec::new(),
-      types: Self::map_types(context),
+      type_tags: Self::map_types(),
       execution_engine
     };
   }
 
-  fn map_types(context: &'ctx Context) -> IndexMap<String, BasicTypeEnum<'ctx>> {
+  // Map tags for builtin types
+  fn map_types() -> IndexMap<String, u64> {
     let mut types = IndexMap::new();
-
-    // bool
-    types.insert("i1".to_string(), context.bool_type().into());
-
-    // int32
-    types.insert("i32".to_string(), context.i32_type().into());
-
-    // int
-    types.insert("i64".to_string(), context.i64_type().into());
-    
-    // float
-    types.insert("double".to_string(), context.f64_type().into());
-
-    // string
-    types.insert("ptr".to_string(), context.ptr_type(AddressSpace::default()).into());
-
+    types.insert("null".to_string(), 0b01); // null ptr
+    types.insert("int".to_string(), 0b10); // i64
+    types.insert("i32".to_string(), 0b11);
+    types.insert("float".to_string(), 0b100); // double
+    types.insert("bool".to_string(), 0b101);
+    types.insert("array".to_string(), 0b110);
+    types.insert("object".to_string(), 0b111);
+    types.insert("mask".to_string(), 0b1001); // mask for type checking
     return types;
   }
 
-  pub fn enter_scope(&mut self) {
-    self.symbol_table_stack.push(IndexMap::new());
+  fn get_tag_by_type(&self, typ: BasicTypeEnum) -> u64 {
+    match typ {
+      BasicTypeEnum::IntType(_) => *self.type_tags.get("int").unwrap(),
+      BasicTypeEnum::FloatType(_) => *self.type_tags.get("float").unwrap(),
+      BasicTypeEnum::ArrayType(_) => *self.type_tags.get("array").unwrap(),
+      BasicTypeEnum::PointerType(_) => *self.type_tags.get("object").unwrap(),
+      _ => panic!("Invalid type for tag"),
+    }
+  }
+
+  // fn add_type(&mut self, name: String) {
+  //   // Pop the mask tag and reuse its bit for the new type
+  //   let mask = self.type_tags.pop().unwrap();
+  //   self.type_tags.insert(name.clone(), mask.1);
+  //   // Push a new mask tag back
+  //   self.type_tags.insert(name, mask.1 + 1);
+  // }
+
+  pub fn enter_scope(&mut self, is_function: bool) {
+    self.symbol_table_stack.push(Scope { symbols: IndexMap::new(), is_function });
   }
 
   pub fn exit_scope(&mut self) {
     self.symbol_table_stack.pop();
   }
 
-  pub fn set_symbol(&mut self, name: String, inst: PointerValue<'ctx>, value: BasicValueEnum<'ctx>) {
+  pub fn set_symbol(&mut self, name: String, inst: Option<PointerValue<'ctx>>, value: BasicValueEnum<'ctx>) {
     if let Some(scope) = self.symbol_table_stack.last_mut() {
-      scope.insert(name, (inst, value));
+      scope.symbols.insert(name, (inst, value));
     } else {
       panic!("Unexpected compilation error, set symbol without a scope");
     }
   }
 
-  pub fn get_symbol(&self, name: &str) -> Option<(String, PointerValue<'ctx>, BasicValueEnum<'ctx>)> {
+  /// Get symbol from symbol table stack
+  /// 
+  /// Returns Result->Option of symbol name, instruction pointer, value and whether we left a function scope to obtain it 
+  pub fn get_symbol(&self, name: &str) -> Result<Option<(String, Option<PointerValue<'ctx>>, BasicValueEnum<'ctx>, bool)>, Error> {
+    let mut exited_function = false;
     for scope in self.symbol_table_stack.iter().rev() {
-      if let Some((inst, value)) = scope.get(name) {
-        return Some((name.to_string(), inst.clone(), value.clone()));
+      if let Some((inst, value)) = scope.symbols.get(name) {
+        return Ok(Some((name.to_string(), inst.clone(), value.clone(), exited_function)));
+      }
+
+      if scope.is_function {
+        exited_function = true;
       }
     }
-    return None;
+    return Ok(None);
   }
 
-  pub fn get_types_as_list(&self) -> Vec<BasicTypeEnum<'ctx>> {
-    let mut types = vec![];
-    for (_, ty) in self.types.iter() {
-      types.push(ty.clone());
+  fn get_all_cur_symbols(&self) -> IndexMap<String, (Option<PointerValue<'ctx>>, BasicValueEnum<'ctx>, bool)> {
+    let mut symbols = IndexMap::new();
+    for (name, (inst, value)) in self.symbol_table_stack.last().unwrap().symbols.iter() {
+      symbols.insert(name.clone(), (inst.clone(), value.clone(), false));
     }
-    return types;
+    return symbols;
   }
 
   fn create_main_function(&self) -> FunctionValue<'ctx> {
@@ -110,7 +134,6 @@ impl<'ctx> CodeGen<'ctx> {
     return main_fn;
   }
 
-  // TODO: Link to Rust functions instead of C functions to simplify build process?
   fn add_builtin_functions(&self) {
     let ptr_type = self.context.ptr_type(AddressSpace::default());
 
@@ -137,14 +160,14 @@ impl<'ctx> CodeGen<'ctx> {
     self.module.add_function("ptr", ptr_func_type, None);
   }
 
-  pub fn build(&mut self, code: String, ast: Vec<Expression>, verbose: bool) -> Result<(), Error> {
+  pub fn build(&mut self, code: String, ast: Vec<Expression>, verbose: bool, do_execute: bool) -> Result<(), Error> {
     self.code = code;
 
     // Prepare the program entry point
     let main_fn = self.create_main_function();
 
     // Enter the main application scope
-    self.enter_scope();
+    self.enter_scope(false);
 
     self.add_builtin_functions();
 
@@ -162,18 +185,30 @@ impl<'ctx> CodeGen<'ctx> {
       println!("{}", self.module.print_to_string().to_string());
     }
 
-    // Print the variable table
-    // for scope in self.symbol_table_stack.iter() {
-    //   for (key, (inst, value)) in scope.iter() {
-    //     println!("{}: {:?}", key, value.print_to_string());
+    // Print the symbol table
+    // if verbose {
+    //   for scope in self.symbol_table_stack.iter() {
+    //     for (key, (inst, value)) in scope.symbols.iter() {
+    //       println!("{}: {:?}", key, value.print_to_string());
+    //     }
     //   }
     // }
 
-    // Execute the program
     if let Err(e) = self.module.verify() {
-      println!("Code generation error: {}", e.to_string());
+      // println!("Code generation error: {}", e.to_string());
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        &"",
+        Some(0),
+        Some(0),
+        e.to_string()
+      ));
     }
-    unsafe { self.execution_engine.run_function_as_main(main_fn, &[]); };
+
+    if do_execute {
+      unsafe { self.execution_engine.run_function_as_main(main_fn, &[]); }
+    }
 
     return Ok(());
   }
@@ -262,7 +297,7 @@ impl<'ctx> CodeGen<'ctx> {
     // Build the conditonal block - if this then do this
     self.builder.position_at_end(then_block);
     // Push a new scope for conditional block
-    self.enter_scope();
+    self.enter_scope(false);
     for exp in body.unwrap().iter() {
       if let Expr::Conditional(typ, expr, body, ebody) = exp.expr.clone() {
         self.build_if(typ, expr, body, ebody, function, then_block)?;
@@ -283,16 +318,16 @@ impl<'ctx> CodeGen<'ctx> {
       }
     }
     // Save the values of the then block
-    let then_vals = self.symbol_table_stack.last().unwrap().to_owned();
+    let then_vals = self.get_all_cur_symbols();
     // Pop the scope
     self.exit_scope();
     self.builder.build_unconditional_branch(merge_block).unwrap();
 
     // Build the "else" block
     self.builder.position_at_end(else_block);
-    self.enter_scope();
+    self.enter_scope(false);
     self.build_else_body(else_block, else_body)?;
-    let else_vals = self.symbol_table_stack.last().unwrap().to_owned();
+    let else_vals = self.get_all_cur_symbols();
     self.exit_scope();
     self.builder.build_unconditional_branch(merge_block).unwrap();
 
@@ -308,16 +343,16 @@ impl<'ctx> CodeGen<'ctx> {
     let then_val = if let Some(val) = then_vals.get(name) {
       val.clone()
       } else {
-        self.get_symbol(name)
-          .map(|(_, pval, val)| (pval, val))
+        self.get_symbol(name)?
+          .map(|(_, pval, val, exited_func)| (pval, val, exited_func))
           .expect("Value should be present in then_vals or symbol table")
       };
 
       let else_val = if let Some(val) = else_vals.get(name) {
         val.clone()
       } else {
-        self.get_symbol(name)
-          .map(|(_, pval, val)| (pval, val))
+        self.get_symbol(name)?
+          .map(|(_, pval, val, exited_func)| (pval, val, exited_func))
           .expect("Value should be present in else_vals or symbol table")
       };
 
@@ -352,16 +387,26 @@ impl<'ctx> CodeGen<'ctx> {
       ]);
 
       // Check if the symbol exists in the symbol table
-      if let Some(symbol) = self.get_symbol(name) {
+      if let Some(symbol) = self.get_symbol(name)? {
         // Update the existing variable with the new PHI value
-        let (_, inst, _) = symbol;
-        self.builder.build_store(inst, phi.as_basic_value()).unwrap();
+        let (_, inst, _, exited_func) = symbol;
+        if exited_func {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &"",
+            Some(0),
+            Some(0),
+            format!("Cannot reinitialize variable {} in function scope", name)
+          ));
+        }
+        self.builder.build_store(inst.unwrap(), phi.as_basic_value()).unwrap();
         self.set_symbol(name.to_string(), inst, phi.as_basic_value());
       } else {
         // Create a new variable and store the PHI value
         let var = self.builder.build_alloca(phi_type, &name).unwrap();
         self.builder.build_store(var, phi.as_basic_value()).unwrap();
-        self.set_symbol(name.to_string(), var, phi.as_basic_value());
+        self.set_symbol(name.to_string(), Some(var), phi.as_basic_value());
       }
     }
 
@@ -463,7 +508,7 @@ impl<'ctx> CodeGen<'ctx> {
     if let Some(ty) = ty {
 
       // Check if variable already exists
-      let symbol = self.get_symbol(&name);
+      let symbol = self.get_symbol(&name)?;
       if symbol.is_some() && !is_new_scope {
         return Err(Error::new(
           Error::CompilerError,
@@ -479,24 +524,36 @@ impl<'ctx> CodeGen<'ctx> {
         "let" => {
           match set {
             BasicValueEnum::IntValue(i) => {
-              let var = self.builder.build_alloca(self.context.i64_type(), &name).unwrap();
-              self.builder.build_store(var, i).unwrap();
-              self.set_symbol(name, var, i.into());
+              // Allocate space and store the value
+              let ptr = self.builder.build_alloca(self.context.i64_type(), &name).unwrap();
+              self.builder.build_store(ptr, i).unwrap();
+
+              // Build tagged pointer
+              let tagged = self.tag_ptr(ptr, *self.type_tags.get("int").unwrap());
+
+              // Set the symbol
+              self.set_symbol(name, Some(tagged), i.into());
             },
             BasicValueEnum::FloatValue(f) => {
-              let var = self.builder.build_alloca(self.context.f64_type(), &name).unwrap();
-              self.builder.build_store(var, f).unwrap();
-              self.set_symbol(name, var, f.into());
+              // Allocate space and store the value
+              let ptr = self.builder.build_alloca(self.context.f64_type(), &name).unwrap();
+              self.builder.build_store(ptr, f).unwrap();
+
+              // Build tagged pointer
+              let tagged = self.tag_ptr(ptr, *self.type_tags.get("float").unwrap());
+
+              // Set the symbol
+              self.set_symbol(name, Some(tagged), f.into());
             },
             BasicValueEnum::ArrayValue(a) => {
               let var = self.builder.build_alloca(self.context.i64_type(), &name).unwrap();
               self.builder.build_store(var, a).unwrap();
-              self.set_symbol(name, var, a.into());
+              self.set_symbol(name, Some(var), a.into());
             },
             BasicValueEnum::PointerValue(a) => {
               let var = self.builder.build_alloca(self.context.ptr_type(AddressSpace::default()), &name).unwrap();
               self.builder.build_store(var, a).unwrap();
-              self.set_symbol(name, var, a.into());
+              self.set_symbol(name, Some(var), a.into());
             },
             _ => panic!("Invalid type for let"),
           }
@@ -506,12 +563,12 @@ impl<'ctx> CodeGen<'ctx> {
             BasicValueEnum::IntValue(i) => {
               let var = self.builder.build_alloca(self.context.i64_type(), &name).unwrap();
               self.builder.build_store(var, i).unwrap();
-              self.set_symbol(name, var, var.as_basic_value_enum());
+              self.set_symbol(name, Some(var), var.as_basic_value_enum());
             },
             BasicValueEnum::FloatValue(f) => {
               let var = self.builder.build_alloca(self.context.f64_type(), &name).unwrap();
               self.builder.build_store(var, f).unwrap();
-              self.set_symbol(name, var, var.as_basic_value_enum());
+              self.set_symbol(name, Some(var), var.as_basic_value_enum());
             },
             _ => panic!("Invalid type for const"),
           }
@@ -520,18 +577,55 @@ impl<'ctx> CodeGen<'ctx> {
       }
     } else {
       // Setting existing variable
-      let var = self.get_symbol(&name).unwrap().1;
-      self.builder.build_store(var, set).unwrap();
+      let var = self.get_symbol(&name)?.unwrap().1;
+      self.builder.build_store(var.unwrap(), set).unwrap();
       self.set_symbol(name, var, set);
     }
 
     return Ok(());
   }
 
+  // TODO: Clean up & document
+  fn tag_ptr(&self, ptr: PointerValue<'ctx>, tag: u64) -> PointerValue<'ctx> {
+    let int_ptr = self.builder.build_ptr_to_int(ptr, self.context.i64_type(), "ptr_to_int").unwrap();
+    let tag_value = self.context.i64_type().const_int(tag, false);
+    let tagged_int = self.builder.build_or(int_ptr, tag_value, "tagged_ptr").unwrap();
+    return self.builder.build_int_to_ptr(tagged_int, ptr.get_type(), "tagged_int_ptr").unwrap();
+  }
+
+  // TODO: Clean up & document
+  fn extract_tag(&self, ptr: PointerValue<'ctx>) -> (PointerValue<'ctx>, IntValue<'ctx>) {
+    let int_ptr = self.builder.build_ptr_to_int(ptr, self.context.i64_type(), "ptr_as_int").unwrap();
+    let mask = self.type_tags.get("mask").unwrap();
+    let tag = self.builder.build_and(int_ptr, self.context.i64_type().const_int(*mask, false), "extract_tag").unwrap();
+    let untag_value = self.context.i64_type().const_int(!*mask, false);
+    let untagged_int_ptr = self.builder.build_and(int_ptr, untag_value, "untagged_ptr").unwrap();
+    let untagged_ptr = self.builder.build_int_to_ptr(untagged_int_ptr, ptr.get_type(), "untagged_ptr_value").unwrap();
+    return (untagged_ptr, tag);
+  }
+
+  // TODO: Replace with less specific case
+  // Probably need to build phi nodes to come out of loading dynamic types
+  fn _load_var_to_type(&self, name: String) -> Result<(), Error> {
+    let (_, tagged_ptr, _, _exited_func) = self.get_symbol(&name)?.unwrap();
+    let (_, tag) = self.extract_tag(tagged_ptr.unwrap());
+    // let tag_value = self.builder.build_int_z_extend(tag, self.context.i64_type(), "tag_value").unwrap();
+
+    let a = self.builder.build_int_compare(
+      inkwell::IntPredicate::EQ,
+      tag,
+      self.context.i64_type().const_int(*self.type_tags.get("int").unwrap(), false),
+      "is_int"
+    ).unwrap();
+
+    println!("{:?}", a);
+    return Ok(());
+  }
+
   fn build_function(&mut self, name: Name, ret_typ: Option<Literals>, params: Option<Box<Vec<Expression>>>, body: Option<Box<Vec<Expression>>>, block: BasicBlock<'ctx>) -> Result<(), Error> {
     // Get function parameters
     let mut parameters: Vec<BasicMetadataTypeEnum> = vec![];
-    let mut placeholders: Vec<(usize, String, BasicTypeEnum)> = vec![];
+    // let mut placeholders: Vec<(usize, String, BasicTypeEnum)> = vec![];
     let mut defaults: Vec<(usize, String, Box<Expression>)> = vec![];
     let mut variadic = false;
     if params.is_some() {
@@ -591,7 +685,7 @@ impl<'ctx> CodeGen<'ctx> {
 
           variadic = true;
         } else {
-          let t: BasicTypeEnum = match typ.0.as_str() {
+          let _t: BasicTypeEnum = match typ.0.as_str() {
             "let" => {
               // let t = self.context.struct_type(&self.get_types_as_list(), false);
               let t = self.context.ptr_type(AddressSpace::default());
@@ -628,7 +722,7 @@ impl<'ctx> CodeGen<'ctx> {
           // If parameter is a placeholder (no default)
           // TODO: Change this around. I think we can get the parameter pointers instead of re-allocating
           } else {
-            placeholders.push((i, name.0, t));
+            // placeholders.push((i, name.0, t));
           }
         }
       }
@@ -653,26 +747,75 @@ impl<'ctx> CodeGen<'ctx> {
     let mut func_block = self.context.append_basic_block(function, format!("{}-entry", name.0).as_str());
     self.builder.position_at_end(func_block);
 
-    // Add parameter defaults to the function
-    for (i, n, default) in defaults.iter() {
-      let val = self.visit(&default, func_block)?;
-      let arg = function.get_nth_param(*i as u32).unwrap();
-      arg.set_name(&n);
-      self.builder.build_store(arg.into_pointer_value(), val).unwrap();
-      self.set_symbol(n.clone(), arg.into_pointer_value(), val);
+    // Set up function parameters
+    for (i, param) in function.get_params().iter().enumerate() {
+
+      // Get name
+      let name: String = match params.clone().unwrap()[i].clone().expr {
+        Expr::FunctionParam(_, name, _, _) => {
+          match name {
+            Literals::Identifier(name, _) => name.0,
+            _ => panic!("Invalid function parameter"),
+          }
+        },
+        _ => panic!("Invalid function parameter"),
+      };
+
+      // Set parameter name
+      param.set_name(&name);
+
+      // if in defaults
+      if let Some((_, _, default)) = defaults.iter().find(|(index, _, _)| *index == i) {
+        let val = self.visit(&default, func_block)?;
+        self.builder.build_store(param.into_pointer_value(), val).unwrap();
+        self.set_symbol(name, Some(param.into_pointer_value()), val);
+
+      // Not in defaults
+      } else {
+        // param.set_name(&params.clone().unwrap()[i].clone().expr.0);
+        // If not typed
+        if param.get_type().is_pointer_type() {
+          // let var = self.builder.build_alloca(param.get_type(), &param.get_name().to_str().unwrap()).unwrap();
+          // self.builder.build_store(var, param.into()).unwrap();
+          // self.set_symbol(name, Some(param.into_pointer_value()), *param);
+          
+          // Load the variable to the correct type
+          let (_, tag) = self.extract_tag(param.into_pointer_value());
+          let t = self.get_tag_by_type(param.get_type().as_basic_type_enum());
+          println!("{:?} {:?}", tag, t);
+        } else {
+          // let var = self.builder.build_alloca(param.get_type(), &param.get_name().to_str().unwrap()).unwrap();
+          // self.builder.build_store(var, param.into()).unwrap();
+
+          // self.builder.build_load(param.into(), param).unwrap();
+          // self.builder.build_store(param.into_pointer_value(), param.into()).unwrap();
+
+          self.set_symbol(name, None, *param);
+        }
+        // self.set_symbol(param.get_name().to_str().unwrap().to_string(), param.into_pointer_value(), *param);
+      }
     }
+
+    // Add parameter defaults to the function
+    // for (i, n, default) in defaults.iter() {
+    //   let val = self.visit(&default, func_block)?;
+    //   let arg = function.get_nth_param(*i as u32).unwrap();
+    //   arg.set_name(&n);
+    //   self.builder.build_store(arg.into_pointer_value(), val).unwrap();
+    //   self.set_symbol(n.clone(), arg.into_pointer_value(), val);
+    // }
 
     // Add parameter placeholders to symbol table
-    for (i, n, t) in placeholders.iter() {
-      let arg = function.get_nth_param(*i as u32).unwrap();
-      arg.set_name(&n);
-      let var = self.builder.build_alloca(t.clone(), &n).unwrap();
-      self.builder.build_store(var, arg).unwrap();
-      self.set_symbol(n.clone(), var, arg.into());
-    }
+    // for (i, n, t) in placeholders.iter() {
+    //   let arg = function.get_nth_param(*i as u32).unwrap();
+    //   arg.set_name(&n);
+    //   let var = self.builder.build_alloca(t.clone(), &n).unwrap();
+    //   self.builder.build_store(var, arg).unwrap();
+    //   self.set_symbol(n.clone(), var, arg.into());
+    // }
 
     // Enter the function scope
-    self.enter_scope();
+    self.enter_scope(true);
 
     // Fill the function body
     for ex in body.as_ref().unwrap().iter() {
@@ -789,22 +932,26 @@ impl<'ctx> CodeGen<'ctx> {
         // Old arg map
         // let arg_values: Vec<BasicMetadataValueEnum> = args.iter().map(|arg| self.visit(&arg, block).unwrap().into()).collect();
 
-        let mut values: Vec<BasicMetadataValueEnum> = vec![];
+        let mut values: Vec<BasicValueEnum> = vec![];
+        let mut meta: Vec<BasicMetadataValueEnum> = vec![];
 
         // Build args
-        for (i, arg) in args.iter().enumerate() {
+        for (_, arg) in args.iter().enumerate() {
           let val = self.visit(&arg, block)?;
           match val.into() {
             BasicMetadataValueEnum::IntValue(int_value) => {
               let int_type = int_value.get_type();
               if int_type.get_bit_width() == 64 {
-                values.push(BasicMetadataValueEnum::IntValue(int_value));
+                values.push(int_value.into());
+                meta.push(BasicMetadataValueEnum::IntValue(int_value));
               } else {
                 values.push(val.into());
+                meta.push(val.into());
               }
             },
             BasicMetadataValueEnum::PointerValue(ptr_value) => {
-              values.push(BasicMetadataValueEnum::PointerValue(ptr_value));
+              values.push(ptr_value.into());
+              meta.push(BasicMetadataValueEnum::PointerValue(ptr_value));
             },
             BasicMetadataValueEnum::ArrayValue(array_value) => {
               let array_type = array_value.get_type();
@@ -815,65 +962,38 @@ impl<'ctx> CodeGen<'ctx> {
                   let global = self.module.add_global(array_type, None, "global");
                   global.set_initializer(&array_value);
                   let ptr = global.as_pointer_value();
-                  values.push(BasicMetadataValueEnum::PointerValue(ptr));
+                  values.push(ptr.into());
+                  meta.push(BasicMetadataValueEnum::PointerValue(ptr));
                 } else {
                   values.push(val.into());
+                  meta.push(val.into());
                 }
               } else {
                 values.push(val.into());
+                meta.push(val.into());
               }
             },
-            BasicMetadataValueEnum::StructValue(struct_value) => {
-
-              // If the parameter / expected type is the variant/dynamic type
-              // TODO: Rethink/rework; the way I suspected this could work may not
-              let expected_type = function.unwrap().get_nth_param(i as u32).unwrap().get_type();
-              let variant = self.context.struct_type(&self.get_types_as_list(), false);
-              if expected_type == variant.as_basic_type_enum() {
-                values.push(val.into());
-              } else {
-                if let Some(casted) = self.cast_varying_to_type(struct_value, expected_type) {
-                  values.push(casted.into());
-                } else {
-                  println!("val: {:?}", struct_value);
-                  return Err(Error::new(
-                    Error::CompilerError,
-                    None,
-                    &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-                    expr.first_pos,
-                    expr.last_line,
-                    format!("Incompatible types for function argument")
-                  ));
-                }
-              }
-              // if param.get_type().as_basic_type_enum() == variant.as_basic_type_enum() {
-
-              //   println!("val: {:?}", val.print_to_string());
-              //   let val_type = val.get_type();
-              //   let pointer = self.builder.build_alloca(val_type, "val_ptr").unwrap();
-              //   self.builder.build_store(pointer, val).unwrap();
-
-              //   // Get the value in the form of the variant struct
-              //   let v = self.builder.build_load(
-              //     variant,
-              //     pointer,
-              //     &name.0
-              //   ).unwrap();
-
-              //   println!("v: {:?}", v.print_to_string());
-
-              //   values.push(v.into());
-
-              // } else {
-              //   values.push(val.into());
-              // }
+            _ => {
+              values.push(val.into());
+              meta.push(val.into());
             },
-            _ => values.push(val.into()),
+          }
+        }
+
+        for (i, param) in function.unwrap().get_params().iter().enumerate() {
+          let param_type = param.get_type();
+          if param_type.is_pointer_type() {
+            if !values[i].is_pointer_value() {
+              let ptr = self.builder.build_alloca(param_type, "ptr").unwrap();
+              self.tag_ptr(ptr, self.get_tag_by_type(values[i].get_type()));
+              self.builder.build_store(ptr, values[i]).unwrap();
+              meta[i] = ptr.into();
+            }
           }
         }
 
         // Build call and extract value
-        let call = self.builder.build_call(function.unwrap(), &values, &name.0).unwrap();
+        let call = self.builder.build_call(function.unwrap(), &meta, &name.0).unwrap();
         match call.try_as_basic_value().left() {
           Some(val) => {
             return Ok(val);
@@ -899,51 +1019,6 @@ impl<'ctx> CodeGen<'ctx> {
     }
   }
 
-  // TODO: Rethink this
-  fn cast_varying_to_type(&self, value: StructValue<'ctx>, expected_type: BasicTypeEnum<'ctx>) -> Option<BasicValueEnum<'ctx>> {
-    // let struct_value = value.into_struct_value();
-
-    // Define the mapping between type and field name/index
-    let name = match expected_type {
-      BasicTypeEnum::IntType(int_type) => {
-        match int_type.get_bit_width() {
-          64 => "i64",
-          32 => "i32",
-          _ => "",
-        }
-      },
-      BasicTypeEnum::FloatType(_) => "double",
-      BasicTypeEnum::PointerType(_) => "ptr",
-      _ => "",
-    };
-
-    // let field = struct_value.get_fields().find(|field| field.get_name().to_str().unwrap() == name)
-
-    // Extract the field from the variant struct
-    // print length of fields
-    println!("fields: {:?}", value.get_fields().count());
-    for (i, v) in value.get_fields().enumerate() {
-      println!("v: {:?}", v);
-      if v.get_name().to_str().unwrap() == name {
-        let field = value.get_field_at_index(i as u32);
-        println!("field: {:?}", field);
-        return field;
-      }
-    }
-
-    return None;
-    // match (value, expected_type) {
-    //   (BasicValueEnum::IntValue(int_value), BasicTypeEnum::IntType(int_type)) => {
-    //     Some(BasicValueEnum::IntValue(self.builder.build_int_cast(int_value, int_type, "casted").unwrap()))
-    //   },
-    //   (BasicValueEnum::PointerValue(ptr_value), BasicTypeEnum::PointerType(ptr_type)) => {
-    //     Some(BasicValueEnum::PointerValue(self.builder.build_pointer_cast(ptr_value, ptr_type, "casted").unwrap()))
-    //   },
-    //   // Add more cases as needed for other types
-    //   _ => None, // Return None if types are incompatible or not handled
-    // }
-  }
-
   fn handle_literal(&self, literal: Literals, expr: &Expression) -> Result<BasicValueEnum<'ctx>, Error> {
     match literal {
       Literals::Integer(i) => {
@@ -965,7 +1040,7 @@ impl<'ctx> CodeGen<'ctx> {
         return Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum());
       },
       Literals::Identifier(n, _) => {
-        if let Some((_, _, value)) = self.get_symbol(&n.0) {
+        if let Some((_, _, value, _exited_func)) = self.get_symbol(&n.0)? {
           return Ok(value);
         } else {
           return Err(Error::new(
@@ -987,7 +1062,7 @@ impl<'ctx> CodeGen<'ctx> {
     let val: BasicValueEnum<'ctx>;
     let mut name: Option<String> = None;
     if let Expr::Literal(Literals::Identifier(n, _)) = value.clone().expr {
-      val = self.get_symbol(&n.0).unwrap().2;
+      val = self.get_symbol(&n.0)?.unwrap().2;
       name = Some(n.0);
       // val = self.builder.build_load(val.into_pointer_value(), val.into_pointer_value(), &name.0).unwrap().as_basic_value_enum();
     } else {
@@ -1000,7 +1075,7 @@ impl<'ctx> CodeGen<'ctx> {
           "-" => {
             if name.is_some() {
               // Reassign the identifier with the new value
-              let a = self.get_symbol(&name.unwrap()).unwrap().1;
+              let a = self.get_symbol(&name.unwrap())?.unwrap().1.unwrap();
               if a.is_const() {
                 panic!("Cannot assign to a constant");
               } else {
@@ -1019,13 +1094,13 @@ impl<'ctx> CodeGen<'ctx> {
           "++:pre" => {
             if name.is_some() {
               // Reassign the identifier with the new value
-              let a = self.get_symbol(&name.as_ref().unwrap()).unwrap().1;
+              let a = self.get_symbol(&name.as_ref().unwrap())?.unwrap().1.unwrap();
               if a.is_const() {
                 panic!("Cannot assign to a constant");
               } else {
                 let v = self.builder.build_int_add(val.into_int_value(), self.context.i64_type().const_int(1, false), "addtmp").unwrap();
                 self.builder.build_store(a, v).unwrap();
-                self.set_symbol(name.unwrap(), a, v.as_basic_value_enum());
+                self.set_symbol(name.unwrap(), Some(a), v.as_basic_value_enum());
                 return Ok(v.as_basic_value_enum());
               }
             } else {
@@ -1037,13 +1112,13 @@ impl<'ctx> CodeGen<'ctx> {
           "++:post" => {
             if name.is_some() {
               // Reassign the identifier with the new value
-              let a = self.get_symbol(&name.as_ref().unwrap()).unwrap().1;
+              let a = self.get_symbol(&name.as_ref().unwrap())?.unwrap().1.unwrap();
               if a.is_const() {
                 panic!("Cannot assign to a constant");
               } else {
                 let v = self.builder.build_int_add(val.into_int_value(), self.context.i64_type().const_int(1, false), "addtmp").unwrap();
                 self.builder.build_store(a, v).unwrap();
-                self.set_symbol(name.unwrap(), a, v.as_basic_value_enum());
+                self.set_symbol(name.unwrap(), Some(a), v.as_basic_value_enum());
                 return Ok(val);
               }
             } else {
@@ -1055,13 +1130,13 @@ impl<'ctx> CodeGen<'ctx> {
           "--:pre" => {
             if name.is_some() {
               // Reassign the identifier with the new value
-              let a = self.get_symbol(&name.as_ref().unwrap()).unwrap().1;
+              let a = self.get_symbol(&name.as_ref().unwrap())?.unwrap().1.unwrap();
               if a.is_const() {
                 panic!("Cannot assign to a constant");
               } else {
                 let v = self.builder.build_int_sub(val.into_int_value(), self.context.i64_type().const_int(1, false), "subtmp").unwrap();
                 self.builder.build_store(a, v).unwrap();
-                self.set_symbol(name.unwrap(), a, v.as_basic_value_enum());
+                self.set_symbol(name.unwrap(), Some(a), v.as_basic_value_enum());
                 return Ok(v.as_basic_value_enum());
               }
             } else {
@@ -1072,13 +1147,13 @@ impl<'ctx> CodeGen<'ctx> {
           "--:post" => {
             if name.is_some() {
               // Reassign the identifier with the new value
-              let a = self.get_symbol(&name.as_ref().unwrap()).unwrap().1;
+              let a = self.get_symbol(&name.as_ref().unwrap())?.unwrap().1.unwrap();
               if a.is_const() {
                 panic!("Cannot assign to a constant");
               } else {
                 let v = self.builder.build_int_sub(val.into_int_value(), self.context.i64_type().const_int(1, false), "subtmp").unwrap();
                 self.builder.build_store(a, v).unwrap();
-                self.set_symbol(name.unwrap(), a, v.as_basic_value_enum());
+                self.set_symbol(name.unwrap(), Some(a), v.as_basic_value_enum());
                 return Ok(val);
               }
             } else {
@@ -1108,11 +1183,13 @@ impl<'ctx> CodeGen<'ctx> {
       (BasicValueEnum::IntValue(_), BasicValueEnum::IntValue(_)) => "int".to_string(),
       (BasicValueEnum::PointerValue(a), BasicValueEnum::PointerValue(b)) => {
         // Get symbols from pointer names
-        let (_, a_inst, _a_val) = self.get_symbol(&a.get_name().to_string_lossy()).unwrap();
-        let (_, b_inst, _b_val) = self.get_symbol(&b.get_name().to_string_lossy()).unwrap();
+        println!("a: {:?}\nb: {:?}", a, b);
+        let (_, a_inst, _a_val, _) = self.get_symbol(&a.get_name().to_string_lossy())?.unwrap();
+        let (_, b_inst, _b_val, _) = self.get_symbol(&b.get_name().to_string_lossy())?.unwrap();
 
-        let a_value = self.builder.build_load(self.context.i64_type(), a_inst, "lhs_val").unwrap();
-        let b_value = self.builder.build_load(self.context.i64_type(), b_inst, "rhs_val").unwrap();
+        // panic!("Pointer arithmetic not yet implemented");
+        let a_value = self.builder.build_load(self.context.i64_type(), a_inst.unwrap(), "lhs_val").unwrap();
+        let b_value = self.builder.build_load(self.context.i64_type(), b_inst.unwrap(), "rhs_val").unwrap();
 
         left = a_value.as_basic_value_enum();
         right = b_value.as_basic_value_enum();
@@ -1124,6 +1201,18 @@ impl<'ctx> CodeGen<'ctx> {
         } else {
           panic!("Invalid types for operation");
         }
+      },
+      (BasicValueEnum::PointerValue(a), BasicValueEnum::IntValue(_)) => {
+        let (_, a_inst, _a_val, _) = self.get_symbol(&a.get_name().to_string_lossy())?.unwrap();
+        let a_value = self.builder.build_load(self.context.i64_type(), a_inst.unwrap(), "lhs_val").unwrap();
+        left = a_value.as_basic_value_enum();
+        "int".to_string()
+      },
+      (BasicValueEnum::IntValue(_), BasicValueEnum::PointerValue(b)) => {
+        let (_, b_inst, _b_val, _) = self.get_symbol(&b.get_name().to_string_lossy())?.unwrap();
+        let b_value = self.builder.build_load(self.context.i64_type(), b_inst.unwrap(), "rhs_val").unwrap();
+        left = b_value.as_basic_value_enum();
+        "int".to_string()
       },
       (BasicValueEnum::StructValue(a), BasicValueEnum::StructValue(b)) => {
         // Get fields from struct values
@@ -1305,13 +1394,13 @@ impl<'ctx> CodeGen<'ctx> {
             match typ.as_str() {
               "float" => {
                 if let Expr::Literal(Literals::Identifier(n, _)) = lhs.clone().expr {
-                  let a = self.get_symbol(&n.0).unwrap().1;
+                  let a = self.get_symbol(&n.0)?.unwrap().1.unwrap();
                   if a.is_const() {
                     panic!("Cannot assign to a constant");
                   } else {
                     let val = self.builder.build_float_add(left.into_float_value(), right.into_float_value(), "addtmp").unwrap();
                     self.builder.build_store(a, val).unwrap();
-                    self.set_symbol(n.0, a, val.as_basic_value_enum());
+                    self.set_symbol(n.0, Some(a), val.as_basic_value_enum());
                     return Ok(val.as_basic_value_enum());
                   }
                 } else {
@@ -1320,13 +1409,13 @@ impl<'ctx> CodeGen<'ctx> {
               },
               "int" => {
                 if let Expr::Literal(Literals::Identifier(n, _)) = lhs.clone().expr {
-                  let a = self.get_symbol(&n.0).unwrap().1;
+                  let a = self.get_symbol(&n.0)?.unwrap().1.unwrap();
                   if a.is_const() {
                     panic!("Cannot assign to a constant");
                   } else {
                     let val = self.builder.build_int_add(left.into_int_value(), right.into_int_value(), "addtmp").unwrap();
                     self.builder.build_store(a, val).unwrap();
-                    self.set_symbol(n.0, a, val.as_basic_value_enum());
+                    self.set_symbol(n.0, Some(a), val.as_basic_value_enum());
                     return Ok(val.as_basic_value_enum());
                   }
                 } else {
@@ -1345,5 +1434,38 @@ impl<'ctx> CodeGen<'ctx> {
         }
       },
     }
+  }
+}
+
+// Tests
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_compile_assignment_reassignment() -> Result<(), Error> {
+    let context = Context::create();
+    let mut codegen = CodeGen::new(&context);
+    let code = "let a = 1;
+    let b = 2;
+    a = 3;
+    let c = a + b;".to_string();
+    let mut parser = crate::Parser::new();
+    let ast = parser.parse(code.clone(), false, false)?;
+    codegen.build(code, ast, false, true)?;
+    return Ok(());
+  }
+
+  #[test]
+  fn test_compile_print_numbers() -> Result<(), Error> {
+    let context = Context::create();
+    let mut codegen = CodeGen::new(&context);
+    let code = "let a = 1;
+    let b = 2;
+    printf(\"a:%d b:%d\", a, b);".to_string();
+    let mut parser = crate::Parser::new();
+    let ast = parser.parse(code.clone(), false, false)?;
+    codegen.build(code, ast, false, true)?;
+    return Ok(());
   }
 }
