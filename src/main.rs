@@ -1,5 +1,4 @@
 use inkwell::context::Context;
-use jink::Error;
 use jink::TokenTypes;
 use std::env;
 use std::fs;

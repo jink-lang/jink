@@ -108,10 +108,8 @@ pub enum Expr {
   /// func name; return type; params; body
   Function(Name, Option<Literals>, Option<Box<Vec<Expression>>>, Option<Box<Vec<Expression>>>),
 
-  /// type or let/const; ident; default; spread
-  /// 
-  /// TODO?: Refactor Type here so that we don't have to rely on distinguishing between ident and let/const
-  FunctionParam(Type, Literals, Option<Box<Expression>>, bool),
+  /// type/let; is constant; ident; default; is spread
+  FunctionParam(Option<Type>, bool, Literals, Option<Box<Expression>>, bool),
 
   /// value
   Return(Box<Expression>),
@@ -196,6 +194,7 @@ pub enum Error {
   EmptyFunctionBody(ErrorCtx),
   UnexpectedExpression(ErrorCtx),
   ParserError(ErrorCtx),
+  NameError(ErrorCtx),
   CompilerError(ErrorCtx),
 }
 
@@ -270,9 +269,19 @@ impl std::fmt::Display for Error {
           err.start_pos.unwrap() + 1, err.line, err.message
         );
       },
+      Error::NameError(err) => {
+        let underline = " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat((err.end_pos.unwrap() - err.start_pos.unwrap()) as usize);
+        return write!(f, "Name error at {}:{}\n  {}\n  {}\n\n{}", err.end_pos.unwrap(),
+          err.start_pos.unwrap() + 1, err.line, underline, err.message
+        );
+      },
       Error::CompilerError(err) => {
         let line = err.line.split("\n").next().unwrap();
-        let underline = " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat(line.trim_start().len() - err.start_pos.unwrap() as usize);
+        let underline = if err.end_pos.is_some() {
+          " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat((err.end_pos.unwrap() - err.start_pos.unwrap()) as usize)
+        } else {
+          " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat(line.trim_start().len() - err.start_pos.unwrap() as usize)
+        };
         return write!(f, "Compilation error at {}:{}\n  {}\n  {}\n\n{}", err.end_pos.unwrap(),
           err.start_pos.unwrap() + 1, err.line, underline, err.message
         );
