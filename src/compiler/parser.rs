@@ -670,24 +670,82 @@ impl Parser {
         if cur.of_type == TokenTypes::Identifier || (
           cur.of_type == TokenTypes::Keyword && ["let", "const"].contains(&&cur.value.as_ref().unwrap().as_str())
         ) {
+
           // Spread operator
           let mut spread = false;
+          let mut spread_op: Option<Token> = None;
           if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator
             && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "..." {
-            self.iter.next();
             spread = true;
+            spread_op = self.iter.next();
           }
 
-          let ident = self.consume(&[TokenTypes::Identifier], false)?;
+          // If let, this is an identifier
+          // If constant, this could be a type or ident - ex:
+          // fun add(const int a, const b: 10) {}
+          //               ^            ^
+          let ident_or_ty = self.consume(&[TokenTypes::Identifier], false)?;
+          let mut const_ident: Option<Token> = None;
+          if cur.value.as_ref().unwrap() == "const" {
+
+            // If spread operator was consumed and this is a typed constant, it was invalid
+            if spread && [TokenTypes::Identifier].contains(&self.iter.current.as_ref().unwrap().of_type) {
+              return Err(Error::new(
+                Error::UnexpectedToken,
+                Some(spread_op.as_ref().unwrap().clone()),
+                self.code.lines().nth((self.iter.current.as_ref().unwrap().line - 1) as usize).unwrap(),
+                spread_op.as_ref().unwrap().start_pos,
+                spread_op.as_ref().unwrap().end_pos,
+                "Unexpected token".to_string()
+              ));
+            } else if !spread {
+              // Check for `fun print(const array_type ...args: []) {}`
+              if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator
+                && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "..." {
+                self.iter.next();
+                spread = true;
+              }
+            }
+
+            // If current token is an identifier, ident_or_ty is the type
+            // Otherwise, ident_or_ty is the identifier
+            if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Identifier {
+              const_ident = Some(self.consume(&[TokenTypes::Identifier], false)?);
+            }
+          }
+
+          let (ty, is_const, ident) = if cur.value.as_ref().unwrap() == "const" {
+            // Typed constant - `const int a`
+            if const_ident.is_some() {
+              (
+                Some(Type(String::from(ident_or_ty.value.unwrap()))),
+                true,
+                Literals::Identifier(Name(String::from(const_ident.as_ref().unwrap().value.as_ref().unwrap())), None)
+              )
+            // Regular constant - `const a`
+            } else {
+              (
+                Some(Type(String::from(cur.value.unwrap()))),
+                true,
+                Literals::Identifier(Name(String::from(ident_or_ty.value.unwrap())), None)
+              )
+            }
+          // Not a constant - `let a`, `int b`
+          } else {
+            (
+              Some(Type(String::from(cur.value.unwrap()))),
+              false,
+              Literals::Identifier(Name(String::from(ident_or_ty.value.unwrap())), None)
+            )
+          };
 
           // Close out function params
           if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RParen {
-            list.push(self.get_expr(Expr::FunctionParam(
-              Type(String::from(cur.value.unwrap())),
-              Literals::Identifier(Name(String::from(ident.value.unwrap())), None),
-              None,
-              spread
-            ), Some(cur.line), cur.start_pos, Some(cur.line)));
+            list.push(self.get_expr(Expr::FunctionParam(ty, is_const, ident, None, spread),
+              Some(cur.line),
+              cur.start_pos,
+              Some(cur.line)
+            ));
 
           // Expect colon for param defaults
           // fun num(int a: 1) {}
@@ -698,12 +756,11 @@ impl Parser {
             if self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == ":" {
               self.iter.next();
               let default = self.parse_expression(0)?;
-              list.push(self.get_expr(Expr::FunctionParam(
-                Type(String::from(cur.value.as_ref().unwrap())),
-                Literals::Identifier(Name(String::from(ident.value.as_ref().unwrap())), None),
-                Some(Box::new(default.clone())),
-                spread
-              ), Some(cur.line), cur.start_pos, default.last_line));
+              list.push(self.get_expr(Expr::FunctionParam(ty, is_const, ident,  Some(Box::new(default.clone())), spread),
+                Some(cur.line),
+                cur.start_pos,
+                default.last_line
+              ));
             }
 
             // We have comma, continue to next param
@@ -722,12 +779,11 @@ impl Parser {
             // Skip by one newline if there is one
             self.skip_newlines(Some(1));
 
-            list.push(self.get_expr(Expr::FunctionParam(
-              Type(String::from(cur.value.as_ref().unwrap())),
-              Literals::Identifier(Name(String::from(ident.value.as_ref().unwrap())), None),
-              None,
-              spread
-            ), Some(cur.line), cur.start_pos, Some(cur.line)));
+            list.push(self.get_expr(Expr::FunctionParam(ty, is_const, ident, None, spread),
+              Some(cur.line),
+              cur.start_pos,
+              Some(cur.line)
+            ));
 
           } else {
             return Err(Error::new(
@@ -1261,13 +1317,15 @@ mod tests {
       None,
       Some(Box::new(vec![
         parser.get_expr(Expr::FunctionParam(
-          Type(String::from("let")),
+          Some(Type(String::from("let"))),
+          false,
           Literals::Identifier(Name(String::from("a")), None),
           None,
           false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
-          Type(String::from("let")),
+          Some(Type(String::from("let"))),
+          false,
           Literals::Identifier(Name(String::from("b")), None),
           None,
           false
@@ -1294,13 +1352,15 @@ mod tests {
       None,
       Some(Box::new(vec![
         parser.get_expr(Expr::FunctionParam(
-          Type(String::from("let")),
+          Some(Type(String::from("let"))),
+          false,
           Literals::Identifier(Name(String::from("a")), None),
           None,
           false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
-          Type(String::from("let")),
+          Some(Type(String::from("let"))),
+          false,
           Literals::Identifier(Name(String::from("b")), None),
           None,
           false
@@ -1329,19 +1389,22 @@ mod tests {
       None,
       Some(Box::new(vec![
         parser.get_expr(Expr::FunctionParam(
-          Type(String::from("let")),
+          Some(Type(String::from("let"))),
+          false,
           Literals::Identifier(Name(String::from("a")), None),
           Some(Box::new(parser.get_expr(Expr::Literal(Literals::Integer(1)), None, None, None))),
           false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
-          Type(String::from("let")),
+          Some(Type(String::from("let"))),
+          false,
           Literals::Identifier(Name(String::from("b")), None),
           Some(Box::new(parser.get_expr(Expr::Literal(Literals::Integer(2)), None, None, None))),
           false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
-          Type(String::from("let")),
+          Some(Type(String::from("let"))),
+          false,
           Literals::Identifier(Name(String::from("c")), None),
           Some(Box::new(parser.get_expr(Expr::Literal(Literals::Integer(3)), None, None, None))),
           false
@@ -1374,13 +1437,15 @@ mod tests {
       Some(Literals::Identifier(Name(String::from("int")), None)),
       Some(Box::new(vec![
         parser.get_expr(Expr::FunctionParam(
-          Type(String::from("int")),
+          Some(Type(String::from("int"))),
+          false,
           Literals::Identifier(Name(String::from("a")), None),
           None,
           false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
-          Type(String::from("int")),
+          Some(Type(String::from("int"))),
+          false,
           Literals::Identifier(Name(String::from("b")), None),
           None,
           false
@@ -1410,13 +1475,15 @@ mod tests {
       Some(Literals::Identifier(Name(String::from("int")), None)),
       Some(Box::new(vec![
         parser.get_expr(Expr::FunctionParam(
-          Type(String::from("int")),
+          Some(Type(String::from("int"))),
+          false,
           Literals::Identifier(Name(String::from("a")), None),
           None,
           false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
-          Type(String::from("int")),
+          Some(Type(String::from("int"))),
+          false,
           Literals::Identifier(Name(String::from("b")), None),
           None,
           false
@@ -1468,5 +1535,42 @@ mod tests {
         ), None, None, None)
       ]))
     ), None, None, None)));
+  }
+
+  #[test]
+  fn test_function_with_constants() {
+    let mut parser = Parser::new();
+    let ast = parser.parse("fun add(const a, const int b) {
+      return a + b;
+    }".to_string(), false, true).unwrap();
+    assert_eq!(ast[0], parser.get_expr(Expr::Function(
+      Name(String::from("add")),
+      None,
+      Some(Box::new(vec![
+        parser.get_expr(Expr::FunctionParam(
+          Some(Type(String::from("const"))),
+          true,
+          Literals::Identifier(Name(String::from("a")), None),
+          None,
+          false
+        ), None, None, None),
+        parser.get_expr(Expr::FunctionParam(
+          Some(Type(String::from("int"))),
+          true,
+          Literals::Identifier(Name(String::from("b")), None),
+          None,
+          false
+        ), None, None, None)
+      ])),
+      Some(Box::new(vec![
+        parser.get_expr(Expr::Return(Box::new(
+          parser.get_expr(Expr::BinaryOperator(
+            Operator(String::from("+")),
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)),
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")), None)), None, None, None))
+          ), None, None, None)
+        )), None, None, None)
+      ])
+    )), None, None, None));
   }
 }
