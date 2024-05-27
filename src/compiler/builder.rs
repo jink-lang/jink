@@ -7,7 +7,7 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::execution_engine::ExecutionEngine;
 use inkwell::module::{Linkage, Module};
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::AddressSpace;
 
@@ -28,6 +28,7 @@ pub struct CodeGen<'ctx> {
   pub module: Module<'ctx>,
   builder: Builder<'ctx>,
   symbol_table_stack: Vec<Scope<'ctx>>,
+  struct_table: IndexMap<String, (StructType<'ctx>, Vec<(String, BasicTypeEnum<'ctx>)>)>,
   type_tags: IndexMap<String, u64>,
   execution_engine: ExecutionEngine<'ctx>
 }
@@ -48,6 +49,7 @@ impl<'ctx> CodeGen<'ctx> {
       module,
       builder: context.create_builder(),
       symbol_table_stack: Vec::new(),
+      struct_table: IndexMap::new(),
       type_tags: Self::map_types(),
       execution_engine
     };
@@ -104,6 +106,7 @@ impl<'ctx> CodeGen<'ctx> {
   /// Get symbol from symbol table stack
   /// 
   /// Returns Result->Option of symbol name, instruction pointer, value and whether we left a function scope to obtain it 
+  /// If the instruction pointer is None the symbol is a constant value
   pub fn get_symbol(&self, name: &str) -> Result<Option<(String, Option<PointerValue<'ctx>>, BasicValueEnum<'ctx>, bool)>, Error> {
     let mut exited_function = false;
     for scope in self.symbol_table_stack.iter().rev() {
@@ -236,7 +239,7 @@ impl<'ctx> CodeGen<'ctx> {
           println!("Array: {:?}\n", values);
         },
         Expr::TypeDef(name, value) => {
-          println!("TypeDef: {:?} {:?}\n", name, value);
+          self.build_struct(Some(name), value)?;
         },
         Expr::Conditional(typ, expr, body, else_body) => {
           block = self.build_if(typ, expr, body, else_body, main_fn, block)?;
@@ -247,8 +250,8 @@ impl<'ctx> CodeGen<'ctx> {
         Expr::Function(name, ret_typ, params, body) => {
           self.build_function(name, ret_typ, params, body, block)?;
         },
-        Expr::FunctionParam(typ, ident, default, _) => {
-          println!("FunctionParam: {:?} {:?} {:?}\n", typ, ident, default);
+        Expr::FunctionParam(typ, is_const, ident, default, _) => {
+          println!("FunctionParam: {:?} {:?} {:?} {:?}\n", typ, is_const, ident, default);
         },
         Expr::Return(value) => {
           println!("Return: {:?}\n", value);
@@ -266,6 +269,192 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     return Ok(block);
+  }
+
+  fn build_struct(&mut self, name: Option<Literals>, value: Box<Literals>) -> Result<StructType<'ctx>, Error> {
+    // Extract struct name if it's an identifier
+    let mut struct_lit_name: Option<String> = None;
+    if name.is_some() {
+      struct_lit_name = match name.unwrap() {
+        Literals::Identifier(name, _) => Some(name.0),
+        _ => None,
+      };
+    }
+
+    // If value is an identifier, handle it as a type alias
+    // if let Literals::Identifier(n, _) = value.as_ref().to_owned() {
+    //     if self.type_tags.contains_key(&n.0) {
+    //         // TODO: Save alias
+    //         // self.add_type(name.unwrap());
+    //     } else {
+    //         let sym = self.get_symbol(&n.0)?;
+    //         // TODO: Save alias
+    //     }
+    //     return Ok(());
+    // }
+
+    // Build struct if value is an object
+    if let Literals::Object(obj) = value.as_ref().to_owned() {
+      let mut fields: Vec<(String, BasicTypeEnum<'ctx>)> = vec![];
+      for literal in obj.iter() {
+        if let Literals::ObjectProperty(n, val) = literal.to_owned() {
+
+          // Ensure name doesn't already exist in fields
+          if fields.iter().any(|(name, _)| name == &n.as_ref().unwrap().0) {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &"",
+              Some(0),
+              Some(0),
+              format!("Field {} already defined", n.unwrap().0)
+            ));
+          }
+
+          // Build the field
+          let field: (String, BasicTypeEnum<'ctx>) = (n.unwrap().0, self.build_struct_field(val.expr)?);
+          fields.push(field);
+
+        // Field was not an object property, parsing error
+        } else {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            "",
+            Some(0),
+            Some(0),
+            "Invalid struct field".to_string()
+          ));
+        }
+      }
+
+      // Create the struct type
+      let field_types: Vec<BasicTypeEnum> = fields.iter().map(|(_, t)| t.clone()).collect();
+      let struct_type = self.context.struct_type(&field_types, false);
+
+      // Save a reference to the struct
+      if let Some(n) = struct_lit_name {
+        // Special saving method for structs to keep track of their fields
+        if self.struct_table.contains_key(&n) {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &"",
+            Some(0),
+            Some(0),
+            format!("Name {} already defined", n)
+          ));
+        } else {
+          self.struct_table.insert(n, (struct_type, fields));
+        }
+      }
+
+      return Ok(struct_type);
+    } else {
+      Err(Error::new(
+        Error::CompilerError,
+        None,
+        &"",
+        Some(0),
+        Some(0),
+        "Invalid struct definition".to_string()
+      ))
+    }
+  }
+
+  fn build_struct_field(&mut self, val: Expr) -> Result<BasicTypeEnum<'ctx>, Error> {
+    match val {
+      Expr::TypeDef(_, v) => {
+        let s = self.build_struct(None, v)?;
+        return Ok(s.as_basic_type_enum());
+      },
+      Expr::Literal(Literals::Identifier(n, _)) => {
+        match n.0.as_str() {
+          "int" => return Ok(self.context.i64_type().as_basic_type_enum()),
+          "float" => return Ok(self.context.f64_type().as_basic_type_enum()),
+          "bool" => return Ok(self.context.bool_type().as_basic_type_enum()),
+          _ => {
+            // Check for existing type alias
+            let struct_type = self.struct_table.get(&n.0);
+            if struct_type.is_none() {
+              return Err(Error::new(
+                Error::CompilerError,
+                None,
+                &"",
+                Some(0),
+                Some(0),
+                format!("Invalid struct field type {}", n.0)
+              ));
+            } else {
+              return Ok(struct_type.unwrap().0.as_basic_type_enum());
+            }
+          }
+        }
+      },
+      _ => Err(Error::new(
+        Error::CompilerError,
+        None,
+        &"",
+        Some(0),
+        Some(0),
+        "Invalid struct field type".to_string()
+      )),
+    }
+  }
+
+  // Name of struct type; fields
+  fn build_initialize_struct(&mut self, struct_name: String, var_name: String, fields: Vec<Literals>, block: BasicBlock<'ctx>) -> Result<PointerValue<'ctx>, Error> {
+    let (struct_type, field_types) = self.struct_table.get(&struct_name)
+      .ok_or_else(|| Error::new(
+        Error::CompilerError,
+        None,
+        &"",
+        Some(0),
+        Some(0),
+        format!("Unknown struct: {}", struct_name)
+      ))?
+      .to_owned();
+
+    // Ensure field lengths match
+    if fields.len() != field_types.len() {
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        &"",
+        Some(0),
+        Some(0),
+        format!("Invalid number of fields for struct {}", var_name)
+      ));
+    }
+
+    // Allocate space for the struct
+    let struct_ptr = self.builder.build_alloca(struct_type, &var_name).unwrap();
+
+    for (i, field) in fields.iter().enumerate() {
+      if let Literals::ObjectProperty(n, value) = field {
+
+        // Get field value
+        let field_val = self.visit(&value, block)?;
+
+        // Ensure type consistency
+        if field_val.get_type().as_basic_type_enum() != field_types[i].1.as_basic_type_enum() {
+          println!("a:{:?}\nb:{:?}", field_val.get_type().as_basic_type_enum(), field_types[i].1.as_basic_type_enum());
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &"",
+            Some(0),
+            Some(0),
+            format!("Invalid type for field {} on struct {}", field_types[i].0.clone(), var_name)
+          ));
+        }
+
+        let field_ptr = self.builder.build_struct_gep(struct_type, struct_ptr, i as u32, &format!("{}-{}", var_name, field_types[i].0)).unwrap();
+        self.builder.build_store(field_ptr, field_val).unwrap();
+      }
+    }
+
+    return Ok(struct_ptr);
   }
 
   // Top level builder for conditional expressions
@@ -496,9 +685,19 @@ impl<'ctx> CodeGen<'ctx> {
 
     let set: BasicValueEnum;
     if value.is_some() {
-      set = self.visit(&value.unwrap(), block)?;
+      if let Expr::Literal(e) = &value.as_ref().unwrap().expr {
+        if let Literals::Object(obj) = e {
+          let alloca = self.build_initialize_struct(ty.clone().unwrap().0, name.clone(), obj.to_vec(), block)?;
+          set = alloca.as_basic_value_enum();
+          println!("set: {:?}", set);
+        } else {
+          set = self.visit(&value.unwrap(), block)?;
+        }
+      } else {
+        set = self.visit(&value.unwrap(), block)?;
+      }
+    // If no value is provided, set to null
     } else {
-      // If no value is provided, set to null
       set = self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum();
     }
 
@@ -573,13 +772,32 @@ impl<'ctx> CodeGen<'ctx> {
             _ => panic!("Invalid type for const"),
           }
         },
-        _ => panic!("Unknown assignment type: {}", ty.0),
+        // Custom type (we know exists from builder)
+        _ => {
+          self.set_symbol(name, None, set);
+        },
       }
     } else {
       // Setting existing variable
-      let var = self.get_symbol(&name)?.unwrap().1;
-      self.builder.build_store(var.unwrap(), set).unwrap();
-      self.set_symbol(name, var, set);
+      let var = self.get_symbol(&name)?;
+
+      if var.is_none() {
+        return Err(Error::new(
+          Error::NameError,
+          None,
+          &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+          expr.first_pos,
+          Some(name.len() as i32),
+          format!("Variable {} not found", name)
+        ));
+      }
+      let named = var.unwrap().1;
+      if named.is_none() {
+        // An internal error occurred
+        panic!("Internal error occurred. Variable {} has no pointer. There may be an issue with a function definition.", name);
+      }
+      self.builder.build_store(named.unwrap(), set).unwrap();
+      self.set_symbol(name, named, set);
     }
 
     return Ok(());
@@ -630,10 +848,11 @@ impl<'ctx> CodeGen<'ctx> {
     let mut variadic = false;
     if params.is_some() {
       for (i, param) in params.clone().unwrap().iter().enumerate() {
-        let (typ, name, val, spread) = match param.clone().expr {
-          Expr::FunctionParam(ty, name, default_val, spread) => {
+        let (typ, _is_const, name, val, spread) = match param.clone().expr {
+          Expr::FunctionParam(ty, is_const, name, default_val, spread) => {
             (
-              ty,
+              ty.unwrap(),
+              is_const,
               match name {
                 Literals::Identifier(name, _) => name,
                 _ => panic!("Invalid function parameter"),
@@ -684,6 +903,8 @@ impl<'ctx> CodeGen<'ctx> {
           }
 
           variadic = true;
+
+        // Not a spread op parameter
         } else {
           let _t: BasicTypeEnum = match typ.0.as_str() {
             "let" => {
@@ -712,7 +933,25 @@ impl<'ctx> CodeGen<'ctx> {
               parameters.push(t.into());
               t.into()
             },
-            _ => panic!("Invalid function parameter type"),
+            _ => {
+              // Check for defined type (TODO: add aliases)
+              let struct_type = self.struct_table.get(&typ.0);
+              if struct_type.is_none() {
+                return Err(Error::new(
+                  Error::NameError,
+                  None,
+                  &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+                  param.first_pos,
+                  Some(typ.0.len() as i32),
+                  format!("Type {} not found", typ.0)
+                ));
+              } else {
+                let (struct_type, _) = struct_type.unwrap();
+                let t = struct_type.as_basic_type_enum();
+                parameters.push(t.into());
+                t.into()
+              }
+            },
           };
 
           // If parameter has default
@@ -752,7 +991,7 @@ impl<'ctx> CodeGen<'ctx> {
 
       // Get name
       let name: String = match params.clone().unwrap()[i].clone().expr {
-        Expr::FunctionParam(_, name, _, _) => {
+        Expr::FunctionParam(_, _, name, _, _) => {
           match name {
             Literals::Identifier(name, _) => name.0,
             _ => panic!("Invalid function parameter"),
@@ -1019,7 +1258,7 @@ impl<'ctx> CodeGen<'ctx> {
     }
   }
 
-  fn handle_literal(&self, literal: Literals, expr: &Expression) -> Result<BasicValueEnum<'ctx>, Error> {
+  fn handle_literal(&mut self, literal: Literals, expr: &Expression) -> Result<BasicValueEnum<'ctx>, Error> {
     match literal {
       Literals::Integer(i) => {
         return Ok(self.context.i64_type().const_int(i as u64, false).as_basic_value_enum());
@@ -1034,7 +1273,22 @@ impl<'ctx> CodeGen<'ctx> {
       Literals::Boolean(b) => {
         return Ok(self.context.bool_type().const_int(b as u64, false).as_basic_value_enum());
       },
-      Literals::Object(_) => todo!(),
+      // Literals::Object(obj) => {
+
+      //   println!("{:?}", expr);
+      //   panic!("Testing");
+      //   let mut values: Vec<BasicValueEnum> = vec![];
+      //   for literal in obj.iter() {
+      //     let prop = match literal.to_owned() {
+      //       Literals::ObjectProperty(name, val) => (name, val),
+      //       _ => panic!("Invalid object property"),
+      //     };
+      //     values.push(self.visit(&prop.1, self.builder.get_insert_block().unwrap()).unwrap());
+      //   }
+
+      //   return Ok(self.context.struct_type(&values.iter().map(|v| v.get_type()).collect::<Vec<BasicTypeEnum>>(), false).const_named_struct(&values).as_basic_value_enum());
+      // },
+      Literals::Object(_) => panic!("Object literal not allowed here"),
       Literals::ObjectProperty(_, _) => todo!(),
       Literals::Null => {
         return Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum());
