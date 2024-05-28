@@ -627,7 +627,7 @@ impl Parser {
           "Expected identifier after \"let\", got".to_string(),
         ))
       }
-  } else {
+    } else {
       Err(Error::new(
         Error::UnexpectedEOF,
         None,
@@ -640,10 +640,6 @@ impl Parser {
 
     // Expect "in" keyword
     self.expect_keyword("in")?;
-
-    if let Some(token) = &self.iter.current {
-      println!("Current token: {:?}", token);
-    }
 
     let iterable = self.parse_expression(0)?;
 
@@ -665,20 +661,20 @@ impl Parser {
 
   fn expect_keyword(&mut self, keyword: &str) -> Result<(), Error> {
     if let Some(token) = &self.iter.current {
-        if token.of_type == TokenTypes::Keyword && token.value.as_ref().map_or(false, |v| v == keyword) {
-          self.iter.next(); // Consume keyword
-          Ok(())
-        } else {
-          eprintln!("Debug: Expected keyword \"{}\", got {:?}", keyword, token);
-          Err(Error::new(
-            Error::UnexpectedToken,
-            Some(token.clone()),
-            self.code.lines().nth((token.line - 1) as usize).unwrap(),
-            token.start_pos,
-            token.end_pos,
-            format!("Expected keyword \"{}\", got", keyword),
-          ))
-        }
+      if token.of_type == TokenTypes::Keyword && token.value.as_ref().map_or(false, |v| v == keyword) {
+        self.iter.next(); // Consume keyword
+        Ok(())
+      } else {
+        eprintln!("Debug: Expected keyword \"{}\", got {:?}", keyword, token);
+        Err(Error::new(
+          Error::UnexpectedToken,
+          Some(token.clone()),
+          self.code.lines().nth((token.line - 1) as usize).unwrap(),
+          token.start_pos,
+          token.end_pos,
+          format!("Expected keyword \"{}\", got", keyword),
+        ))
+      }
     } else {
       Err(Error::new(
         Error::UnexpectedEOF,
