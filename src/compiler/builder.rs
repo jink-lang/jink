@@ -329,7 +329,17 @@ impl<'ctx> CodeGen<'ctx> {
       }
 
       // Create the struct type
-      let field_types: Vec<BasicTypeEnum> = fields.iter().map(|(_, t)| t.clone()).collect();
+      let mut field_types: Vec<BasicTypeEnum> = vec![];
+      for (_, t) in fields.clone() {
+
+        // Change child struct types to pointers for mapping
+        if t.is_struct_type() {
+          field_types.push(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum());
+        } else {
+          field_types.push(t);
+        }
+      }
+
       let struct_type = self.context.struct_type(&field_types, false);
 
       // Save a reference to the struct
@@ -431,22 +441,52 @@ impl<'ctx> CodeGen<'ctx> {
     let struct_ptr = self.builder.build_alloca(struct_type, &var_name).unwrap();
 
     for (i, field) in fields.iter().enumerate() {
-      if let Literals::ObjectProperty(n, value) = field {
+      if let Literals::ObjectProperty(_n, value) = field {
 
         // Get field value
         let field_val = self.visit(&value, block)?;
+        let mut field_val_type = field_val.get_type();
 
         // Ensure type consistency
-        if field_val.get_type().as_basic_type_enum() != field_types[i].1.as_basic_type_enum() {
-          println!("a:{:?}\nb:{:?}", field_val.get_type().as_basic_type_enum(), field_types[i].1.as_basic_type_enum());
-          return Err(Error::new(
-            Error::CompilerError,
-            None,
-            &"",
-            Some(0),
-            Some(0),
-            format!("Invalid type for field {} on struct {}", field_types[i].0.clone(), var_name)
-          ));
+        if field_val_type.is_pointer_type() {
+          // Check struct table for ptr name
+          let struct_type = self.struct_table.get(&struct_name);
+          if struct_type.is_some() {
+            field_val_type = struct_type.unwrap().0.as_basic_type_enum();
+
+          // Check symbol table
+          } else {
+            let symbol = self.get_symbol(field_val.get_name().to_str().unwrap())?;
+            if symbol.is_none() {
+              return Err(Error::new(
+                Error::NameError,
+                None,
+                &"",
+                Some(0),
+                Some(0),
+                format!("Invalid type for field '{}' on struct '{}'", field_val.get_name().to_str().unwrap(), var_name)
+              ));
+            }
+            let (_, _, val, _) = symbol.unwrap();
+            field_val_type = val.get_type();
+          }
+        }
+
+        if field_val_type.is_struct_type() {
+          // We know by this point that this struct type exists
+          // TODO: Validate that the struct we expect is the struct we get
+
+        } else {
+          if field_val_type.as_basic_type_enum() != field_types[i].1.as_basic_type_enum() {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &"",
+              Some(0),
+              Some(0),
+              format!("Invalid type for field '{}' on struct '{}'", field_types[i].0.clone(), var_name)
+            ));
+          }
         }
 
         let field_ptr = self.builder.build_struct_gep(struct_type, struct_ptr, i as u32, &format!("{}-{}", var_name, field_types[i].0)).unwrap();
