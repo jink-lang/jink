@@ -48,8 +48,8 @@ pub const OPERATORS: &[&str] = &[
 
 pub const KEYWORDS: &[&str] = &[
   "if", "else", "elseif",
+  "while", "for", "in",
   "return", "del",
-  "for", "while", "in",
   "true", "false", "null",
   "fun", "let", "const", "type",
   "cls", "self", "pub",
@@ -97,6 +97,9 @@ pub enum Expr {
 
   Array(Box<Vec<Expression>>),
 
+  /// assignment; iterator; body;
+  ForLoop(Box<Expression>, Box<Expression>, Option<Vec<Expression>>),
+
   /// name; literal
   TypeDef(Literals, Box<Literals>),
 
@@ -109,12 +112,8 @@ pub enum Expr {
   /// func name; return type; params; body
   Function(Name, Option<Literals>, Option<Box<Vec<Expression>>>, Option<Box<Vec<Expression>>>),
 
-  ForLoop(Box<Expression>, Box<Expression>, Option<Vec<Expression>>),
-
-  /// type or let/const; ident; default; spread
-  /// 
-  /// TODO?: Refactor Type here so that we don't have to rely on distinguishing between ident and let/const
-  FunctionParam(Type, Literals, Option<Box<Expression>>, bool),
+  /// type/let; is constant; ident; default; is spread
+  FunctionParam(Option<Type>, bool, Literals, Option<Box<Expression>>, bool),
 
   /// value
   Return(Box<Expression>),
