@@ -48,6 +48,7 @@ pub const OPERATORS: &[&str] = &[
 
 pub const KEYWORDS: &[&str] = &[
   "if", "else", "elseif",
+  "while", "for", "in",
   "return", "del",
   "true", "false", "null",
   "fun", "let", "const", "type",
@@ -95,6 +96,9 @@ pub enum Expr {
   Assignment(Option<Type>, Literals, Option<Box<Expression>>),
 
   Array(Box<Vec<Expression>>),
+
+  /// assignment; iterator; body;
+  ForLoop(Box<Expression>, Box<Expression>, Option<Vec<Expression>>),
 
   /// name; literal
   TypeDef(Literals, Box<Literals>),
