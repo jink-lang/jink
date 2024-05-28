@@ -611,7 +611,7 @@ impl Parser {
       if token.of_type == TokenTypes::Identifier {
         let identifier_token = self.iter.next().unwrap();
         Ok(Expression {
-          expr: Expr::Literal(Literals::String(identifier_token.value.unwrap())),
+          expr: Expr::Literal(Literals::Identifier(Name(identifier_token.value.unwrap()), None)),
           first_line: Some(identifier_token.line),
           first_pos: identifier_token.start_pos,
           last_line: identifier_token.end_pos,
@@ -1078,13 +1078,26 @@ impl Parser {
     // Skip newlines after opening brace
     self.skip_newlines(None);
 
-    while let Some(token) = &self.iter.current {
+    while let Some(token) = &self.iter.current.clone() {
       if token.of_type == TokenTypes::RBrace {
         self.iter.next();
         break;
       }
 
-      let statement = self.parse_expression(0)?;
+      let statement: Expression;
+      if token.of_type == TokenTypes::Keyword && token.value.as_ref().unwrap() == "break" {
+        self.iter.next();
+        statement = self.get_expr(Expr::BreakLoop,
+          Some(token.line), token.start_pos, Some(token.line)
+        );
+      } else if token.of_type == TokenTypes::Keyword && token.value.as_ref().unwrap() == "continue" {
+        self.iter.next();
+        statement = self.get_expr(Expr::ContinueLoop,
+          Some(token.line), token.start_pos, Some(token.line)
+        );
+      } else {
+        statement = self.parse_top()?;
+      }
       body.push(statement);
 
       self.consume(&[TokenTypes::Semicolon, TokenTypes::Newline], false)?;
