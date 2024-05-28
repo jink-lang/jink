@@ -241,6 +241,9 @@ impl<'ctx> CodeGen<'ctx> {
         Expr::Conditional(typ, expr, body, else_body) => {
           block = self.build_if(typ, expr, body, else_body, main_fn, block)?;
         },
+        Expr::ForLoop(value, expr, opt) => {
+          println!("ForLoop: {:?} {:?} {:?}\n", value, expr, opt)
+        }
         Expr::Call(_, _) => {
           self.visit(&expr, block)?;
         },

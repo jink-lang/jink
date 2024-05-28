@@ -56,6 +56,7 @@ impl Parser {
           Expr::Conditional(_, _, _, _) => {},
           Expr::UnaryOperator(_, _) => {},
           Expr::BinaryOperator(_, _, _) => {},
+          Expr::ForLoop(_, _, _) => {},
           _ => {
             return Err(Error::new(
               Error::UnexpectedExpression,
@@ -179,6 +180,9 @@ impl Parser {
     } else if init.unwrap().value.as_ref().unwrap() == "type" {
       self.iter.next();
       return self.parse_type();
+    
+    } else if init.unwrap().value.as_ref().unwrap() == "for" {
+      return self.parse_for_loop();
 
     } else {
       return Err(Error::new(
@@ -496,7 +500,7 @@ impl Parser {
     let ident = self.consume(&[TokenTypes::Identifier], false)?.clone();
 
     // Expect =
-    if !self.iter.current.is_some()
+    if self.iter.current.is_none()
       || self.iter.current.as_ref().unwrap().of_type != TokenTypes::Operator
       || self.iter.current.as_ref().unwrap().value.as_ref().unwrap() != "=" {
       return Err(Error::new(
@@ -522,7 +526,6 @@ impl Parser {
     } else {
       return self.parse_object(Some(ident));
     }
-
   }
 
   fn parse_object(&mut self, type_tok: Option<Token>) -> Result<Expression, Error> {
@@ -596,6 +599,98 @@ impl Parser {
     }
   }
 
+  fn parse_for_loop(&mut self) -> Result<Expression, Error> {
+    let init = self.iter.next(); // Consume "for"
+    
+    self.consume(&[TokenTypes::LParen], false)?;
+
+    // Expect "let" keyword
+    self.expect_keyword("let")?;
+
+    let loop_variable = if let Some(token) = self.iter.current.clone() {
+      if token.of_type == TokenTypes::Identifier {
+        let identifier_token = self.iter.next().unwrap();
+        Ok(Expression {
+          expr: Expr::Literal(Literals::String(identifier_token.value.unwrap())),
+          first_line: Some(identifier_token.line),
+          first_pos: identifier_token.start_pos,
+          last_line: identifier_token.end_pos,
+        })
+      } else {
+        eprintln!("Debug: Expected identifier, got {:?}", token);
+        Err(Error::new(
+          Error::UnexpectedToken,
+          Some(token.clone()),
+          self.code.lines().nth((token.line - 1) as usize).unwrap(),
+          token.start_pos,
+          token.end_pos,
+          "Expected identifier after \"let\", got".to_string(),
+        ))
+      }
+  } else {
+      Err(Error::new(
+        Error::UnexpectedEOF,
+        None,
+        "",
+        Some(0),
+        Some(0),
+        "Expected identifier after \"let\", got end of file.".to_string(),
+      ))
+    }?;
+
+    // Expect "in" keyword
+    self.expect_keyword("in")?;
+
+    if let Some(token) = &self.iter.current {
+      println!("Current token: {:?}", token);
+    }
+
+    let iterable = self.parse_expression(0)?;
+
+    self.consume(&[TokenTypes::RParen], false)?;
+
+    let body = self.parse_loop_block()?;
+
+    return Ok(Expression {
+      expr: Expr::ForLoop(
+        Box::new(loop_variable),
+        Box::new(iterable),
+        Some(body),
+      ),
+      first_line: Some(init.as_ref().unwrap().line),
+      first_pos: Some(init.as_ref().unwrap().start_pos.unwrap()),
+      last_line: Some(init.unwrap().line),
+    });
+  }
+
+  fn expect_keyword(&mut self, keyword: &str) -> Result<(), Error> {
+    if let Some(token) = &self.iter.current {
+        if token.of_type == TokenTypes::Keyword && token.value.as_ref().map_or(false, |v| v == keyword) {
+          self.iter.next(); // Consume keyword
+          Ok(())
+        } else {
+          eprintln!("Debug: Expected keyword \"{}\", got {:?}", keyword, token);
+          Err(Error::new(
+            Error::UnexpectedToken,
+            Some(token.clone()),
+            self.code.lines().nth((token.line - 1) as usize).unwrap(),
+            token.start_pos,
+            token.end_pos,
+            format!("Expected keyword \"{}\", got", keyword),
+          ))
+        }
+    } else {
+      Err(Error::new(
+        Error::UnexpectedEOF,
+        None,
+        "",
+        Some(0),
+        Some(0),
+        format!("Expected keyword \"{}\", got end of file.", keyword),
+      ))
+    }
+  }
+
   fn parse_call(&mut self, identifier: Token) -> Result<Expression, Error> {
     let args = self.parse_args_params("args")?;
     return Ok(self.get_expr(Expr::Call(Name(identifier.value.unwrap().to_owned()), Box::new(args)),
@@ -619,7 +714,7 @@ impl Parser {
       return_type = Some(self.consume(&[TokenTypes::Identifier], false)?);
     }
 
-    let body = self.parse_block()?;
+    let body = self.parse_func_block()?;
 
     if return_type.is_some() {
       return Ok(self.get_expr(
@@ -668,7 +763,7 @@ impl Parser {
         // Type identifier, let or const
         let cur = self.iter.next().unwrap();
         if cur.of_type == TokenTypes::Identifier || (
-          cur.of_type == TokenTypes::Keyword && ["let", "const"].contains(&&cur.value.as_ref().unwrap().as_str())
+          cur.of_type == TokenTypes::Keyword && ["let", "const"].contains(&cur.value.as_ref().unwrap().as_str())
         ) {
           // Spread operator
           let mut spread = false;
@@ -816,7 +911,7 @@ impl Parser {
 
     // Parse else first because it is unlike if/elseif
     if init.value.as_ref().unwrap() == "else" {
-      let block = self.parse_block()?;
+      let block = self.parse_func_block()?;
       return Ok(self.get_expr(Expr::Conditional(
         Type(String::from("else")),
         None,
@@ -829,7 +924,7 @@ impl Parser {
     self.consume(&[TokenTypes::LParen], false)?;
     let expr = self.parse_expression(0)?;
     self.consume(&[TokenTypes::RParen], false)?;
-    let body = self.parse_block()?;
+    let body = self.parse_func_block()?;
 
     // If an else case is next. Handles the two following grammars:
     // if (true) return 1
@@ -861,7 +956,7 @@ impl Parser {
   // TODO: Move actual block parsing to its own func (see block parsing for classes)
   // and rename this to parse function block bc it clearly caters just to functions
   // and then change the call to this from function calls because oops that makes no sense
-  fn parse_block(&mut self) -> Result<Vec<Expression>, Error> {
+  fn parse_func_block(&mut self) -> Result<Vec<Expression>, Error> {
     let mut body: Vec<Expression> = Vec::new();
 
     if self.iter.current.as_ref().unwrap().of_type == TokenTypes::LBrace {
@@ -915,6 +1010,46 @@ impl Parser {
         ));
       }
       body.push(self.parse_top()?);
+    }
+
+    return Ok(body);
+  }
+
+  fn parse_loop_block(&mut self) -> Result<Vec<Expression>, Error> {
+    let mut body: Vec<Expression> = Vec::new();
+
+    // Skip newlines before the opening brace
+    self.skip_newlines(None);
+
+    self.consume(&[TokenTypes::LBrace], false)?;
+
+    // Skip newlines after opening brace
+    self.skip_newlines(None);
+
+    while let Some(token) = &self.iter.current {
+      if token.of_type == TokenTypes::RBrace {
+        self.iter.next();
+        break;
+      }
+
+      let statement = self.parse_expression(0)?;
+      body.push(statement);
+
+      self.consume(&[TokenTypes::Semicolon, TokenTypes::Newline], false)?;
+      
+      // Skip newlines after each statement
+      self.skip_newlines(None);
+    }
+
+    if self.iter.current.is_none() {
+      return Err(Error::new(
+        Error::UnexpectedEOF,
+        None,
+        "",
+        Some(0),
+        Some(0),
+        "Expected '}' to end for loop block, got end of file.".into(),
+      ));
     }
 
     return Ok(body);

@@ -49,6 +49,7 @@ pub const OPERATORS: &[&str] = &[
 pub const KEYWORDS: &[&str] = &[
   "if", "else", "elseif",
   "return", "del",
+  "for", "while", "in",
   "true", "false", "null",
   "fun", "let", "const", "type",
   "cls", "self", "pub",
@@ -107,6 +108,8 @@ pub enum Expr {
 
   /// func name; return type; params; body
   Function(Name, Option<Literals>, Option<Box<Vec<Expression>>>, Option<Box<Vec<Expression>>>),
+
+  ForLoop(Box<Expression>, Box<Expression>, Option<Vec<Expression>>),
 
   /// type or let/const; ident; default; spread
   /// 
