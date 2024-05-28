@@ -199,6 +199,7 @@ pub enum Error {
   EmptyFunctionBody(ErrorCtx),
   UnexpectedExpression(ErrorCtx),
   ParserError(ErrorCtx),
+  NameError(ErrorCtx),
   CompilerError(ErrorCtx),
 }
 
@@ -273,9 +274,19 @@ impl std::fmt::Display for Error {
           err.start_pos.unwrap() + 1, err.line, err.message
         );
       },
+      Error::NameError(err) => {
+        let underline = " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat((err.end_pos.unwrap() - err.start_pos.unwrap()) as usize);
+        return write!(f, "Name error at {}:{}\n  {}\n  {}\n\n{}", err.end_pos.unwrap(),
+          err.start_pos.unwrap() + 1, err.line, underline, err.message
+        );
+      },
       Error::CompilerError(err) => {
         let line = err.line.split("\n").next().unwrap();
-        let underline = " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat(line.trim_start().len() - err.start_pos.unwrap() as usize);
+        let underline = if err.end_pos.is_some() {
+          " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat((err.end_pos.unwrap() - err.start_pos.unwrap()) as usize)
+        } else {
+          " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat(line.trim_start().len() - err.start_pos.unwrap() as usize)
+        };
         return write!(f, "Compilation error at {}:{}\n  {}\n  {}\n\n{}", err.end_pos.unwrap(),
           err.start_pos.unwrap() + 1, err.line, underline, err.message
         );
