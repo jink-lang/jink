@@ -33,8 +33,12 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 ##### Compiler
 - [ ] Standardize type inference
 - [ ] Fix nested conditionals
-- [ ] Add structs/types
-- [ ] Add while loops
+- [ ] Build dynamic array type
+- [ ] Build heterogenous array type
+- [x] Build structs/types
+- [x] Build for loops
+- [ ] Build while loops
+- [ ] Build break and continue for loops
 - [ ] Write compiler tests
 ##### Lexer
 - [ ] Lex string templates
@@ -48,11 +52,13 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [x] Parse module imports
 - [ ] Parse string templates
 - [ ] Parse pub keyword on definitions
-- [ ] Parse indexing (arrays)
+- [x] Parse indexing (arrays)
+- [ ] Parse recursive indexing (arrays)
 - [ ] Parse indexing (object properties and methods)
+- [ ] Parse recursive indexing (object properties and methods)
 - [ ] Parse del statements
 - [ ] Parse while loops
-- [ ] Parse for loops
+- [x] Parse for loops
 - [ ] Parse public statements
 - [ ] Parse external statements
 

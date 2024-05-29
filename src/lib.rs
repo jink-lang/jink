@@ -40,7 +40,7 @@ impl Display for Token {
 
 pub const OPERATORS: &[&str] = &[
   "+", "-", "*", "/", "//", "%", "^", "=", "->", "...",
-  ">", "<", ">=", "<=", "==", "!=",
+  ">", "<", ">=", "<=", "==", "!=", "..",
   "-=", "+=", "*=", "/=", "//=", "%=",
   "!", "&", "?", "|", "::", "~", "#", ".",
   "&&", "||", "++", "--"
@@ -92,8 +92,8 @@ pub enum Expr {
   /// op; value
   UnaryOperator(Operator, Box<Expression>),
 
-  /// type or let/const; ident; value
-  Assignment(Option<Type>, Literals, Option<Box<Expression>>),
+  /// type or let/const; ident or index; value
+  Assignment(Option<Type>, Box<Expression>, Option<Box<Expression>>),
 
   Array(Box<Vec<Expression>>),
 
@@ -128,8 +128,19 @@ pub enum Expr {
 
   /// parent; child
   /// 
-  /// top level we don't need option but last child will be empty
-  ObjectIndex(Box<Expression>, Option<Box<Expression>>),
+  /// hello.there()
+  /// 
+  /// hello.hi
+  /// 
+  /// hello.greetings\[2]
+  /// 
+  /// hello.bye().seeya
+  Index(Box<Expression>, Box<Expression>),
+
+  /// arr; index
+  /// 
+  /// hello\[0]
+  ArrayIndex(Box<Expression>, Box<Expression>),
 
   /// index; aliases<parent; opt child>[]
   /// 
