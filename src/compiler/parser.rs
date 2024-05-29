@@ -146,11 +146,11 @@ impl Parser {
 
     } else if ["let", "const"].contains(&init.unwrap().value.as_ref().unwrap().as_str()) {
       let assignment = self.iter.next().unwrap();
-      let identifier = self.consume(&[TokenTypes::Identifier], false);
+      let identifier = self.consume(&[TokenTypes::Identifier], false)?;
 
       if self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "="
         || [TokenTypes::Newline, TokenTypes::Semicolon].contains(&self.iter.current.as_ref().unwrap().of_type) {
-        return self.parse_assignment(Some(&assignment), identifier?);
+        return self.parse_assignment(Some(&assignment), identifier, None);
       } else {
         return Err(Error::new(
           Error::UnexpectedToken,
@@ -198,7 +198,7 @@ impl Parser {
 
   fn parse_expression(&mut self, precedence: i8) -> Result<Expression, Error> {
     let init = self.iter.current.as_ref().unwrap().clone();
-    let mut left = self.parse_primary();
+    let mut left = self.parse_primary()?;
 
     while self.iter.current.is_some()
       && self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator
@@ -208,26 +208,31 @@ impl Parser {
       if ["++", "--"].contains(&&operator.value.as_ref().unwrap().as_str()) {
         return Ok(self.get_expr(Expr::UnaryOperator(
           Operator(String::from(operator.value.as_ref().unwrap().to_owned() + ":post")),
-          Box::new(left?)
+          Box::new(left.clone())
         ), Some(init.line), init.start_pos, Some(operator.line)));
+      }
+
+      // Handle assignment for when lhs indexes bring us here
+      if operator.value.as_ref().unwrap() == "=" {
+        return Ok(self.parse_assignment(None, init, Some(left))?);
       }
 
       let mut next_precedence = self.get_precedence(operator.clone());
       if self.is_left_associative(operator.clone()) { next_precedence += 1; }
 
-      let right = self.parse_expression(next_precedence);
-      left = Ok(self.get_expr(Expr::BinaryOperator(
+      let right = self.parse_expression(next_precedence)?;
+      left = self.get_expr(Expr::BinaryOperator(
         Operator((*operator.to_owned().value.unwrap()).to_string()),
-        Box::new(left?),
-        Box::new(right.as_ref().unwrap().to_owned())
-      ), Some(init.line), init.start_pos, right.unwrap().last_line));
+        Box::new(left),
+        Box::new(right.clone())
+      ), Some(init.line), init.start_pos, right.last_line);
     }
 
     // if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type == TokenTypes::Semicolon {
     //   self.consume(&[TokenTypes::Semicolon], false);
     // }
 
-    return left;
+    return Ok(left);
   }
 
   fn parse_primary(&mut self) -> Result<Expression, Error> {
@@ -325,14 +330,17 @@ impl Parser {
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Identifier {
       let ident = self.iter.next().unwrap();
 
-      // TODO: Object property
-      // if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Dot {
-
       // EOF, return ident literal
       if self.iter.current.is_none() || self.iter.current.as_ref().unwrap().of_type == TokenTypes::EOF {
         return Ok(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(ident.value.unwrap())), None)),
           Some(ident.line), ident.start_pos, Some(ident.line)
         ));
+
+      // TODO: Index
+      // else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Dot {
+
+      } else if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type == TokenTypes::LBracket {
+        return self.parse_array_index(ident);
 
       // Call
       } else if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type == TokenTypes::LParen {
@@ -340,13 +348,13 @@ impl Parser {
 
       // Assignment
       } else if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "=" {
-        return self.parse_assignment(None, ident);
+        return self.parse_assignment(None, ident, None);
 
       // Typed assignment
       } else if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type == TokenTypes::Identifier {
         // We have a type, get the identifier 
         let name = self.iter.next().unwrap();
-        return self.parse_assignment(Some(&ident), name);
+        return self.parse_assignment(Some(&ident), name, None);
 
       // Literal
       } else {
@@ -396,7 +404,6 @@ impl Parser {
         "Unexpected token.".to_string()
       ));
     }
-
   }
 
   fn is_unary_operator(&mut self, token: &Token) -> bool {
@@ -427,20 +434,33 @@ impl Parser {
     }
   }
 
-  fn parse_assignment(&mut self, _type: Option<&Token>, identifier: Token) -> Result<Expression, Error> {
+  fn parse_assignment(&mut self, typ: Option<&Token>, identifier: Token, indexed: Option<Expression>) -> Result<Expression, Error> {
     // Get type if it exists
     let mut assignment_type: Option<Type> = None;
-    if _type.is_some() {
-      assignment_type = Some(Type(_type.unwrap().value.as_ref().unwrap().to_owned()));
+    if typ.is_some() {
+      assignment_type = Some(Type(typ.unwrap().value.as_ref().unwrap().to_owned()));
     }
 
     let assignment: Expression;
 
     // TODO: Handle comma case (multiple assignments at once)
-    if [TokenTypes::Newline, TokenTypes::Semicolon].contains(&self.iter.current.as_ref().unwrap().of_type) {
+
+    // If indexed, this is an array assignment
+    if indexed.is_some() {
+      let index = indexed.unwrap();
+      let assign = self.parse_expression(0)?;
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Literals::Identifier(Name(String::from(identifier.value.unwrap())), None),
+        Box::new(index),
+        Some(Box::new(assign.clone()))),
+        Some(identifier.line), identifier.start_pos, assign.last_line
+      );
+    } else if [TokenTypes::Newline, TokenTypes::Semicolon].contains(&self.iter.current.as_ref().unwrap().of_type) {
+      assignment = self.get_expr(Expr::Assignment(
+        assignment_type,
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+          Some(identifier.line), identifier.start_pos, Some(identifier.line)
+        )),
         None
       ), Some(identifier.line), identifier.start_pos, Some(identifier.line));
     } else if self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "=" {
@@ -448,20 +468,26 @@ impl Parser {
       let assign = self.parse_expression(0)?;
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Literals::Identifier(Name(String::from(identifier.value.unwrap())), None),
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+          Some(identifier.line), identifier.start_pos, Some(identifier.line)
+        )),
         Some(Box::new(assign.clone()))
       ), Some(identifier.line), identifier.start_pos, assign.last_line);
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RParen {
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Literals::Identifier(Name(String::from(identifier.value.unwrap())), None),
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+          Some(identifier.line), identifier.start_pos, Some(identifier.line)
+        )),
         None
       ), Some(identifier.line), identifier.start_pos, Some(identifier.line));
     } else {
       let assign = self.parse_expression(0)?;
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Literals::Identifier(Name(String::from(identifier.value.unwrap())), None),
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+          Some(identifier.line), identifier.start_pos, Some(identifier.line)
+        )),
         Some(Box::new(assign.clone()))
       ), Some(identifier.line), identifier.start_pos, assign.last_line);
     }
@@ -685,6 +711,20 @@ impl Parser {
         format!("Expected keyword \"{}\", got end of file.", keyword),
       ))
     }
+  }
+
+  fn parse_array_index(&mut self, identifier: Token) -> Result<Expression, Error> {
+    self.consume(&[TokenTypes::LBracket], false)?;
+    let index = self.parse_expression(0)?;
+    self.consume(&[TokenTypes::RBracket], false)?;
+
+    return Ok(self.get_expr(Expr::ArrayIndex(
+      Box::new(self.get_expr(Expr::Literal(
+        Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)
+      ), Some(identifier.line), identifier.start_pos, Some(identifier.line))),
+      Box::new(index.clone())),
+      Some(identifier.line), identifier.start_pos, index.last_line)
+    );
   }
 
   fn parse_call(&mut self, identifier: Token) -> Result<Expression, Error> {
@@ -1385,14 +1425,18 @@ mod tests {
     return Ok(assert_eq!(ast, vec![
       parser.get_expr(Expr::Assignment(
         Some(Type(String::from("let"))),
-        Literals::Identifier(Name(String::from("a")), None),
+        Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)),
+          None, None, None
+        )),
         Some(Box::new(
           parser.get_expr(Expr::Literal(Literals::Integer(1)), None, None, None)
         )
       )), None, None, None),
       parser.get_expr(Expr::Assignment(
         Some(Type(String::from("const"))),
-        Literals::Identifier(Name(String::from("name")), None),
+        Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("name")), None)),
+          None, None, None
+        )),
         Some(Box::new(
           parser.get_expr(Expr::Literal(Literals::String(String::from("Jink"))), None, None, None)
         )

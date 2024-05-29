@@ -136,7 +136,7 @@ impl Simulator {
           }
         }
       },
-      Expr::Assignment(typ, ident, val) => {
+      Expr::Assignment(typ, ident_or_idx, val) => {
         // Get value
         let value: Value;
         if val.is_some() {
@@ -151,7 +151,7 @@ impl Simulator {
         }
 
         // Get name from identifier
-        if let Literals::Identifier(name, _) = ident {
+        if let Expr::Literal(Literals::Identifier(name, _)) = ident_or_idx.expr {
 
           // Type exists, is new assignment
           if typ.is_some() {
