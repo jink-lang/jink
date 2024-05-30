@@ -249,7 +249,7 @@ impl<'ctx> CodeGen<'ctx> {
           self.build_struct(Some(name), value)?;
         },
         Expr::Conditional(typ, expr, body, else_body) => {
-          block = self.build_if(typ, expr, body, else_body, main_fn, block)?;
+          block = self.build_if(typ, expr, body, else_body, main_fn, block, None, None)?;
         },
         Expr::ForLoop(value, expr, body) => {
           block = self.build_for_loop(value, expr, body, main_fn, block)?;
@@ -285,15 +285,19 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(block);
   }
 
-  fn build_loop_body(&mut self, body: Option<Vec<Expression>>, var: PointerValue<'ctx>, current_value: IntValue, body_block: BasicBlock<'ctx>) -> Result<(), Error> {
+  fn build_loop_body(&mut self, body: Option<Vec<Expression>>, var: PointerValue<'ctx>, current_value: IntValue, body_block: BasicBlock<'ctx>, cond_block: BasicBlock<'ctx>, end_block: BasicBlock<'ctx>) -> Result<(), Error> {
     self.enter_scope(false);
+    let mut current_block = body_block;
+
     if let Some(body) = body {
       for expr in body {
+
+        // TODO: Bring out the merge block from the conditional
         if let Expr::Conditional(typ, expr, body, ebody) = expr.expr.clone() {
-          self.build_if(typ, expr, body, ebody, body_block.get_parent().unwrap(), body_block)?;
+          current_block = self.build_if(typ, expr, body, ebody, body_block.get_parent().unwrap(), body_block, Some(cond_block), Some(end_block))?;
 
         } else if let Expr::Return(ret) = expr.expr.clone() {
-          let val = self.visit(&ret, body_block)?;
+          let val = self.visit(&ret, current_block)?;
           if val != self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum() {
             self.builder.build_return(Some(&val)).unwrap();
           } else {
@@ -301,21 +305,30 @@ impl<'ctx> CodeGen<'ctx> {
           }
 
         } else if let Expr::Assignment(_, _, _) = expr.expr.clone() {
-          self.build_assignment(expr.clone(), body_block, false)?;
+          self.build_assignment(expr.clone(), current_block, false)?;
 
-        // TODO: Implement break and continue
         } else if let Expr::BreakLoop = expr.expr.clone() {
+          self.builder.build_unconditional_branch(end_block).unwrap();
+          return Ok(());
+
         } else if let Expr::ContinueLoop = expr.expr.clone() {
+          self.builder.build_unconditional_branch(cond_block).unwrap();
+          return Ok(());
 
         } else {
-          self.visit(&expr, body_block)?;
+          self.visit(&expr, current_block)?;
         }
       }
     }
-    let next_value = self.builder.build_int_add(current_value, self.context.i32_type().const_int(1, false), "next_value").unwrap();
-    self.builder.build_store(var, next_value).unwrap();
-    self.exit_scope();
 
+    // If we did not leave the body block, increment the iterator and branch back to the conditional block
+    // if self.builder.get_insert_block().unwrap() == body_block || conditional_block.is_some() {
+    let next_value = self.builder.build_int_add(current_value, self.context.i64_type().const_int(1, false), "next_value").unwrap();
+    self.builder.build_store(var, next_value).unwrap();
+    // }
+
+    // Exit the loop body scope
+    self.exit_scope();
     return Ok(());
   }
 
@@ -330,8 +343,8 @@ impl<'ctx> CodeGen<'ctx> {
     // Collect the name
     if let Expr::Literal(Literals::Identifier(name, _)) = value.expr {
 
-      let i32_type = self.context.i32_type();
-      let init_value = i32_type.const_int(0, false);
+      let i64_type = self.context.i64_type();
+      let init_value = i64_type.const_int(0, false);
 
       // Initialize an int to manage the index of the loop
       let var = self.builder.build_alloca(init_value.get_type(), &name.0).unwrap();
@@ -342,7 +355,7 @@ impl<'ctx> CodeGen<'ctx> {
       self.builder.position_at_end(cond_block);
 
       // Load the loop index in the conditional block
-      let loop_index = self.builder.build_load(i32_type, var, &name.0).unwrap().into_int_value();
+      let loop_index = self.builder.build_load(i64_type, var, &name.0).unwrap().into_int_value();
 
       // Visit the iterable that we are looping over
       let iterable = self.visit(&expr, cond_block)?;
@@ -369,10 +382,15 @@ impl<'ctx> CodeGen<'ctx> {
 
       // Build the loop body
       self.builder.position_at_end(body_block);
-      let current_value = self.builder.build_load(i32_type, var, "current_value").unwrap().into_int_value();
+      let current_value = self.builder.build_load(i64_type, var, "current_value").unwrap().into_int_value();
       self.set_symbol(name.0.clone(), Some(var), current_value.get_type().as_basic_type_enum(), current_value.into());
-      self.build_loop_body(body, var, current_value, body_block)?;
-      self.builder.build_unconditional_branch(cond_block).unwrap();
+      self.build_loop_body(body, var, current_value, body_block, cond_block, end_block)?;
+
+      // If we terminated in a block that is not the end block, branch back to the conditional block to be sure if the loop should continue
+      if self.builder.get_insert_block().unwrap() != end_block {
+        self.builder.build_unconditional_branch(cond_block).unwrap();
+      }
+
       self.builder.position_at_end(end_block);
     } else {
       panic!("Unreachable");
@@ -391,17 +409,7 @@ impl<'ctx> CodeGen<'ctx> {
       };
     }
 
-    // If value is an identifier, handle it as a type alias
-    // if let Literals::Identifier(n, _) = value.as_ref().to_owned() {
-    //     if self.type_tags.contains_key(&n.0) {
-    //         // TODO: Save alias
-    //         // self.add_type(name.unwrap());
-    //     } else {
-    //         let sym = self.get_symbol(&n.0)?;
-    //         // TODO: Save alias
-    //     }
-    //     return Ok(());
-    // }
+    // TODO: If value is an identifier, handle it as a type alias
 
     // Build struct if value is an object
     if let Literals::Object(obj) = value.as_ref().to_owned() {
@@ -608,7 +616,7 @@ impl<'ctx> CodeGen<'ctx> {
   }
 
   // Top level builder for conditional expressions
-  fn build_if(&mut self, _typ: Type, expr: Option<Box<Expression>>, body: Option<Box<Vec<Expression>>>, else_body: Option<Box<Vec<Expression>>>, function: FunctionValue<'ctx>, block: BasicBlock<'ctx>) -> Result<BasicBlock<'ctx>, Error> {
+  fn build_if(&mut self, _typ: Type, expr: Option<Box<Expression>>, body: Option<Box<Vec<Expression>>>, else_body: Option<Box<Vec<Expression>>>, function: FunctionValue<'ctx>, block: BasicBlock<'ctx>, loop_cond_block: Option<BasicBlock<'ctx>>, exit_loop_block: Option<BasicBlock<'ctx>>) -> Result<BasicBlock<'ctx>, Error> {
     let mut cond = self.visit(&expr.unwrap(), block)?;
 
     // If the condition is a number, condition on the basis of it not being 0
@@ -639,7 +647,7 @@ impl<'ctx> CodeGen<'ctx> {
     self.enter_scope(false);
     for exp in body.unwrap().iter() {
       if let Expr::Conditional(typ, expr, body, ebody) = exp.expr.clone() {
-        self.build_if(typ, expr, body, ebody, function, then_block)?;
+        self.build_if(typ, expr, body, ebody, function, then_block, loop_cond_block, exit_loop_block)?;
 
       } else if let Expr::Return(ret) = exp.expr.clone() {
         let val = self.visit(&ret, then_block)?;
@@ -651,6 +659,36 @@ impl<'ctx> CodeGen<'ctx> {
 
       } else if let Expr::Assignment(_, _, _) = exp.expr.clone() {
         self.build_assignment(exp.clone(), then_block, false)?;
+
+      } else if let Expr::BreakLoop = exp.expr.clone() {
+        if exit_loop_block.is_none() {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &"",
+            Some(0),
+            Some(0),
+            "Cannot break outside of loop".to_string()
+          ));
+        }
+
+        // TODO: Break out of loop
+        // We still need to build else block(s) below so we can't return here
+
+      } else if let Expr::ContinueLoop = exp.expr.clone() {
+        if exit_loop_block.is_none() {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &"",
+            Some(0),
+            Some(0),
+            "Cannot continue outside of loop".to_string()
+          ));
+        }
+
+        // TODO: Continue loop (branch back to loop condition block)
+        // We still need to build else block(s) below so we can't return here
 
       } else {
         self.visit(&exp, then_block)?;
@@ -678,9 +716,9 @@ impl<'ctx> CodeGen<'ctx> {
 
     for name in all_keys {
 
-    // Get values from then_vals and else_vals or use the original value if not present
-    let then_val = if let Some(val) = then_vals.get(name) {
-      val.clone()
+      // Get values from then_vals and else_vals or use the original value if not present
+      let then_val = if let Some(val) = then_vals.get(name) {
+        val.clone()
       } else {
         self.get_symbol(name)?
           .map(|(_, pval, typ, val, exited_func)| (pval, typ, val, exited_func))
@@ -789,7 +827,7 @@ impl<'ctx> CodeGen<'ctx> {
             self.build_else_body(block, body)?;
           } else {
             // This is a new branch, return to the top
-            self.build_if(typ, expr, body, ebody, block.get_parent().unwrap(), block)?;
+            self.build_if(typ, expr, body, ebody, block.get_parent().unwrap(), block, None, None)?;
           }
 
         } else if let Expr::Assignment(_, _, _) = exp.expr.clone() {
@@ -1239,7 +1277,7 @@ impl<'ctx> CodeGen<'ctx> {
         }
 
       } else if let Expr::Conditional(typ, expr, body, ebody) = ex.expr.clone() {
-        func_block = self.build_if(typ, expr, body, ebody, function, func_block)?;
+        func_block = self.build_if(typ, expr, body, ebody, function, func_block, None, None)?;
 
       // TODO: Implement loops in function body
 
@@ -1416,7 +1454,7 @@ impl<'ctx> CodeGen<'ctx> {
         ], false);
 
         let array = self.context.i64_type().const_array(&values).as_basic_value_enum();
-        let length = self.context.i32_type().const_int(values.len() as u64, false).as_basic_value_enum();
+        let length = self.context.i64_type().const_int(values.len() as u64, false).as_basic_value_enum();
         let struct_val = struct_type.const_named_struct(&[array, length]).as_basic_value_enum();
         return Ok(struct_val);
       },

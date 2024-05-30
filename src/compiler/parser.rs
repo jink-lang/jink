@@ -15,6 +15,7 @@ pub struct Parser {
   pub code: String,
   pub iter: FutureIter,
   pub testing: bool,
+  pub in_loop: bool,
 }
 
 impl Parser {
@@ -23,6 +24,7 @@ impl Parser {
       code: String::new(),
       iter: FutureIter::new(vec![]),
       testing: false,
+      in_loop: false,
     }
   }
 
@@ -180,9 +182,15 @@ impl Parser {
     } else if init.unwrap().value.as_ref().unwrap() == "type" {
       self.iter.next();
       return self.parse_type();
-    
+
     } else if init.unwrap().value.as_ref().unwrap() == "for" {
       return self.parse_for_loop();
+
+    } else if init.unwrap().value.as_ref().unwrap() == "break" {
+      return self.parse_break_continue("break");
+
+    } else if init.unwrap().value.as_ref().unwrap() == "continue" {
+      return self.parse_break_continue("continue");
 
     } else {
       return Err(Error::new(
@@ -671,7 +679,9 @@ impl Parser {
 
     self.consume(&[TokenTypes::RParen], false)?;
 
+    self.in_loop = true;
     let body = self.parse_loop_block()?;
+    self.in_loop = false;
 
     return Ok(Expression {
       expr: Expr::ForLoop(
@@ -683,6 +693,40 @@ impl Parser {
       first_pos: Some(init.as_ref().unwrap().start_pos.unwrap()),
       last_line: Some(init.unwrap().line),
     });
+  }
+
+  fn parse_break_continue(&mut self, typ: &str) -> Result<Expression, Error> {
+    let token = self.iter.next().unwrap();
+
+    if !self.in_loop {
+      eprintln!("Error: Unexpected {} outside of loop.", typ);
+      return Err(Error::new(
+        Error::UnexpectedToken,
+        Some(token.clone()),
+        self.code.lines().nth((token.line) as usize).unwrap(),
+        token.start_pos,
+        token.end_pos,
+        format!("Unexpected {} outside of loop.", typ),
+      ));
+    }
+
+    match typ {
+      "break" => {
+        return Ok(self.get_expr(Expr::BreakLoop,
+          Some(token.line),
+          token.start_pos,
+          Some(token.line)
+        ));
+      },
+      "continue" => {
+        return Ok(self.get_expr(Expr::ContinueLoop,
+          Some(token.line),
+          token.start_pos,
+          Some(token.line)
+        ));
+      },
+      _ => unreachable!()
+    }
   }
 
   fn expect_keyword(&mut self, keyword: &str) -> Result<(), Error> {
@@ -1045,9 +1089,6 @@ impl Parser {
     ), Some(init.line), init.start_pos, Some(self.iter.current.as_ref().unwrap().line)));
   }
 
-  // TODO: Move actual block parsing to its own func (see block parsing for classes)
-  // and rename this to parse function block bc it clearly caters just to functions
-  // and then change the call to this from function calls because oops that makes no sense
   fn parse_func_block(&mut self) -> Result<Vec<Expression>, Error> {
     let mut body: Vec<Expression> = Vec::new();
 
@@ -1124,24 +1165,10 @@ impl Parser {
         break;
       }
 
-      let statement: Expression;
-      if token.of_type == TokenTypes::Keyword && token.value.as_ref().unwrap() == "break" {
-        self.iter.next();
-        statement = self.get_expr(Expr::BreakLoop,
-          Some(token.line), token.start_pos, Some(token.line)
-        );
-      } else if token.of_type == TokenTypes::Keyword && token.value.as_ref().unwrap() == "continue" {
-        self.iter.next();
-        statement = self.get_expr(Expr::ContinueLoop,
-          Some(token.line), token.start_pos, Some(token.line)
-        );
-      } else {
-        statement = self.parse_top()?;
-      }
-      body.push(statement);
+      body.push(self.parse_top()?);
 
       self.consume(&[TokenTypes::Semicolon, TokenTypes::Newline], false)?;
-      
+
       // Skip newlines after each statement
       self.skip_newlines(None);
     }
