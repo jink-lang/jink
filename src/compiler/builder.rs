@@ -1382,14 +1382,11 @@ impl<'ctx> CodeGen<'ctx> {
         ));
       }
 
-      let ptr = ptr.unwrap();
-
-      // Get the array's element type
-      // TODO: This will have to be modified for nested and dynamic arrays
-      let element_type: BasicTypeEnum<'ctx> = if typ.is_struct_type() {
+      // Get the array value and length from the array struct type
+      let (array, array_len) = if typ.is_struct_type() {
         if val.get_type().into_struct_type() == self.context.struct_type(&[self.context.ptr_type(AddressSpace::default()).into(), self.context.i64_type().into()], false) {
-          let array = self.builder.build_extract_value(val.into_struct_value(), 0, "arr_ptr").unwrap();
-          array.get_type().into_array_type().get_element_type()
+          (self.builder.build_extract_value(val.into_struct_value(), 0, "arr_ptr").unwrap(),
+          self.builder.build_extract_value(val.into_struct_value(), 1, "arr_len").unwrap().into_int_value())
         } else {
           return Err(Error::new(
             Error::CompilerError,
@@ -1411,14 +1408,48 @@ impl<'ctx> CodeGen<'ctx> {
         ));
       };
 
+      // Get a pointer to the array value
+      // TODO: Fix (does not work beyond first two bytes)
+      // let struct_gep = self.builder.build_struct_gep(
+      //   val.get_type().into_struct_type(),
+      //   ptr.unwrap(), 0, "arr_ptr"
+      // ).unwrap();
+      // let temp_array_ptr = self.builder.build_pointer_cast(struct_gep, self.context.ptr_type(AddressSpace::default()), "temp_array_ptr").unwrap();
+
+      // Temp: Build a new array out of the array pointer (RETHINK THIS)
+      let temp_array_ptr = self.builder.build_array_alloca(array.get_type(), array_len, "temp_array_ptr").unwrap();
+      self.builder.build_store(temp_array_ptr, array).unwrap();
+
+      // Get the array's element type
+      // TODO: This will have to be modified for nested and dynamic arrays
+      let element_type = array.get_type().into_array_type().get_element_type();
+
       // Load the value to index with
       let idx = self.visit(&index, self.builder.get_insert_block().unwrap())?.into_int_value();
 
-      // TODO: Bounds checking
-      // let array_len = self.builder.build_extract_value(val.into_struct_value(), 1, "arr_len").unwrap().into_int_value();
+      // TODO: Bounds checking - check index against array_len
+      // Will need to return the continue block so building can continue
+      // Maybe time for a runtime error / error function?
+      // Think about how to handle try/catch / how we'll handle errors in the language
+
+      // let cmp = self.builder.build_int_compare(inkwell::IntPredicate::UGE, idx, array_len, "cmp").unwrap();
+
+      // let error_block = self.context.append_basic_block(self.builder.get_insert_block().unwrap().get_parent().unwrap(), "error");
+      // let continue_block = self.context.append_basic_block(self.builder.get_insert_block().unwrap().get_parent().unwrap(), "continue");
+      // self.builder.build_conditional_branch(cmp, error_block, continue_block).unwrap();
+
+      // // Error block
+      // self.builder.position_at_end(error_block);
+      // let printf = self.module.get_function("printf").unwrap();
+      // let string = self.context.const_string("Array index out of bounds\n".as_bytes(), true);
+      // self.builder.build_call(printf, &[string.into()], "printf").unwrap();
+      // self.builder.build_return(None).unwrap();
+
+      // // Continue block
+      // self.builder.position_at_end(continue_block);
 
       // Get the pointer to the index and load its value
-      let idx_ptr = unsafe { self.builder.build_gep(element_type, ptr, &[idx], "get_index").unwrap() };
+      let idx_ptr = unsafe { self.builder.build_gep(element_type, temp_array_ptr, &[idx], "get_index").unwrap() };
       let val = self.builder.build_load(element_type, idx_ptr, "array_value").unwrap();
       return Ok((idx_ptr, val));
     }
