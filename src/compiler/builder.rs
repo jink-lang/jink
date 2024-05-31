@@ -310,6 +310,12 @@ impl<'ctx> CodeGen<'ctx> {
         } else if let Expr::Assignment(_, _, _) = expr.expr.clone() {
           self.build_assignment(expr.clone(), current_block, false)?;
 
+        } else if let Expr::ForLoop(value, expr, body) = expr.expr.clone() {
+          current_block = self.build_for_loop(value, expr, body, body_block.get_parent().unwrap(), current_block)?;
+
+        } else if let Expr::WhileLoop(expr, body) = expr.expr.clone() {
+          current_block = self.build_while_loop(expr, body, body_block.get_parent().unwrap(), current_block)?;
+
         } else if let Expr::BreakLoop = expr.expr.clone() {
           self.builder.build_unconditional_branch(end_block).unwrap();
           return Ok(());
