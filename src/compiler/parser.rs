@@ -59,11 +59,12 @@ impl Parser {
           Expr::UnaryOperator(_, _) => {},
           Expr::BinaryOperator(_, _, _) => {},
           Expr::ForLoop(_, _, _) => {},
+          Expr::WhileLoop(_, _) => {},
           _ => {
             return Err(Error::new(
               Error::UnexpectedExpression,
               Some(self.iter.current.as_ref().unwrap().clone()),
-              self.code.lines().nth((parsed.as_ref().unwrap().first_line.unwrap() - 1) as usize).unwrap(),
+              self.code.lines().nth((parsed.as_ref().unwrap().first_line.unwrap()) as usize).unwrap(),
               parsed.as_ref().unwrap().first_pos,
               parsed.as_ref().unwrap().last_line,
               "Unexpected expression".to_string()
@@ -186,6 +187,9 @@ impl Parser {
     } else if init.unwrap().value.as_ref().unwrap() == "for" {
       return self.parse_for_loop();
 
+    } else if init.unwrap().value.as_ref().unwrap() == "while" {
+      return self.parse_while_loop();
+
     } else if init.unwrap().value.as_ref().unwrap() == "break" {
       return self.parse_break_continue("break");
 
@@ -196,7 +200,7 @@ impl Parser {
       return Err(Error::new(
         Error::UnexpectedToken,
         Some(init.unwrap().clone()),
-        self.code.lines().nth((init.unwrap().line - 1) as usize).unwrap(),
+        self.code.lines().nth((init.unwrap().line) as usize).unwrap(),
         init.unwrap().start_pos,
         init.unwrap().end_pos,
         "Unexpected token".to_string()
@@ -687,6 +691,28 @@ impl Parser {
       expr: Expr::ForLoop(
         Box::new(loop_variable),
         Box::new(iterable),
+        Some(body),
+      ),
+      first_line: Some(init.as_ref().unwrap().line),
+      first_pos: Some(init.as_ref().unwrap().start_pos.unwrap()),
+      last_line: Some(init.unwrap().line),
+    });
+  }
+
+  fn parse_while_loop(&mut self) -> Result<Expression, Error> {
+    let init = self.iter.next(); // Consume "while"
+
+    self.consume(&[TokenTypes::LParen], false)?;
+    let expression = self.parse_expression(0)?;
+    self.consume(&[TokenTypes::RParen], false)?;
+
+    self.in_loop = true;
+    let body = self.parse_loop_block()?;
+    self.in_loop = false;
+
+    return Ok(Expression {
+      expr: Expr::WhileLoop(
+        Box::new(expression),
         Some(body),
       ),
       first_line: Some(init.as_ref().unwrap().line),

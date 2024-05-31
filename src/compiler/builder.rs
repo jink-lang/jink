@@ -253,7 +253,10 @@ impl<'ctx> CodeGen<'ctx> {
         },
         Expr::ForLoop(value, expr, body) => {
           block = self.build_for_loop(value, expr, body, main_fn, block)?;
-        }
+        },
+        Expr::WhileLoop(expr, body) => {
+          block = self.build_while_loop(expr, body, main_fn, block)?;
+        },
         Expr::Call(_, _) => {
           self.visit(&expr, block)?;
         },
@@ -285,7 +288,7 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(block);
   }
 
-  fn build_loop_body(&mut self, body: Option<Vec<Expression>>, var: PointerValue<'ctx>, current_value: IntValue, body_block: BasicBlock<'ctx>, cond_block: BasicBlock<'ctx>, end_block: BasicBlock<'ctx>) -> Result<(), Error> {
+  fn build_loop_body(&mut self, typ: &str, body: Option<Vec<Expression>>, var: Option<PointerValue<'ctx>>, current_value: Option<IntValue>, body_block: BasicBlock<'ctx>, cond_block: BasicBlock<'ctx>, end_block: BasicBlock<'ctx>) -> Result<(), Error> {
     self.enter_scope(false);
     let mut current_block = body_block;
 
@@ -321,11 +324,13 @@ impl<'ctx> CodeGen<'ctx> {
       }
     }
 
-    // If we did not leave the body block, increment the iterator and branch back to the conditional block
-    // if self.builder.get_insert_block().unwrap() == body_block || conditional_block.is_some() {
-    let next_value = self.builder.build_int_add(current_value, self.context.i64_type().const_int(1, false), "next_value").unwrap();
-    self.builder.build_store(var, next_value).unwrap();
-    // }
+    if typ == "for" {
+      // If we did not leave the body block, increment the iterator and branch back to the conditional block
+      // if self.builder.get_insert_block().unwrap() == body_block || conditional_block.is_some() {
+      let next_value = self.builder.build_int_add(current_value.unwrap(), self.context.i64_type().const_int(1, false), "next_value").unwrap();
+      self.builder.build_store(var.unwrap(), next_value).unwrap();
+      // }
+    }
 
     // Exit the loop body scope
     self.exit_scope();
@@ -384,7 +389,7 @@ impl<'ctx> CodeGen<'ctx> {
       self.builder.position_at_end(body_block);
       let current_value = self.builder.build_load(i64_type, var, "current_value").unwrap().into_int_value();
       self.set_symbol(name.0.clone(), Some(var), current_value.get_type().as_basic_type_enum(), current_value.into());
-      self.build_loop_body(body, var, current_value, body_block, cond_block, end_block)?;
+      self.build_loop_body("for", body, Some(var), Some(current_value), body_block, cond_block, end_block)?;
 
       // If we terminated in a block that is not the end block, branch back to the conditional block to be sure if the loop should continue
       if self.builder.get_insert_block().unwrap() != end_block {
@@ -396,6 +401,43 @@ impl<'ctx> CodeGen<'ctx> {
       panic!("Unreachable");
     }
 
+    return Ok(end_block);
+  }
+
+  // TODO: DRY this up with the repeat pattern in build_for_loop
+  fn build_while_loop(&mut self, expr: Box<Expression>, body: Option<Vec<Expression>>, function: FunctionValue<'ctx>, block: BasicBlock<'ctx>) -> Result<BasicBlock<'ctx>, Error> {
+    let cond_block = self.context.append_basic_block(function, "loop_cond_block");
+    let body_block = self.context.append_basic_block(function, "loop_body");
+    let end_block = self.context.append_basic_block(function, "loop_end");
+
+    self.builder.position_at_end(block);
+
+    // Initialize the conditional block to ascertain whether the loop should continue
+    self.builder.build_unconditional_branch(cond_block).unwrap();
+    self.builder.position_at_end(cond_block);
+
+    // Visit the condition
+    let cond = self.visit(&expr, cond_block)?;
+
+    // If the condition is a number, condition on the basis of it not being 0
+    if let BasicValueEnum::IntValue(i) = cond {
+      let cond = self.builder.build_int_compare(inkwell::IntPredicate::NE, i, i.get_type().const_int(0, false), "loop_cond").unwrap();
+      self.builder.build_conditional_branch(cond, body_block, end_block).unwrap();
+    } else if let BasicValueEnum::FloatValue(f) = cond {
+      let cond = self.builder.build_float_compare(inkwell::FloatPredicate::ONE, f, f.get_type().const_float(0.0), "loop_cond").unwrap();
+      self.builder.build_conditional_branch(cond, body_block, end_block).unwrap();
+    }
+
+    // Build the loop body
+    self.builder.position_at_end(body_block);
+    self.build_loop_body("while", body, None, None, body_block, cond_block, end_block)?;
+
+    // If we terminated in a block that is not the end block, branch back to the conditional block to be sure if the loop should continue
+    if self.builder.get_insert_block().unwrap() != end_block {
+      self.builder.build_unconditional_branch(cond_block).unwrap();
+    }
+
+    self.builder.position_at_end(end_block);
     return Ok(end_block);
   }
 
@@ -1646,8 +1688,15 @@ impl<'ctx> CodeGen<'ctx> {
         return Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum());
       },
       Literals::Identifier(n, _) => {
-        if let Some((_, _, _, value, _exited_func)) = self.get_symbol(&n.0)? {
-          return Ok(value);
+        if let Some((_, ptr, typ, val, _exited_func)) = self.get_symbol(&n.0)? {
+          // Constant value
+          if ptr.is_none() {
+            return Ok(val)
+          // If there's a pointer, load the value behind the identifier
+          } else {
+            let var = self.builder.build_load(typ, ptr.unwrap(), &n.0).unwrap();
+            return Ok(var);
+          }
         } else {
           return Err(Error::new(
             Error::CompilerError,
@@ -2073,6 +2122,19 @@ mod tests {
     let code = "let a = 1;
     let b = 2;
     printf(\"a:%d b:%d\", a, b);".to_string();
+    let mut parser = crate::Parser::new();
+    let ast = parser.parse(code.clone(), false, false)?;
+    codegen.build(code, ast, false, true)?;
+    return Ok(());
+  }
+
+  #[test]
+  fn test_assign_array() -> Result<(), Error> {
+    let context = Context::create();
+    let mut codegen = CodeGen::new(&context);
+    let code = "let a = [1, 2, 3];
+    let b = a[0];
+    printf(\"b:%d\", b);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), false, false)?;
     codegen.build(code, ast, false, true)?;
