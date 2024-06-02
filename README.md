@@ -35,9 +35,14 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [ ] Fix nested conditionals
 - [ ] Build dynamic array type
 - [ ] Build heterogenous array type
-- [x] Build structs/types
+- [ ] Build nested arrays
+- [x] Build structs/typesee
+- [x] Build nested structs
+- [x] Build struct indexing
+- [ ] Build nested struct indexing
 - [x] Build for loops
-- [ ] Build while loops
+- [x] Build while loops
+- [ ] Fix triple & multi nested loops
 - [ ] Build break and continue for loops
 - [ ] Write compiler tests
 ##### Lexer
@@ -54,11 +59,12 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [ ] Parse pub keyword on definitions
 - [x] Parse indexing (arrays)
 - [ ] Parse recursive indexing (arrays)
-- [ ] Parse indexing (object properties and methods)
-- [ ] Parse recursive indexing (object properties and methods)
+- [x] Parse indexing (object properties and methods)
+- [x] Parse recursive indexing (object properties and methods)
 - [ ] Parse del statements
-- [ ] Parse while loops
+- [x] Parse while loops
 - [x] Parse for loops
+- [x] Parse break and continue for loops
 - [ ] Parse public statements
 - [ ] Parse external statements
 
@@ -159,7 +165,7 @@ print(business.get_address().city); // Jinkville
 
 You will need to have Rust installed on your machine. You can follow the instructions on the [Rust website](https://www.rust-lang.org/tools/install) to install it.
 
-You will also need LLVM 16.0.0 installed on your machine. You can follow the instructions on the [LLVM website](https://releases.llvm.org/download.html) to install it.
+You will also need (at least) LLVM 16.0.0 installed on your machine. You can follow the instructions on the [LLVM website](https://releases.llvm.org/download.html) to install it.
 
 ### Running
 
