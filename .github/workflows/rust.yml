@@ -17,6 +17,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
+
+    - name: Set rustup version
+      run: rustup default stable
     
     - name: Build
       run: cargo build --verbose
