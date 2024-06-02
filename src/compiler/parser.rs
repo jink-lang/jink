@@ -60,11 +60,12 @@ impl Parser {
           Expr::BinaryOperator(_, _, _) => {},
           Expr::ForLoop(_, _, _) => {},
           Expr::WhileLoop(_, _) => {},
+          // Expr::Index(_, _) => {}, // Will only be necessary when indexing at top level - module imports and class methods
           _ => {
             return Err(Error::new(
               Error::UnexpectedExpression,
               Some(self.iter.current.as_ref().unwrap().clone()),
-              self.code.lines().nth((parsed.as_ref().unwrap().first_line.unwrap()) as usize).unwrap(),
+              self.code.lines().nth((parsed.as_ref().unwrap().first_line.unwrap() - 1) as usize).unwrap(),
               parsed.as_ref().unwrap().first_pos,
               parsed.as_ref().unwrap().last_line,
               "Unexpected expression".to_string()
@@ -348,8 +349,8 @@ impl Parser {
           Some(ident.line), ident.start_pos, Some(ident.line)
         ));
 
-      // TODO: Index
-      // else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Dot {
+      } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "." {
+        return self.parse_index(ident);
 
       } else if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type == TokenTypes::LBracket {
         return self.parse_array_index(ident);
@@ -781,6 +782,19 @@ impl Parser {
         format!("Expected keyword \"{}\", got end of file.", keyword),
       ))
     }
+  }
+
+  fn parse_index(&mut self, identifier: Token) -> Result<Expression, Error> {
+    self.iter.next(); // Consume `.`
+    let index = self.parse_expression(0)?;
+
+    return Ok(self.get_expr(Expr::Index(
+      Box::new(self.get_expr(Expr::Literal(
+        Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)
+      ), Some(identifier.line), identifier.start_pos, Some(identifier.line))),
+      Box::new(index.clone())),
+      Some(identifier.line), identifier.start_pos, index.last_line
+    ));
   }
 
   fn parse_array_index(&mut self, identifier: Token) -> Result<Expression, Error> {

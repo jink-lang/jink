@@ -27,9 +27,13 @@ pub struct CodeGen<'ctx> {
   context: &'ctx Context,
   pub module: Module<'ctx>,
   builder: Builder<'ctx>,
+  /// Stack of symbol tables
   symbol_table_stack: Vec<Scope<'ctx>>,
+  /// Table of struct types and their fields
   struct_table: IndexMap<String, (StructType<'ctx>, Vec<(String, BasicTypeEnum<'ctx>)>)>,
-  type_tags: IndexMap<String, u64>,
+  /// Stack of struct names and their corresponding type struct names
+  struct_stack: IndexMap<String, String>,
+  _type_tags: IndexMap<String, u64>,
   execution_engine: ExecutionEngine<'ctx>
 }
 
@@ -50,7 +54,8 @@ impl<'ctx> CodeGen<'ctx> {
       builder: context.create_builder(),
       symbol_table_stack: Vec::new(),
       struct_table: IndexMap::new(),
-      type_tags: Self::map_types(),
+      struct_stack: IndexMap::new(),
+      _type_tags: Self::map_types(),
       execution_engine
     };
   }
@@ -69,12 +74,12 @@ impl<'ctx> CodeGen<'ctx> {
     return types;
   }
 
-  fn get_tag_by_type(&self, typ: BasicTypeEnum) -> u64 {
+  fn _get_tag_by_type(&self, typ: BasicTypeEnum) -> u64 {
     match typ {
-      BasicTypeEnum::IntType(_) => *self.type_tags.get("int").unwrap(),
-      BasicTypeEnum::FloatType(_) => *self.type_tags.get("float").unwrap(),
-      BasicTypeEnum::ArrayType(_) => *self.type_tags.get("array").unwrap(),
-      BasicTypeEnum::PointerType(_) => *self.type_tags.get("object").unwrap(),
+      BasicTypeEnum::IntType(_) => *self._type_tags.get("int").unwrap(),
+      BasicTypeEnum::FloatType(_) => *self._type_tags.get("float").unwrap(),
+      BasicTypeEnum::ArrayType(_) => *self._type_tags.get("array").unwrap(),
+      BasicTypeEnum::PointerType(_) => *self._type_tags.get("object").unwrap(),
       _ => panic!("Invalid type for tag"),
     }
   }
@@ -276,7 +281,7 @@ impl<'ctx> CodeGen<'ctx> {
           println!("Module: {:?} {:?}\n", name, body);
         },
         Expr::Index(parent, child) => {
-          println!("Index: {:?} {:?}\n", parent, child);
+          self.build_index_extract(parent, child, block)?;
         },
         Expr::ArrayIndex(arr, index) => {
           println!("ArrayIndex: {:?} {:?}\n", arr, index);
@@ -286,6 +291,82 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     return Ok(block);
+  }
+
+  fn build_index_extract(&mut self, parent: Box<Expression>, child: Box<Expression>, block: BasicBlock<'ctx>) -> Result<BasicValueEnum<'ctx>, Error> {
+    let parent_val = self.visit(&parent, block)?;
+
+    // If parent is struct
+    // Visiting a struct always returns a pointer
+    if parent_val.is_pointer_value() {
+
+      // Get struct type from name
+      let struct_type = self.struct_stack.get(parent_val.get_name().to_str().unwrap());
+      if struct_type.is_none() {
+        return Err(Error::new(
+          Error::CompilerError,
+          None,
+          self.code.lines().nth(parent.first_line.unwrap() as usize).unwrap(),
+          parent.first_pos,
+          parent.first_pos,
+          format!("Unknown symbol: {}", parent_val.get_name().to_str().unwrap())
+        ));
+      }
+
+      // Get type information with name
+      let struct_ref = self.struct_table.get(struct_type.unwrap());
+      if struct_ref.is_none() {
+        return Err(Error::new(
+          Error::CompilerError,
+          None,
+          &"",
+          Some(0),
+          Some(0),
+          format!("Unknown type: {}", struct_type.unwrap())
+        ));
+      }
+
+      if let Expr::Literal(Literals::Identifier(name, _)) = child.expr {
+
+        for (i, (field_name, _field_type)) in struct_ref.unwrap().1.iter().enumerate() {
+          if field_name == &name.0 {
+            let struct_val = self.builder.build_load(struct_ref.unwrap().0, parent_val.into_pointer_value(), "struct_val").unwrap();
+            let value = self.builder.build_extract_value(struct_val.into_struct_value(), i as u32, "indexed_value").unwrap();
+            return Ok(value);
+          }
+        }
+
+        // Invalid index at child
+        return Err(Error::new(
+          Error::CompilerError,
+          None,
+          self.code.lines().nth((child.first_line.unwrap() - 1) as usize).unwrap(),
+          child.first_pos,
+          child.first_pos,
+          format!("Field {} not found on index {}", name.0, parent_val.get_name().to_str().unwrap())
+        ));
+
+      } else {
+        // Invalid index at child
+        return Err(Error::new(
+          Error::CompilerError,
+          None,
+          self.code.lines().nth(child.first_line.unwrap() as usize).unwrap(),
+          child.first_pos,
+          child.first_pos,
+          "Struct index must be an identifier".to_string()
+        ));
+      }
+    }
+
+    return Err(Error::new(
+      Error::CompilerError,
+      None,
+      self.code.lines().nth(parent.first_line.unwrap() as usize).unwrap(),
+      parent.first_pos,
+      parent.first_pos,
+      "Indexed must be of struct type".to_string()
+    ));
   }
 
   fn build_loop_body(&mut self, typ: &str, body: Option<Vec<Expression>>, var: Option<PointerValue<'ctx>>, current_value: Option<IntValue>, body_block: BasicBlock<'ctx>, cond_block: BasicBlock<'ctx>, end_block: BasicBlock<'ctx>) -> Result<(), Error> {
@@ -578,7 +659,7 @@ impl<'ctx> CodeGen<'ctx> {
     }
   }
 
-  // Name of struct type; fields
+  // Name of type struct; name of variable; fields
   fn build_initialize_struct(&mut self, struct_name: String, var_name: String, fields: Vec<Literals>, block: BasicBlock<'ctx>) -> Result<PointerValue<'ctx>, Error> {
     let (struct_type, field_types) = self.struct_table.get(&struct_name)
       .ok_or_else(|| Error::new(
@@ -660,6 +741,7 @@ impl<'ctx> CodeGen<'ctx> {
       }
     }
 
+    self.struct_stack.insert(var_name.clone(), struct_name.clone());
     return Ok(struct_ptr);
   }
 
@@ -986,10 +1068,10 @@ impl<'ctx> CodeGen<'ctx> {
               self.builder.build_store(ptr, i).unwrap();
 
               // Build tagged pointer
-              let tagged = self.tag_ptr(ptr, *self.type_tags.get("int").unwrap());
+              // let tagged = self.tag_ptr(ptr, *self.type_tags.get("int").unwrap());
 
               // Set the symbol
-              self.set_symbol(name, Some(tagged), i.get_type().as_basic_type_enum(), i.into());
+              self.set_symbol(name, Some(ptr), i.get_type().as_basic_type_enum(), i.into());
             },
             BasicValueEnum::FloatValue(f) => {
               // Allocate space and store the value
@@ -997,10 +1079,10 @@ impl<'ctx> CodeGen<'ctx> {
               self.builder.build_store(ptr, f).unwrap();
 
               // Build tagged pointer
-              let tagged = self.tag_ptr(ptr, *self.type_tags.get("float").unwrap());
+              // let tagged = self.tag_ptr(ptr, *self.type_tags.get("float").unwrap());
 
               // Set the symbol
-              self.set_symbol(name, Some(tagged), f.get_type().as_basic_type_enum(),f.into());
+              self.set_symbol(name, Some(ptr), f.get_type().as_basic_type_enum(),f.into());
             },
             BasicValueEnum::StructValue(s) => {
               let var = self.builder.build_alloca(s.get_type(), &name).unwrap();
@@ -1061,18 +1143,18 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(());
   }
 
-  // TODO: Clean up & document
-  fn tag_ptr(&self, ptr: PointerValue<'ctx>, tag: u64) -> PointerValue<'ctx> {
+  // TODO: Fix, clean up & document
+  fn _tag_ptr(&self, ptr: PointerValue<'ctx>, tag: u64) -> PointerValue<'ctx> {
     let int_ptr = self.builder.build_ptr_to_int(ptr, self.context.i64_type(), "ptr_to_int").unwrap();
     let tag_value = self.context.i64_type().const_int(tag, false);
     let tagged_int = self.builder.build_or(int_ptr, tag_value, "tagged_ptr").unwrap();
     return self.builder.build_int_to_ptr(tagged_int, ptr.get_type(), "tagged_int_ptr").unwrap();
   }
 
-  // TODO: Clean up & document
-  fn extract_tag(&self, ptr: PointerValue<'ctx>) -> (PointerValue<'ctx>, IntValue<'ctx>) {
+  // TODO: Fix, clean up & document
+  fn _extract_tag(&self, ptr: PointerValue<'ctx>) -> (PointerValue<'ctx>, IntValue<'ctx>) {
     let int_ptr = self.builder.build_ptr_to_int(ptr, self.context.i64_type(), "ptr_as_int").unwrap();
-    let mask = self.type_tags.get("mask").unwrap();
+    let mask = self._type_tags.get("mask").unwrap();
     let tag = self.builder.build_and(int_ptr, self.context.i64_type().const_int(*mask, false), "extract_tag").unwrap();
     let untag_value = self.context.i64_type().const_int(!*mask, false);
     let untagged_int_ptr = self.builder.build_and(int_ptr, untag_value, "untagged_ptr").unwrap();
@@ -1080,17 +1162,17 @@ impl<'ctx> CodeGen<'ctx> {
     return (untagged_ptr, tag);
   }
 
-  // TODO: Replace with less specific case
+  // TODO: Replace with less specific case & fix
   // Probably need to build phi nodes to come out of loading dynamic types
   fn _load_var_to_type(&self, name: String) -> Result<(), Error> {
     let (_, tagged_ptr, _, _, _exited_func) = self.get_symbol(&name)?.unwrap();
-    let (_, tag) = self.extract_tag(tagged_ptr.unwrap());
+    let (_, tag) = self._extract_tag(tagged_ptr.unwrap());
     // let tag_value = self.builder.build_int_z_extend(tag, self.context.i64_type(), "tag_value").unwrap();
 
     let a = self.builder.build_int_compare(
       inkwell::IntPredicate::EQ,
       tag,
-      self.context.i64_type().const_int(*self.type_tags.get("int").unwrap(), false),
+      self.context.i64_type().const_int(*self._type_tags.get("int").unwrap(), false),
       "is_int"
     ).unwrap();
 
@@ -1275,11 +1357,11 @@ impl<'ctx> CodeGen<'ctx> {
           // let var = self.builder.build_alloca(param.get_type(), &param.get_name().to_str().unwrap()).unwrap();
           // self.builder.build_store(var, param.into()).unwrap();
           // self.set_symbol(name, Some(param.into_pointer_value()), *param);
-          
-          // Load the variable to the correct type
-          let (_, tag) = self.extract_tag(param.into_pointer_value());
-          let t = self.get_tag_by_type(param.get_type().as_basic_type_enum());
-          println!("{:?} {:?}", tag, t);
+
+          // TODO: Load the variable to the correct type
+          // let (_, tag) = self.extract_tag(param.into_pointer_value());
+          // let t = self.get_tag_by_type(param.get_type().as_basic_type_enum());
+          // println!("{:?} {:?}", tag, t);
         } else {
           // let var = self.builder.build_alloca(param.get_type(), &param.get_name().to_str().unwrap()).unwrap();
           // self.builder.build_store(var, param.into()).unwrap();
@@ -1624,7 +1706,7 @@ impl<'ctx> CodeGen<'ctx> {
           if param_type.is_pointer_type() {
             if !values[i].is_pointer_value() {
               let ptr = self.builder.build_alloca(param_type, "ptr").unwrap();
-              self.tag_ptr(ptr, self.get_tag_by_type(values[i].get_type()));
+              // self.tag_ptr(ptr, self.get_tag_by_type(values[i].get_type()));
               self.builder.build_store(ptr, values[i]).unwrap();
               meta[i] = ptr.into();
             }
@@ -1653,6 +1735,9 @@ impl<'ctx> CodeGen<'ctx> {
 
         return Ok(val);
       },
+      Expr::Index(parent, child) => {
+        return self.build_index_extract(parent, child, block);
+      }
       Expr::Assignment(_, _, _) => panic!("Assignment not allowed here"),
       _ => panic!("Invalid expression"),
     }
