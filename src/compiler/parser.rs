@@ -514,17 +514,21 @@ impl Parser {
       list.push(self.parse_primary()?);
       if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Comma {
         self.iter.next();
-      } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RBracket {
-        break;
+        self.skip_newlines(None);
       } else {
-        return Err(Error::new(
-          Error::UnexpectedToken,
-          Some(self.iter.current.as_ref().unwrap().clone()),
-          self.code.lines().nth((self.iter.current.as_ref().unwrap().line - 1) as usize).unwrap(),
-          self.iter.current.as_ref().unwrap().start_pos,
-          self.iter.current.as_ref().unwrap().end_pos,
-          "Expected \",\" or \"]\", got".to_string()
-        ));
+        self.skip_newlines(None);
+        if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RBracket {
+          break;
+        } else {
+          return Err(Error::new(
+            Error::UnexpectedToken,
+            Some(self.iter.current.as_ref().unwrap().clone()),
+            self.code.lines().nth((self.iter.current.as_ref().unwrap().line - 1) as usize).unwrap(),
+            self.iter.current.as_ref().unwrap().start_pos,
+            self.iter.current.as_ref().unwrap().end_pos,
+            "Expected \",\" or \"]\", got".to_string()
+          ));
+        }
       }
     }
 
@@ -600,6 +604,7 @@ impl Parser {
 
       if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Comma {
         self.iter.next();
+        self.skip_newlines(None);
         continue;
       }
 
