@@ -45,13 +45,6 @@ fn main() {
   let code = fs::read_to_string(&args[1])
     .expect("Failed to read file.");
 
-  if verbose {
-    // println!("Using code:");
-    // for (i, line) in code.lines().enumerate() {
-    //   println!("{:4} | {}", i + 1, line);
-    // }
-  }
-
   let mut lexer = Lexer::new();
   let lexed = lexer.lex(code.clone(), false);
   if verbose {
