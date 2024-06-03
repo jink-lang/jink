@@ -24,7 +24,7 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 
 ##### General
 - [ ] Design standard for modules
-- [ ] Build standard library
+- [ ] Start writing standard library
 - [ ] Start writing self-hosted compiler
 - [ ] Add examples
 - [ ] Add documentation / tutorials
@@ -36,7 +36,7 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [ ] Build dynamic array type
 - [ ] Build heterogenous array type
 - [ ] Build nested arrays
-- [x] Build structs/typesee
+- [x] Build structs/types
 - [x] Build nested structs
 - [x] Build struct indexing
 - [ ] Build nested struct indexing
@@ -44,9 +44,14 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [x] Build while loops
 - [ ] Fix triple & multi nested loops
 - [ ] Build break and continue for loops
-- [ ] Write compiler tests
+- [ ] Build module/import system
+- [ ] Build string interpolation
+- [ ] Write loop tests
+- [ ] Write struct tests
+- [ ] Write function tests
+- [ ] Write module tests
 ##### Lexer
-- [ ] Lex string templates
+- [ ] Lex string interpolation
 ##### Parser
 - [x] Parse type definitions
 - [x] Parse objects
@@ -55,7 +60,7 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [ ] Parse self keyword in classes
 - [ ] Parse self keyword in methods
 - [x] Parse module imports
-- [ ] Parse string templates
+- [ ] Parse string interpolation
 - [ ] Parse pub keyword on definitions
 - [x] Parse indexing (arrays)
 - [ ] Parse recursive indexing (arrays)

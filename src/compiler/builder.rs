@@ -11,11 +11,7 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::AddressSpace;
 
-use jink::Error;
-use jink::Expr;
-use jink::Literals;
-use jink::Operator;
-use jink::{Expression, Name, Type};
+use jink::{Error, Expr, Expression, Name, Type, Operator, Literals};
 
 pub struct Scope<'ctx> {
   symbols: IndexMap<String, (Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>)>,
@@ -234,21 +230,17 @@ impl<'ctx> CodeGen<'ctx> {
 
     for expr in ast {
       match expr.clone().expr {
-        Expr::Literal(_literal) => {
-          // println!("Literal: {:?}\n", literal);
-        },
         Expr::BinaryOperator(_, _, _) => {
+          // Validate for allowed top level binop expressions
           let res = self.visit(&expr.clone(), block);
           println!("{:?}", res);
         },
         Expr::UnaryOperator(_, _) => {
+          // Validate for allowed top level unop expressions
           self.visit(&expr.clone(), block)?;
         },
         Expr::Assignment(_, _, _) => {
           self.build_assignment(expr, block, false)?;
-        },
-        Expr::Array(values) => {
-          println!("Array: {:?}\n", values);
         },
         Expr::TypeDef(name, value) => {
           self.build_struct(Some(name), value)?;
@@ -268,12 +260,6 @@ impl<'ctx> CodeGen<'ctx> {
         Expr::Function(name, ret_typ, params, body) => {
           self.build_function(name, ret_typ, params, body, block)?;
         },
-        Expr::FunctionParam(typ, is_const, ident, default, _) => {
-          println!("FunctionParam: {:?} {:?} {:?} {:?}\n", typ, is_const, ident, default);
-        },
-        Expr::Return(value) => {
-          println!("Return: {:?}\n", value);
-        },
         Expr::Class(name, parents, body) => {
           println!("Class: {:?} {:?} {:?}\n", name, parents, body);
         },
@@ -286,7 +272,20 @@ impl<'ctx> CodeGen<'ctx> {
         Expr::ArrayIndex(arr, index) => {
           println!("ArrayIndex: {:?} {:?}\n", arr, index);
         },
-        _ => todo!()
+        _ => {
+          if let Expr::Literal(Literals::EOF) = expr.expr {
+            return Ok(block);
+          } else {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+              expr.first_pos,
+              expr.first_pos,
+              "Invalid top level expression".to_string()
+            ));
+          }
+        }
       }
     }
 
@@ -1521,9 +1520,9 @@ impl<'ctx> CodeGen<'ctx> {
           return Err(Error::new(
             Error::CompilerError,
             None,
-            &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
+            &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
             expr.first_pos,
-            expr.last_line,
+            Some(expr.first_pos.unwrap() + 1),
             format!("Variable {} is not an array", n.0)
           ));
         }
@@ -1531,9 +1530,9 @@ impl<'ctx> CodeGen<'ctx> {
         return Err(Error::new(
           Error::CompilerError,
           None,
-          &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
+          &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
           expr.first_pos,
-          expr.last_line,
+          Some(expr.first_pos.unwrap() + 1),
           format!("Variable {} is not an array", n.0)
         ));
       };
@@ -1613,6 +1612,22 @@ impl<'ctx> CodeGen<'ctx> {
           self.context.ptr_type(AddressSpace::default()).into(), // arr ptr
           self.context.i64_type().into()                         // len
         ], false);
+
+        // TODO: Build the array struct properly
+        // What I'm thinking we'll need to do is move building the array to a separate function
+        // where we can set_symbol properly because returning a pointer as we need to here means losing the array type
+
+        // let array_struct_alloca = self.builder.build_alloca(struct_type, "array_set").unwrap();
+
+        // let array_field_ptr = self.builder.build_struct_gep(struct_type, array_struct_alloca, 0, "arr_ptr").unwrap();
+        // let array = self.context.i64_type().const_array(&values);
+        // self.builder.build_store(array_ptr, array).unwrap();
+
+        // let length_field_ptr = self.builder.build_struct_gep(struct_type, array_struct_alloca, 1, "arr_len").unwrap();
+        // let length = self.context.i64_type().const_int(values.len() as u64, false);
+        // self.builder.build_store(length_ptr, length).unwrap();
+
+        // return Ok(array_struct_alloca.as_basic_value_enum());
 
         let array = self.context.i64_type().const_array(&values).as_basic_value_enum();
         let length = self.context.i64_type().const_int(values.len() as u64, false).as_basic_value_enum();
@@ -1797,7 +1812,6 @@ impl<'ctx> CodeGen<'ctx> {
             expr.last_line,
             format!("Unknown identifier: {}", n.0)
           ));
-          // panic!("Unknown identifier: {}", n.0);
         }
       },
       Literals::EOF => todo!(),
@@ -2188,6 +2202,7 @@ impl<'ctx> CodeGen<'ctx> {
 }
 
 // Tests
+// TODO: Find way to validate output of tests
 #[cfg(test)]
 mod tests {
   use super::*;
