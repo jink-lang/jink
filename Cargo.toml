@@ -3,7 +3,7 @@ name = "jink"
 version = "0.1.0"
 license-file="LICENSE"
 repository = "https://github.com/jink-lang/jink"
-authors = ["jink-lang", "Jacob"]
+authors = ["jink-lang", "Jacob Noah"]
 edition = "2021"
 
 [dependencies]

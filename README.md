@@ -202,4 +202,4 @@ Contributions are very welcome. Please read the [CONTRIBUTING.md](./.github/docs
 
 This project is distributed under the GPLv3 License - see the [license file](LICENSE) for details.
 
-Copyright © 2024 Jacob, jink-lang contributors
+Copyright © 2024 Jacob Noah, jink-lang contributors
