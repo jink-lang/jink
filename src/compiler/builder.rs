@@ -266,12 +266,14 @@ impl<'ctx> CodeGen<'ctx> {
         Expr::Module(name, body) => {
           println!("Module: {:?} {:?}\n", name, body);
         },
-        Expr::Index(parent, child) => {
-          self.build_index_extract(parent, child, block)?;
-        },
-        Expr::ArrayIndex(arr, index) => {
-          println!("ArrayIndex: {:?} {:?}\n", arr, index);
-        },
+        // If we add a top level index expression
+        // i.e. hello[0].bye() or hello.bye()
+        // Expr::Index(parent, child) => {
+        //   self.build_index_extract(parent, child, block)?;
+        // },
+        // Expr::ArrayIndex(arr, index) => {
+        //   println!("ArrayIndex: {:?} {:?}\n", arr, index);
+        // },
         _ => {
           if let Expr::Literal(Literals::EOF) = expr.expr {
             return Ok(block);
@@ -1317,7 +1319,21 @@ impl<'ctx> CodeGen<'ctx> {
       "int" => self.context.i64_type().fn_type(&parameters, variadic),
       "float" => self.context.f64_type().fn_type(&parameters, variadic),
       "void" => self.context.void_type().fn_type(&parameters, variadic),
-      _ => panic!("Invalid return type"),
+      _ => {
+        if self.struct_table.contains_key(&returns) {
+          let (struct_type, _) = self.struct_table.get(&returns).unwrap();
+          struct_type.fn_type(&parameters, variadic)
+        } else {
+          return Err(Error::new(
+            Error::NameError,
+            None,
+            &"",
+            Some(0),
+            Some(0),
+            format!("Type {} not found", returns)
+          ));
+        }
+      },
     };
     let function = self.module.add_function(&name.0, func_type, None);
 
