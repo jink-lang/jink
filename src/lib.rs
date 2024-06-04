@@ -215,6 +215,7 @@ pub enum Error {
   UnexpectedExpression(ErrorCtx),
   ParserError(ErrorCtx),
   NameError(ErrorCtx),
+  ImportError(ErrorCtx),
   CompilerError(ErrorCtx),
 }
 
@@ -293,6 +294,11 @@ impl std::fmt::Display for Error {
         let underline = " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat((err.end_pos.unwrap() - err.start_pos.unwrap()) as usize);
         return write!(f, "Name error at {}:{}\n  {}\n  {}\n\n{}", err.end_pos.unwrap(),
           err.start_pos.unwrap() + 1, err.line, underline, err.message
+        );
+      },
+      Error::ImportError(err) => {
+        return write!(f, "Import error at {}:{}\n  {}\n  {}\n\n{}", err.end_pos.unwrap(),
+          err.start_pos.unwrap() + 1, err.line, " ".repeat(err.start_pos.unwrap() as usize) + "^", err.message
         );
       },
       Error::CompilerError(err) => {

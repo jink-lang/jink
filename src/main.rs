@@ -76,7 +76,12 @@ fn main() {
   }
 
   let mut parser = Parser::new();
-  let parsed = parser.parse(code.clone(), verbose, false);
+  let parsed = parser.parse(
+    code.clone(),
+    fs::canonicalize(args[1].clone()).unwrap().to_str().unwrap().to_string(),
+    verbose,
+    false
+  );
   if let Err(err) = parsed {
     println!("{}", err);
     return;
