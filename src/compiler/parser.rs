@@ -15,7 +15,6 @@ use super::lexer::Lexer;
 use super::module_loader;
 
 pub struct Namespace {
-  pub abs_path: String,
   pub names: IndexMap<String, Expression>,
   pub dependencies: IndexMap<String, Vec<String>>,
 }
@@ -26,8 +25,16 @@ pub struct Parser {
   pub verbose: bool,
   pub testing: bool,
   pub in_loop: bool,
+  /// Current namespace absolute path
   pub current_namespace: String,
-  pub namespaces: Vec<Namespace>,
+  /// Current named item (imports and function, class and type definitions)
+  /// If None, we are in the main scope
+  pub current_name: Option<String>,
+  /// The current scope's *definitions* that we can ignore when storing dependencies
+  /// (they are already within the namespace if locally defined)
+  pub current_scope_defs: Vec<String>,
+  /// Namespace absolute path; Namespace
+  pub namespaces: IndexMap<String, Namespace>,
 }
 
 impl Parser {
@@ -39,7 +46,9 @@ impl Parser {
       testing: false,
       in_loop: false,
       current_namespace: String::new(),
-      namespaces: Vec::new(),
+      current_name: None,
+      current_scope_defs: Vec::new(),
+      namespaces: IndexMap::new(),
     }
   }
 
@@ -85,7 +94,7 @@ impl Parser {
               self.code.lines().nth((parsed.as_ref().unwrap().first_line.unwrap() - 1) as usize).unwrap(),
               parsed.as_ref().unwrap().first_pos,
               parsed.as_ref().unwrap().last_line,
-              "Unexpected expression".to_string()
+              "Unexpected top level expression".to_string()
             ));
           }
         }
@@ -120,13 +129,92 @@ impl Parser {
         ));
       }
 
-      // TODO: Parse module code and namespace
-      todo!();
-
+      // Parse module code and namespace
+      let main_namespace = self.current_namespace.clone();
+      self.current_namespace = path.iter().map(|n| n.0.to_string()).collect::<Vec<String>>().join("/");
+      self.parse(code.unwrap(), self.current_namespace.clone(), self.verbose, self.testing)?;
+      self.current_namespace = main_namespace;
       return Ok(());
     } else {
       unreachable!();
     }
+  }
+
+  /// Enter a definition scope
+  /// Assignments, functions, classes and type definitions
+  fn enter_scope(&mut self, name: String) {
+    // If we are already in a scope, push the current name to the list of scoped definitions
+    if self.current_name.is_some() {
+      self.current_scope_defs.push(name);
+
+    // Otherwise, set the current name
+    } else {
+      self.current_name = Some(name);
+    }
+  }
+
+  /// Exit a definition scope
+  fn exit_scope(&mut self) {
+    self.current_name = None;
+  }
+
+  /// Add named items (imports and function, class and type definitions) to the current namespace
+  fn add_name(&mut self, name: String, expr: Expression) -> Result<(), Error> {
+    let mut namespace = self.namespaces.get_mut(self.current_namespace.as_str());
+    if namespace.is_none() {
+      self.namespaces.insert(self.current_namespace.clone(), Namespace {
+        names: IndexMap::new(),
+        dependencies: IndexMap::new(),
+      });
+      namespace = self.namespaces.get_mut(self.current_namespace.as_str());
+    }
+
+    // If we are not in a scope, add the name to the namespace
+    if self.current_name.is_none() {
+      if namespace.as_ref().unwrap().names.contains_key(name.as_str()) {
+        return Err(Error::new(
+          Error::NameError,
+          None,
+          self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+          expr.first_pos,
+          expr.last_line,
+          format!("Name '{}' already defined in scope", name)
+        ));
+      }
+      namespace.unwrap().names.insert(name, expr);
+
+    // If we are in a scope, add the name to the namespace if it is not in the list of scoped definitions
+    } else {
+      if !self.current_scope_defs.contains(&name) {
+        namespace.unwrap().names.insert(name, expr);
+      }
+    }
+
+    return Ok(());
+  }
+
+  /// Add dependencies (names that depend upon others) to the current namespace
+  fn add_dependency(&mut self, dependent: String, dependency: String) -> Result<(), Error> {
+    let mut namespace = self.namespaces.get_mut(self.current_namespace.as_str());
+    if namespace.is_none() {
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        "",
+        Some(0),
+        Some(0),
+        format!("Namespace not defined: {}", self.current_namespace)
+      ));
+    }
+
+    // Add dependency to the namespace
+    if namespace.as_ref().unwrap().dependencies.contains_key(dependent.as_str()) {
+      namespace.unwrap().dependencies.get_mut(dependent.as_str()).unwrap().push(dependency);
+    } else {
+      namespace.unwrap().dependencies.insert(dependent, vec![dependency]);
+    }
+
+    return Ok(());
   }
 
   fn get_expr(&self, expr: Expr, first_line: Option<i32>, first_pos: Option<i32>, last_line: Option<i32>) -> Expression {
@@ -880,7 +968,9 @@ impl Parser {
       return_type = Some(self.consume(&[TokenTypes::Identifier], false)?);
     }
 
+    self.enter_scope(identifier.value.as_ref().unwrap().to_owned());
     let body = self.parse_func_block()?;
+    self.exit_scope();
 
     if return_type.is_some() {
       return Ok(self.get_expr(
@@ -1266,7 +1356,7 @@ impl Parser {
         "",
         Some(0),
         Some(0),
-        "Expected '}' to end for loop block, got end of file.".into(),
+        "Expected '}' to end loop body, got end of file.".into(),
       ));
     }
 
