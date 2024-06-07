@@ -1094,6 +1094,12 @@ impl<'ctx> CodeGen<'ctx> {
               self.builder.build_store(var, s).unwrap();
               self.set_symbol(name, Some(var), s.get_type().as_basic_type_enum(), s.into());
             },
+            // Strings
+            BasicValueEnum::ArrayValue(a) => {
+              let var = self.builder.build_alloca(a.get_type(), &name).unwrap();
+              self.builder.build_store(var, a).unwrap();
+              self.set_symbol(name, Some(var), a.get_type().as_basic_type_enum(), a.into());
+            },
             BasicValueEnum::PointerValue(a) => {
               let var = self.builder.build_alloca(self.context.ptr_type(AddressSpace::default()), &name).unwrap();
               self.builder.build_store(var, a).unwrap();
@@ -1816,7 +1822,7 @@ impl<'ctx> CodeGen<'ctx> {
       Literals::Identifier(n, _) => {
         if let Some((_, ptr, typ, val, _exited_func)) = self.get_symbol(&n.0)? {
           // Constant value
-          if ptr.is_none() {
+          if ptr.is_none() || typ.is_array_type() {
             return Ok(val)
           // If there's a pointer, load the value behind the identifier
           } else {
@@ -1868,6 +1874,11 @@ impl<'ctx> CodeGen<'ctx> {
             }
           },
           "!" => {
+            if val.is_pointer_value() {
+              let null = self.context.ptr_type(AddressSpace::default()).const_null();
+              let cmp = self.builder.build_int_compare(inkwell::IntPredicate::EQ, val.into_pointer_value(), null, "notcmp").unwrap();
+              return Ok(self.builder.build_int_z_extend(cmp, self.context.i64_type(), "nottmp").unwrap().as_basic_value_enum());
+            }
             return Ok(self.builder.build_not(val.into_int_value(), "nottmp").unwrap().as_basic_value_enum());
           },
           // Pre-increment (return the new value)
