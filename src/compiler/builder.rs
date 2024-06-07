@@ -230,15 +230,15 @@ impl<'ctx> CodeGen<'ctx> {
 
     for expr in ast {
       match expr.clone().expr {
+        // TODO: Validate for allowed top level op expressions
+        // (Possibly move to parsing since we already validate for top level expressions there)
         Expr::BinaryOperator(_, _, _) => {
-          // Validate for allowed top level binop expressions
-          let res = self.visit(&expr.clone(), block);
-          println!("{:?}", res);
-        },
-        Expr::UnaryOperator(_, _) => {
-          // Validate for allowed top level unop expressions
           self.visit(&expr.clone(), block)?;
         },
+        Expr::UnaryOperator(_, _) => {
+          self.visit(&expr.clone(), block)?;
+        },
+
         Expr::Assignment(_, _, _) => {
           self.build_assignment(expr, block, false)?;
         },
@@ -263,8 +263,8 @@ impl<'ctx> CodeGen<'ctx> {
         Expr::Class(name, parents, body) => {
           println!("Class: {:?} {:?} {:?}\n", name, parents, body);
         },
-        Expr::Module(name, body) => {
-          println!("Module: {:?} {:?}\n", name, body);
+        Expr::Module(path, opts, ast) => {
+          self.build_module(expr, path, opts, ast, main_fn)?;
         },
         // If we add a top level index expression
         // i.e. hello[0].bye() or hello.bye()
@@ -292,6 +292,10 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     return Ok(block);
+  }
+
+  fn build_module(&mut self, _expr: Expression, _path: Vec<Name>, _opts: Option<Vec<(Name, Option<Name>)>>, _ast: Option<Vec<Expression>>, _main_fn: FunctionValue<'ctx>) -> Result<BasicBlock<'ctx>, Error> {
+    unimplemented!();
   }
 
   fn build_index_extract(&mut self, parent: Box<Expression>, child: Box<Expression>, block: BasicBlock<'ctx>) -> Result<BasicValueEnum<'ctx>, Error> {
@@ -609,14 +613,14 @@ impl<'ctx> CodeGen<'ctx> {
 
       return Ok(struct_type);
     } else {
-      Err(Error::new(
+      return Err(Error::new(
         Error::CompilerError,
         None,
         &"",
         Some(0),
         Some(0),
-        "Invalid struct definition".to_string()
-      ))
+        format!("Invalid struct definition at '{}'", struct_lit_name.unwrap_or(String::new()))
+      ));
     }
   }
 
@@ -2232,7 +2236,7 @@ mod tests {
     a = 3;
     let c = a + b;".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), false, false)?;
+    let ast = parser.parse(code.clone(), String::new(), false, false)?;
     codegen.build(code, ast, false, true)?;
     return Ok(());
   }
@@ -2245,7 +2249,7 @@ mod tests {
     let b = 2;
     printf(\"a:%d b:%d\", a, b);".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), false, false)?;
+    let ast = parser.parse(code.clone(), String::new(), false, false)?;
     codegen.build(code, ast, false, true)?;
     return Ok(());
   }
@@ -2258,7 +2262,7 @@ mod tests {
     let b = a[0];
     printf(\"b:%d\", b);".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), false, false)?;
+    let ast = parser.parse(code.clone(), String::new(), false, false)?;
     codegen.build(code, ast, false, true)?;
     return Ok(());
   }
