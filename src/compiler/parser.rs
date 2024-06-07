@@ -14,7 +14,10 @@ use jink::Type;
 use super::lexer::Lexer;
 use super::module_loader;
 
+#[derive(Debug)]
 pub struct Namespace {
+  // TODO: Maybe wiser to store array index of expression in AST instead of the expression itself here
+  // Would need to make AST part of the parser struct and add a flag not to push to it when parsing modules
   pub names: IndexMap<String, Expression>,
   pub dependencies: IndexMap<String, Vec<String>>,
 }
@@ -57,10 +60,16 @@ impl Parser {
     let tokens = Lexer::new().lex(code.clone(), false);
     let iterator = FutureIter::new(tokens);
     self.code = code;
-    self.current_namespace = main_file_path;
     self.iter = iterator;
     self.verbose = verbose;
     self.testing = testing;
+
+    // Add main namespace
+    self.current_namespace = main_file_path.clone();
+    self.namespaces.insert(main_file_path, Namespace {
+      names: IndexMap::new(),
+      dependencies: IndexMap::new(),
+    });
 
     let mut ast: Vec<Expression> = Vec::new();
     while self.iter.current.is_some() {
@@ -79,7 +88,7 @@ impl Parser {
           Expr::Call(_, _) => {},
           Expr::TypeDef(_, _) => {},
           Expr::Class(_, _, _) => {},
-          Expr::Module(_, _) => {},
+          Expr::Module(_, _, _) => {},
           Expr::Assignment(_, _, _) => {},
           Expr::Conditional(_, _, _, _) => {},
           Expr::UnaryOperator(_, _) => {},
@@ -103,6 +112,23 @@ impl Parser {
       // End of file
       if self.iter.current.is_none() || self.iter.current.as_ref().unwrap().of_type == TokenTypes::EOF {
         ast.push(parsed.unwrap());
+
+        // Temp verbose flag output to print namespace info
+        if verbose {
+          for (namespace, ns) in self.namespaces.iter() {
+            if ns.names.is_empty() { continue; }
+            println!("Namespace: {}", namespace);
+            println!("  Names:");
+            for (name, _) in ns.names.iter() {
+              println!("    {}", name);
+            }
+            println!("  Dependencies:");
+            for (name, deps) in ns.dependencies.iter() {
+              println!("    {}: {:?}", name, deps);
+            }
+          }
+        }
+
         return Ok(ast);
       }
 
@@ -114,9 +140,11 @@ impl Parser {
     return Ok(ast);
   }
 
-  /// Load modules from index
-  fn process_module(&mut self, expr: Expression) -> Result<(), Error> {
-    if let Expr::Module(path, _) = expr.expr.clone() {
+  /// Load module via constructed index expression
+  /// 
+  /// Loads module, attaches AST to expression, builds namespace and returns expression back
+  fn process_module(&mut self, mut expr: Expression) -> Result<Expression, Error> {
+    if let Expr::Module(path, names, _) = expr.expr.clone() {
       let code = module_loader::load_module(path.clone(), self.verbose);
       if code.is_none() {
         return Err(Error::new(
@@ -129,12 +157,22 @@ impl Parser {
         ));
       }
 
-      // Parse module code and namespace
-      let main_namespace = self.current_namespace.clone();
+      // Store current state
+      let store_code = self.code.clone();
+      let store_namespace = self.current_namespace.clone();
+
+      // Parse module
       self.current_namespace = path.iter().map(|n| n.0.to_string()).collect::<Vec<String>>().join("/");
-      self.parse(code.unwrap(), self.current_namespace.clone(), self.verbose, self.testing)?;
-      self.current_namespace = main_namespace;
-      return Ok(());
+      let ast = self.parse(code.unwrap(), self.current_namespace.clone(), self.verbose, self.testing)?;
+
+      // Restore state
+      self.code = store_code;
+      self.current_namespace = store_namespace;
+
+      // TODO: Add import names to current namespace so dependencies can be resolved
+
+      expr.expr = Expr::Module(path, names, Some(ast));
+      return Ok(expr);
     } else {
       unreachable!();
     }
@@ -194,8 +232,10 @@ impl Parser {
   }
 
   /// Add dependencies (names that depend upon others) to the current namespace
-  fn add_dependency(&mut self, dependent: String, dependency: String) -> Result<(), Error> {
-    let mut namespace = self.namespaces.get_mut(self.current_namespace.as_str());
+  /// 
+  /// If there is no current_name, we are in the main scope and we can ignore dependencies
+  fn add_dependency(&mut self, dependency: String) -> Result<(), Error> {
+    let namespace = self.namespaces.get_mut(self.current_namespace.as_str());
     if namespace.is_none() {
       return Err(Error::new(
         Error::CompilerError,
@@ -207,11 +247,13 @@ impl Parser {
       ));
     }
 
+    if self.current_name.is_none() { return Ok(()); }
+
     // Add dependency to the namespace
-    if namespace.as_ref().unwrap().dependencies.contains_key(dependent.as_str()) {
-      namespace.unwrap().dependencies.get_mut(dependent.as_str()).unwrap().push(dependency);
+    if namespace.as_ref().unwrap().dependencies.contains_key(self.current_name.as_ref().unwrap()) {
+      namespace.unwrap().dependencies.get_mut(self.current_name.as_ref().unwrap()).unwrap().push(dependency);
     } else {
-      namespace.unwrap().dependencies.insert(dependent, vec![dependency]);
+      namespace.unwrap().dependencies.insert(self.current_name.as_ref().unwrap().to_owned(), vec![dependency]);
     }
 
     return Ok(());
@@ -478,10 +520,16 @@ impl Parser {
           Some(ident.line), ident.start_pos, Some(ident.line)
         ));
 
+      // Index
       } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "." {
-        return self.parse_index(ident);
+        // Add top-most identifier being indexed as a dependency
+        self.add_dependency(ident.value.as_ref().unwrap().to_owned())?;
+        return self.parse_index(ident, None);
 
+      // Array index
       } else if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type == TokenTypes::LBracket {
+        // Add top-most identifier being indexed as a dependency
+        self.add_dependency(ident.value.as_ref().unwrap().to_owned())?;
         return self.parse_array_index(ident);
 
       // Call
@@ -600,7 +648,7 @@ impl Parser {
     } else if [TokenTypes::Newline, TokenTypes::Semicolon].contains(&self.iter.current.as_ref().unwrap().of_type) {
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())), None)),
           Some(identifier.line), identifier.start_pos, Some(identifier.line)
         )),
         None
@@ -610,7 +658,7 @@ impl Parser {
       let assign = self.parse_expression(0)?;
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())), None)),
           Some(identifier.line), identifier.start_pos, Some(identifier.line)
         )),
         Some(Box::new(assign.clone()))
@@ -618,7 +666,7 @@ impl Parser {
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RParen {
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())), None)),
           Some(identifier.line), identifier.start_pos, Some(identifier.line)
         )),
         None
@@ -627,11 +675,20 @@ impl Parser {
       let assign = self.parse_expression(0)?;
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())), None)),
           Some(identifier.line), identifier.start_pos, Some(identifier.line)
         )),
         Some(Box::new(assign.clone()))
       ), Some(identifier.line), identifier.start_pos, assign.last_line);
+    }
+
+    // If type (let a = 5), definition
+    if typ.is_some() {
+      self.add_name(identifier.value.as_ref().unwrap().to_owned(), assignment.clone())?;
+
+    // If no type (a = 5), reassigment
+    } else {
+      self.add_dependency(identifier.value.as_ref().unwrap().to_owned())?;
     }
 
     return Ok(assignment);
@@ -689,14 +746,18 @@ impl Parser {
     // If type alias
     if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Identifier {
       let t = self.iter.next().unwrap();
-      return Ok(self.get_expr(Expr::TypeDef(
-        Literals::Identifier(Name(String::from(ident.value.unwrap())), None),
+      let type_alias = self.get_expr(Expr::TypeDef(
+        Literals::Identifier(Name(String::from(ident.value.clone().unwrap())), None),
         Box::new(Literals::Identifier(Name(String::from(t.value.unwrap())), None))
-      ), Some(ident.line), ident.start_pos, Some(t.line)));
+      ), Some(ident.line), ident.start_pos, Some(t.line));
+      self.add_name(ident.value.unwrap(), type_alias.clone())?;
+      return Ok(type_alias);
 
     // If typedef / struct
     } else {
-      return self.parse_object(Some(ident));
+      let struct_type = self.parse_object(Some(ident.clone()))?;
+      self.add_name(ident.value.unwrap(), struct_type.clone())?;
+      return Ok(struct_type);
     }
   }
 
@@ -918,17 +979,31 @@ impl Parser {
     }
   }
 
-  fn parse_index(&mut self, identifier: Token) -> Result<Expression, Error> {
+  /// Parse index chain recursively
+  /// 
+  /// Example: a.b.c.d
+  fn parse_index(&mut self, identifier: Token, parent_idx: Option<Expression>) -> Result<Expression, Error> {
     self.iter.next(); // Consume `.`
     let index = self.parse_expression(0)?;
 
-    return Ok(self.get_expr(Expr::Index(
-      Box::new(self.get_expr(Expr::Literal(
-        Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)
-      ), Some(identifier.line), identifier.start_pos, Some(identifier.line))),
-      Box::new(index.clone())),
-      Some(identifier.line), identifier.start_pos, index.last_line
-    ));
+    if parent_idx.is_some()
+    && self.iter.current.is_some()
+    && self.iter.current.as_ref().unwrap().of_type != TokenTypes::Operator
+    && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "." {
+      return self.parse_index(identifier.clone(), Some(self.get_expr(Expr::Index(
+        Box::new(parent_idx.unwrap()),
+        Box::new(index.clone())
+      ), Some(identifier.line), identifier.start_pos, index.last_line)));
+
+    } else {
+      return Ok(self.get_expr(Expr::Index(
+        Box::new(self.get_expr(Expr::Literal(
+          Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)
+        ), Some(identifier.line), identifier.start_pos, Some(identifier.line))),
+        Box::new(index.clone())),
+        Some(identifier.line), identifier.start_pos, index.last_line
+      ));
+    }
   }
 
   fn parse_array_index(&mut self, identifier: Token) -> Result<Expression, Error> {
@@ -946,6 +1021,8 @@ impl Parser {
   }
 
   fn parse_call(&mut self, identifier: Token) -> Result<Expression, Error> {
+    // TODO: Determine if this is a function call or a method call
+    self.add_dependency(identifier.value.as_ref().unwrap().to_owned())?;
     let args = self.parse_args_params("args")?;
     return Ok(self.get_expr(Expr::Call(Name(identifier.value.unwrap().to_owned()), Box::new(args)),
       Some(identifier.line),
@@ -973,9 +1050,9 @@ impl Parser {
     self.exit_scope();
 
     if return_type.is_some() {
-      return Ok(self.get_expr(
+      let func = self.get_expr(
         Expr::Function(
-          Name(identifier.value.unwrap().to_owned()),
+          Name(identifier.clone().value.unwrap().to_owned()),
           Some(Literals::Identifier(Name(return_type.unwrap().value.unwrap()), None)),
           Some(Box::new(params)),
           Some(Box::new(body))
@@ -983,11 +1060,13 @@ impl Parser {
         Some(init.as_ref().unwrap().line),
         init.unwrap().start_pos,
         Some(self.iter.current.as_ref().unwrap().line)
-      ));
+      );
+      self.add_name(identifier.value.as_ref().unwrap().to_owned(), func.clone())?;
+      return Ok(func);
     } else {
-      return Ok(self.get_expr(
+      let func = self.get_expr(
         Expr::Function(
-          Name(identifier.value.unwrap().to_owned()),
+          Name(identifier.clone().value.unwrap().to_owned()),
           None,
           Some(Box::new(params)),
           Some(Box::new(body))
@@ -995,7 +1074,9 @@ impl Parser {
         Some(init.as_ref().unwrap().line),
         init.unwrap().start_pos,
         Some(self.iter.current.as_ref().unwrap().line)
-      ));
+      );
+      self.add_name(identifier.value.as_ref().unwrap().to_owned(), func.clone())?;
+      return Ok(func);
     }
   }
 
@@ -1418,17 +1499,21 @@ impl Parser {
     let end = self.consume(&[TokenTypes::RBrace], false)?;
 
     if parents.is_some() {
-      return Ok(self.get_expr(Expr::Class(
-        Name(ident.value.unwrap()),
+      let cls = self.get_expr(Expr::Class(
+        Name(ident.value.clone().unwrap()),
         parents,
         Some(Box::new(body))
-      ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(end.line)));
+      ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(end.line));
+      self.add_name(ident.value.unwrap(), cls.clone())?;
+      return Ok(cls);
     } else {
-      return Ok(self.get_expr(Expr::Class(
-        Name(ident.value.unwrap()),
+      let cls = self.get_expr(Expr::Class(
+        Name(ident.value.clone().unwrap()),
         None,
         Some(Box::new(body))
-      ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(end.line)));
+      ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(end.line));
+      self.add_name(ident.value.unwrap(), cls.clone())?;
+      return Ok(cls);
     }
   }
 
@@ -1512,7 +1597,7 @@ impl Parser {
 
         // No alias
         if alias.is_none() {
-          let expr = self.get_expr(Expr::Module(vec![Name(String::from(index[0].value.as_ref().unwrap()))], None),
+          let expr = self.get_expr(Expr::Module(vec![Name(String::from(index[0].value.as_ref().unwrap()))], None, None),
             Some(init.as_ref().unwrap().line),
             init.unwrap().start_pos,
             Some(index[0].line)
@@ -1524,7 +1609,8 @@ impl Parser {
         // Alias
         let expr = self.get_expr(Expr::Module(
           vec![Name(String::from(index[0].value.as_ref().unwrap()))],
-          Some(vec![(name, alias)])
+          Some(vec![(name, alias)]),
+          None
         ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(index[0].line));
         self.process_module(expr.clone())?;
         return Ok(expr);
@@ -1539,8 +1625,8 @@ impl Parser {
       if alias.is_none() {
         let expr = self.get_expr(Expr::Module(
           index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
-          None
-          ),
+          None,
+          None),
           Some(init.as_ref().unwrap().line),
           init.unwrap().start_pos,
           Some(index.last().unwrap().line)
@@ -1552,8 +1638,8 @@ impl Parser {
       // Alias
       let expr = self.get_expr(Expr::Module(
         index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
-        Some(vec![(name, alias)])
-        ),
+        Some(vec![(name, alias)]),
+        None),
         Some(init.as_ref().unwrap().line),
         init.unwrap().start_pos,
         Some(index.last().unwrap().line)
@@ -1599,8 +1685,8 @@ impl Parser {
 
       let expr = self.get_expr(Expr::Module(
         index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
-        Some(names)
-        ),
+        Some(names),
+        None),
         Some(init.as_ref().unwrap().line),
         init.unwrap().start_pos,
         Some(end.line)
