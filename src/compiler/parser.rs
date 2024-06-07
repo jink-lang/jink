@@ -114,22 +114,6 @@ impl Parser {
       if self.iter.current.is_none() || self.iter.current.as_ref().unwrap().of_type == TokenTypes::EOF {
         ast.push(parsed.unwrap());
 
-        // Temp verbose flag output to print namespace info
-        if verbose {
-          for (namespace, ns) in self.namespaces.iter() {
-            if ns.names.is_empty() { continue; }
-            println!("Namespace: {}", namespace);
-            println!("  Names:");
-            for (name, _) in ns.names.iter() {
-              println!("    {}", name);
-            }
-            println!("  Dependencies:");
-            for (name, deps) in ns.dependencies.iter() {
-              println!("    {}: {:?}", name, deps);
-            }
-          }
-        }
-
         return Ok(ast);
       }
 
@@ -159,6 +143,7 @@ impl Parser {
       }
 
       // Store current state
+      let remaining = self.iter.dump();
       let store_code = self.code.clone();
       let store_namespace = self.current_namespace.clone();
 
@@ -167,6 +152,7 @@ impl Parser {
       let ast = self.parse(code.unwrap(), self.current_namespace.clone(), self.verbose, self.testing)?;
 
       // Restore state
+      self.iter.load(remaining);
       self.code = store_code;
       self.current_namespace = store_namespace;
 

@@ -181,6 +181,15 @@ impl FutureIter {
     }
   }
 
+  pub fn dump(&mut self) -> Vec<Token> {
+    return self.iter.to_owned().collect::<Vec<Token>>();
+  }
+
+  pub fn load(&mut self, tokens: Vec<Token>) {
+    self.iter = tokens.into_iter().peekable();
+    self.current = self.iter.peek().cloned();
+  }
+
   pub fn next(&mut self) -> Option<Token> {
     let current = self.current.take();
     self.current = self.iter.next();

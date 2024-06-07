@@ -82,6 +82,23 @@ fn main() {
     verbose,
     false
   );
+
+  // Temp verbose flag output to print namespace info
+  if verbose {
+    for (namespace, ns) in parser.namespaces.iter() {
+      if ns.names.is_empty() { continue; }
+      println!("Namespace: {}", namespace);
+      println!("  Names:");
+      for (name, _) in ns.names.iter() {
+        println!("   - {}", name);
+      }
+      println!("  Dependencies:");
+      for (name, deps) in ns.dependencies.iter() {
+        println!("   - {}: {:?}", name, deps);
+      }
+    }
+  }
+
   if let Err(err) = parsed {
     println!("{}", err);
     return;
