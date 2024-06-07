@@ -1035,8 +1035,11 @@ impl Parser {
   }
 
   fn parse_call(&mut self, identifier: Token) -> Result<Expression, Error> {
-    // TODO: Determine if this is a function call or a method call
-    self.add_dependency(identifier.value.as_ref().unwrap().to_owned())?;
+    // Save name if this is a function call and not an index/method call
+    if !self.is_indexing {
+      self.add_dependency(identifier.value.as_ref().unwrap().to_owned())?;
+    }
+
     let args = self.parse_args_params("args")?;
     return Ok(self.get_expr(Expr::Call(Name(identifier.value.unwrap().to_owned()), Box::new(args)),
       Some(identifier.line),
