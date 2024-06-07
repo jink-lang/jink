@@ -18,6 +18,7 @@ use super::module_loader;
 pub struct Namespace {
   // TODO: Maybe wiser to store array index of expression in AST instead of the expression itself here
   // Would need to make AST part of the parser struct and add a flag not to push to it when parsing modules
+  // TODO: Keep track of public names
   pub names: IndexMap<String, Expression>,
   pub dependencies: IndexMap<String, Vec<String>>,
 }
@@ -28,6 +29,7 @@ pub struct Parser {
   pub verbose: bool,
   pub testing: bool,
   pub in_loop: bool,
+  pub is_indexing: bool,
   /// Current namespace absolute path
   pub current_namespace: String,
   /// Current named item (imports and function, class and type definitions)
@@ -48,6 +50,7 @@ impl Parser {
       verbose: false,
       testing: false,
       in_loop: false,
+      is_indexing: false,
       current_namespace: String::new(),
       current_name: None,
       current_scope_defs: Vec::new(),
@@ -77,9 +80,7 @@ impl Parser {
       let parsed: Result<Expression, Error> = self.parse_top();
 
       // Error
-      if let Err(err) = parsed {
-        return Err(err);
-      }
+      if let Err(err) = parsed { return Err(err); }
 
       // Validate top level expressions
       if parsed.as_ref().unwrap().expr != Expr::Literal(Literals::EOF) {
@@ -132,7 +133,7 @@ impl Parser {
         return Ok(ast);
       }
 
-      // Distinguish expressions in the main scope
+      // End of statement
       self.consume(&[TokenTypes::Semicolon, TokenTypes::Newline], false)?;
       ast.push(parsed.unwrap());
     }
@@ -169,7 +170,27 @@ impl Parser {
       self.code = store_code;
       self.current_namespace = store_namespace;
 
-      // TODO: Add import names to current namespace so dependencies can be resolved
+      // Add import names to current namespace so dependencies can be resolved
+      if names.is_none() {
+        // TODO: Add every public name to the namespace
+        if path.last().unwrap().0 == "*" {
+
+        // Add module name to namespace
+        } else {
+          self.add_name(path.last().unwrap().0.clone(), expr.clone())?;
+        }
+      } else {
+        for name in names.as_ref().unwrap() {
+          // If alias, add alias to namespace
+          if name.1.is_some() {
+            self.add_name(name.1.as_ref().unwrap().0.clone(), expr.clone())?;
+  
+          // If not, add name to namespace
+          } else {
+            self.add_name(name.0.0.clone(), expr.clone())?;
+          }
+        }
+      }
 
       expr.expr = Expr::Module(path, names, Some(ast));
       return Ok(expr);
@@ -251,7 +272,9 @@ impl Parser {
 
     // Add dependency to the namespace
     if namespace.as_ref().unwrap().dependencies.contains_key(self.current_name.as_ref().unwrap()) {
-      namespace.unwrap().dependencies.get_mut(self.current_name.as_ref().unwrap()).unwrap().push(dependency);
+      if !namespace.as_ref().unwrap().dependencies.values().any(|deps| deps.contains(&dependency)) {
+        namespace.unwrap().dependencies.get_mut(self.current_name.as_ref().unwrap()).unwrap().push(dependency);
+      }
     } else {
       namespace.unwrap().dependencies.insert(self.current_name.as_ref().unwrap().to_owned(), vec![dependency]);
     }
@@ -523,8 +546,10 @@ impl Parser {
       // Index
       } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "." {
         // Add top-most identifier being indexed as a dependency
-        self.add_dependency(ident.value.as_ref().unwrap().to_owned())?;
-        return self.parse_index(ident, None);
+        if !self.is_indexing {
+          self.add_dependency(ident.value.as_ref().unwrap().to_owned())?;
+        }
+        return self.parse_index(ident);
 
       // Array index
       } else if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type == TokenTypes::LBracket {
@@ -979,31 +1004,20 @@ impl Parser {
     }
   }
 
-  /// Parse index chain recursively
-  /// 
-  /// Example: a.b.c.d
-  fn parse_index(&mut self, identifier: Token, parent_idx: Option<Expression>) -> Result<Expression, Error> {
+  /// Parse index chain (recursive)
+  fn parse_index(&mut self, identifier: Token) -> Result<Expression, Error> {
     self.iter.next(); // Consume `.`
+    self.is_indexing = true;
     let index = self.parse_expression(0)?;
+    self.is_indexing = false;
 
-    if parent_idx.is_some()
-    && self.iter.current.is_some()
-    && self.iter.current.as_ref().unwrap().of_type != TokenTypes::Operator
-    && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "." {
-      return self.parse_index(identifier.clone(), Some(self.get_expr(Expr::Index(
-        Box::new(parent_idx.unwrap()),
-        Box::new(index.clone())
-      ), Some(identifier.line), identifier.start_pos, index.last_line)));
-
-    } else {
-      return Ok(self.get_expr(Expr::Index(
-        Box::new(self.get_expr(Expr::Literal(
-          Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)
-        ), Some(identifier.line), identifier.start_pos, Some(identifier.line))),
-        Box::new(index.clone())),
-        Some(identifier.line), identifier.start_pos, index.last_line
-      ));
-    }
+    return Ok(self.get_expr(Expr::Index(
+      Box::new(self.get_expr(Expr::Literal(
+        Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)
+      ), Some(identifier.line), identifier.start_pos, Some(identifier.line))),
+      Box::new(index.clone())),
+      Some(identifier.line), identifier.start_pos, index.last_line
+    ));
   }
 
   fn parse_array_index(&mut self, identifier: Token) -> Result<Expression, Error> {
