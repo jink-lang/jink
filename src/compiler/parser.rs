@@ -22,7 +22,8 @@ pub struct Namespace {
   pub names: IndexMap<String, Expression>,
   // dependency; dependent
   pub dependencies: IndexMap<String, Vec<String>>,
-  pub imports: IndexMap<String, Vec<String>>
+  // module; (name; alias)
+  pub imports: IndexMap<String, Option<Vec<(Option<String>, Option<String>)>>>
 }
 
 pub struct Parser {
@@ -92,7 +93,7 @@ impl Parser {
           Expr::Call(_, _) => {},
           Expr::TypeDef(_, _) => {},
           Expr::Class(_, _, _) => {},
-          Expr::Module(_, _, _) => {},
+          Expr::Module(_, _, _, _) => {},
           Expr::Assignment(_, _, _) => {},
           Expr::Conditional(_, _, _, _) => {},
           Expr::UnaryOperator(_, _) => {},
@@ -132,7 +133,7 @@ impl Parser {
   /// 
   /// Loads module, attaches AST to expression, builds namespace and returns expression back
   fn process_module(&mut self, mut expr: Expression) -> Result<Expression, Error> {
-    if let Expr::Module(path, names, _) = expr.expr.clone() {
+    if let Expr::Module(path, is_aliased, names, _) = expr.expr.clone() {
       let code = module_loader::load_module(path.clone(), self.verbose);
       if code.is_none() {
         return Err(Error::new(
@@ -171,37 +172,43 @@ impl Parser {
           // Temporarily importing all names:
           for expr in &ast {
             if let Expr::TypeDef(Literals::Identifier(Name(name), _), _) = expr.expr.clone() {
-              self.add_import_dependency(name, module.clone())?;
+              self.add_import_dependency(Some(name), None, module.to_string(), expr.clone())?;
             } else if let Expr::Function(Name(name), _, _, _) = expr.expr.clone() {
-              self.add_import_dependency(name, module.clone())?;
+              self.add_import_dependency(Some(name), None, module.to_string(), expr.clone())?;
             } else if let Expr::Class(Name(name), _, _) = expr.expr.clone() {
-              self.add_import_dependency(name, module.clone())?;
+              self.add_import_dependency(Some(name), None, module.to_string(), expr.clone())?;
             } else if let Expr::Assignment(ty, lit, _) = expr.expr.clone() {
               if ty.is_none() { continue; }
               if let Expr::Literal(Literals::Identifier(Name(name), _)) = lit.expr {
-                self.add_import_dependency(name, module.clone())?;
+                self.add_import_dependency(Some(name), None, module.to_string(), expr.clone())?;
               }
             }
           }
 
         // Add module name to namespace
         } else {
-          self.add_name(path.last().unwrap().0.clone(), expr.clone())?;
+          self.add_import_dependency(None, None, module.to_string(), expr.clone())?;
         }
       } else {
-        for name in names.as_ref().unwrap() {
+        for (Name(name), alias) in names.as_ref().unwrap() {
           // If alias, add alias to namespace
-          if name.1.is_some() {
-            self.add_name(name.1.as_ref().unwrap().0.clone(), expr.clone())?;
+          if alias.is_some() {
+
+            // The module itself is aliased, no `from` names were specified
+            if is_aliased {
+              self.add_import_dependency(None, Some(alias.clone().unwrap().0), module.to_string(), expr.clone())?;
+            } else {
+              self.add_import_dependency(Some(name.to_string()), Some(alias.clone().unwrap().0), module.to_string(), expr.clone())?;
+            }
 
           // If not, add name to namespace
           } else {
-            self.add_name(name.0.0.clone(), expr.clone())?;
+            self.add_import_dependency(Some(name.to_string()), None, module.to_string(), expr.clone())?;
           }
         }
       }
 
-      expr.expr = Expr::Module(path, names, Some(ast));
+      expr.expr = Expr::Module(path, is_aliased, names, Some(ast));
       return Ok(expr);
     } else {
       unreachable!();
@@ -226,7 +233,10 @@ impl Parser {
     self.current_name = None;
   }
 
-  fn add_import_dependency(&mut self, name: String, from: String) -> Result<(), Error> {
+  /// Add various import dependencies to the current namespace
+  /// 
+  /// No name means the whole module is being imported
+  fn add_import_dependency(&mut self, name: Option<String>, alias: Option<String>, from: String, expr: Expression) -> Result<(), Error> {
     let namespace = self.namespaces.get_mut(self.current_namespace.as_str());
     if namespace.is_none() {
       return Err(Error::new(
@@ -239,12 +249,79 @@ impl Parser {
       ));
     }
 
-    if namespace.as_ref().unwrap().imports.contains_key(from.as_str()) {
-      if !namespace.as_ref().unwrap().imports.values().any(|deps| deps.contains(&name)) {
-        namespace.unwrap().imports.get_mut(from.as_str()).unwrap().push(name);
+    let f = from.split("/").last().unwrap();
+    if alias.is_none() {
+      if namespace.as_ref().unwrap().names.contains_key(f) {
+        return Err(Error::new(
+          Error::NameError,
+          None,
+          "",
+          Some(0),
+          Some(0),
+          format!("Name '{}' from '{}' already defined in file {}", f, from, self.current_namespace)
+        ));
       }
     } else {
-      namespace.unwrap().imports.insert(from, vec![name]);
+      if namespace.as_ref().unwrap().names.contains_key(alias.as_ref().unwrap().as_str()) {
+        return Err(Error::new(
+          Error::NameError,
+          None,
+          self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+          expr.first_pos,
+          expr.first_pos,
+          format!("Name '{}' already defined in scope", alias.as_ref().unwrap())
+        ));
+      }
+    }
+
+    for (path, _) in namespace.as_ref().unwrap().imports.iter() {
+      let p = path.split("/").last().unwrap();
+      if name.is_none() && alias.is_none() && p != "*" && f != "*" && p == f {
+        return Err(Error::new(
+          Error::ImportError,
+          None,
+          self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+          expr.first_pos,
+          expr.first_pos,
+          format!("Name '{}' from '{}' already imported in file {}", f, from, self.current_namespace) 
+        ));
+      }
+    }
+
+    // Import location exists
+    if namespace.as_ref().unwrap().imports.contains_key(from.as_str()) {
+      // Continue adding import names to existing list
+      if let Some(list) = namespace.unwrap().imports.get_mut(from.as_str()).unwrap() {
+        list.push((name, alias));
+
+      // List doesn't exist but import does, we already imported the whole module
+      } else {
+        return Err(Error::new(
+          Error::ImportError,
+          None,
+          self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+          expr.first_pos,
+          expr.first_pos,
+          format!("Whole module has already been imported: '{}'.", from)
+        ));
+      }
+
+    // Location isn't set yet
+    } else {
+      // No name so full module is being imported
+      if name.is_none() {
+        if alias.is_none() {
+          namespace.unwrap().imports.insert(from, None);
+
+        // Aliased import
+        } else {
+          namespace.unwrap().imports.insert(from, Some(vec![(None, alias)]));
+        }
+
+      // from { name as alias }
+      } else {
+        namespace.unwrap().imports.insert(from, Some(vec![(name, alias)]));
+      }
     }
 
     return Ok(());
@@ -1648,7 +1725,7 @@ impl Parser {
 
         // No alias
         if alias.is_none() {
-          let expr = self.get_expr(Expr::Module(vec![Name(String::from(index[0].value.as_ref().unwrap()))], None, None),
+          let expr = self.get_expr(Expr::Module(vec![Name(String::from(index[0].value.as_ref().unwrap()))], false, None, None),
             Some(init.as_ref().unwrap().line),
             init.unwrap().start_pos,
             Some(index[0].line)
@@ -1660,6 +1737,7 @@ impl Parser {
         // Alias
         let expr = self.get_expr(Expr::Module(
           vec![Name(String::from(index[0].value.as_ref().unwrap()))],
+          true,
           Some(vec![(name, alias)]),
           None
         ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(index[0].line));
@@ -1676,6 +1754,7 @@ impl Parser {
       if alias.is_none() {
         let expr = self.get_expr(Expr::Module(
           index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
+          false,
           None,
           None),
           Some(init.as_ref().unwrap().line),
@@ -1689,6 +1768,7 @@ impl Parser {
       // Alias
       let expr = self.get_expr(Expr::Module(
         index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
+        true,
         Some(vec![(name, alias)]),
         None),
         Some(init.as_ref().unwrap().line),
@@ -1736,6 +1816,7 @@ impl Parser {
 
       let expr = self.get_expr(Expr::Module(
         index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
+        false,
         Some(names),
         None),
         Some(init.as_ref().unwrap().line),

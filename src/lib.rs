@@ -142,7 +142,7 @@ pub enum Expr {
   /// hello\[0]
   ArrayIndex(Box<Expression>, Box<Expression>),
 
-  /// index; aliases<parent; opt child>[]; ast when parsed
+  /// index; is_aliased; aliases<parent; opt child>[]; ast when parsed
   /// 
   /// index is list of names in import ["std", "io"]
   /// 
@@ -151,7 +151,7 @@ pub enum Expr {
   /// for modules with no aliases, it will be none
   /// 
   /// only `from` imports will have multiple aliases, regular imports can only have one
-  Module(Vec<Name>, Option<Vec<(Name, Option<Name>)>>, Option<Vec<Expression>>),
+  Module(Vec<Name>, bool, Option<Vec<(Name, Option<Name>)>>, Option<Vec<Expression>>),
 }
 
 #[derive(Debug, PartialEq, Clone)]

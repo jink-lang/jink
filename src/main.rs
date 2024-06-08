@@ -130,6 +130,7 @@ fn main() {
     let main = builder.build(
       code.clone(),
       parsed.unwrap(),
+      parser.namespaces,
       verbose,
       do_execute
     );
