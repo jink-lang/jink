@@ -93,7 +93,7 @@ impl Parser {
           Expr::Call(_, _) => {},
           Expr::TypeDef(_, _) => {},
           Expr::Class(_, _, _) => {},
-          Expr::Module(_, _, _, _) => {},
+          Expr::ModuleParsed(_, _, _, _) => {},
           Expr::Assignment(_, _, _) => {},
           Expr::Conditional(_, _, _, _) => {},
           Expr::UnaryOperator(_, _) => {},
@@ -132,8 +132,8 @@ impl Parser {
   /// Load module via constructed index expression
   /// 
   /// Loads module, attaches AST to expression, builds namespace and returns expression back
-  fn process_module(&mut self, mut expr: Expression) -> Result<Expression, Error> {
-    if let Expr::Module(path, is_aliased, names, _) = expr.expr.clone() {
+  fn process_module(&mut self, expr: Expression) -> Result<Vec<Expression>, Error> {
+    if let Expr::Module(path, is_aliased, names) = expr.expr.clone() {
       let code = module_loader::load_module(path.clone(), self.verbose);
       if code.is_none() {
         return Err(Error::new(
@@ -208,8 +208,7 @@ impl Parser {
         }
       }
 
-      expr.expr = Expr::Module(path, is_aliased, names, Some(ast));
-      return Ok(expr);
+      return Ok(ast);
     } else {
       unreachable!();
     }
@@ -1725,24 +1724,38 @@ impl Parser {
 
         // No alias
         if alias.is_none() {
-          let expr = self.get_expr(Expr::Module(vec![Name(String::from(index[0].value.as_ref().unwrap()))], false, None, None),
+          let idx = vec![Name(String::from(index[0].value.as_ref().unwrap()))];
+          let expr = self.get_expr(Expr::Module(idx.clone(), false, None),
             Some(init.as_ref().unwrap().line),
             init.unwrap().start_pos,
             Some(index[0].line)
           );
-          self.process_module(expr.clone())?;
-          return Ok(expr);
+          let mut parsed = expr.clone();
+          parsed.expr = Expr::ModuleParsed(
+            idx,
+            false,
+            None,
+            self.process_module(expr.clone())?
+          );
+          return Ok(parsed);
         }
 
         // Alias
+        let idx = vec![Name(String::from(index[0].value.as_ref().unwrap()))];
+        let names = Some(vec![(name, alias)]);
         let expr = self.get_expr(Expr::Module(
-          vec![Name(String::from(index[0].value.as_ref().unwrap()))],
+          idx.clone(),
           true,
-          Some(vec![(name, alias)]),
-          None
+          names.clone()
         ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(index[0].line));
-        self.process_module(expr.clone())?;
-        return Ok(expr);
+        let mut parsed = expr.clone();
+        parsed.expr = Expr::ModuleParsed(
+          idx,
+          true,
+          names.clone(),
+          self.process_module(expr.clone())?
+        );
+        return Ok(parsed);
       }
 
       // Has index //
@@ -1752,31 +1765,44 @@ impl Parser {
 
       // No alias
       if alias.is_none() {
+        let idx = index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>();
         let expr = self.get_expr(Expr::Module(
-          index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
+          idx.clone(),
           false,
-          None,
           None),
           Some(init.as_ref().unwrap().line),
           init.unwrap().start_pos,
           Some(index.last().unwrap().line)
         );
-        self.process_module(expr.clone())?;
-        return Ok(expr);
+        let mut parsed = expr.clone();
+        parsed.expr = Expr::ModuleParsed(
+          idx,
+          false,
+          None,
+          self.process_module(expr.clone())?
+        );
+        return Ok(parsed);
       }
 
       // Alias
+      let idx = index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>();
+      let names = Some(vec![(name, alias)]);
       let expr = self.get_expr(Expr::Module(
-        index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
+        idx.clone(),
         true,
-        Some(vec![(name, alias)]),
-        None),
+        names.clone()),
         Some(init.as_ref().unwrap().line),
         init.unwrap().start_pos,
         Some(index.last().unwrap().line)
       );
-      self.process_module(expr.clone())?;
-      return Ok(expr);
+      let mut parsed = expr.clone();
+      parsed.expr = Expr::ModuleParsed(
+        idx,
+        true,
+        names,
+        self.process_module(expr.clone())?
+      );
+      return Ok(parsed);
 
     // Has "from"
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Keyword
@@ -1814,17 +1840,23 @@ impl Parser {
       }
       let end = self.consume(&[TokenTypes::RBrace], false)?;
 
+      let idx = index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>();
       let expr = self.get_expr(Expr::Module(
-        index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
+        idx.clone(),
         false,
-        Some(names),
-        None),
+        Some(names.clone())),
         Some(init.as_ref().unwrap().line),
         init.unwrap().start_pos,
         Some(end.line)
       );
-      self.process_module(expr.clone())?;
-      return Ok(expr);
+      let mut parsed = expr.clone();
+      parsed.expr = Expr::ModuleParsed(
+        idx,
+        false,
+        Some(names),
+        self.process_module(expr.clone())?
+      );
+      return Ok(parsed);
 
     // No "from" or identifier
     } else {

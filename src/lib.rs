@@ -151,7 +151,8 @@ pub enum Expr {
   /// for modules with no aliases, it will be none
   /// 
   /// only `from` imports will have multiple aliases, regular imports can only have one
-  Module(Vec<Name>, bool, Option<Vec<(Name, Option<Name>)>>, Option<Vec<Expression>>),
+  Module(Vec<Name>, bool, Option<Vec<(Name, Option<Name>)>>),
+  ModuleParsed(Vec<Name>, bool, Option<Vec<(Name, Option<Name>)>>, Vec<Expression>)
 }
 
 #[derive(Debug, PartialEq, Clone)]
