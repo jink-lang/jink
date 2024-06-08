@@ -103,7 +103,7 @@ impl Parser {
               Some(self.iter.current.as_ref().unwrap().clone()),
               self.code.lines().nth((parsed.as_ref().unwrap().first_line.unwrap() - 1) as usize).unwrap(),
               parsed.as_ref().unwrap().first_pos,
-              parsed.as_ref().unwrap().last_line,
+              parsed.as_ref().unwrap().first_pos,
               "Unexpected top level expression".to_string()
             ));
           }
@@ -222,7 +222,7 @@ impl Parser {
           None,
           self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
           expr.first_pos,
-          expr.last_line,
+          expr.first_pos,
           format!("Name '{}' already defined in scope", name)
         ));
       }
