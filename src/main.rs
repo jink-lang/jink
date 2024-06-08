@@ -96,6 +96,10 @@ fn main() {
       for (name, deps) in ns.dependencies.iter() {
         println!("   - {}: {:?}", name, deps);
       }
+      println!(  "Import dependencies:");
+      for (name, deps) in ns.imports.iter() {
+        println!("   - {}: {:?}", name, deps);
+      }
     }
   }
 

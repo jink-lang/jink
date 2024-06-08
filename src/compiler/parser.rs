@@ -20,7 +20,9 @@ pub struct Namespace {
   // Would need to make AST part of the parser struct and add a flag not to push to it when parsing modules
   // TODO: Keep track of public names
   pub names: IndexMap<String, Expression>,
+  // dependency; dependent
   pub dependencies: IndexMap<String, Vec<String>>,
+  pub imports: IndexMap<String, Vec<String>>
 }
 
 pub struct Parser {
@@ -72,6 +74,7 @@ impl Parser {
     self.namespaces.insert(main_file_path, Namespace {
       names: IndexMap::new(),
       dependencies: IndexMap::new(),
+      imports: IndexMap::new()
     });
 
     let mut ast: Vec<Expression> = Vec::new();
@@ -138,7 +141,7 @@ impl Parser {
           &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
           expr.first_pos,
           expr.first_pos,
-          format!("Could not resolve module path: '/{}'", path.iter().map(|n| n.0.to_string()).collect::<Vec<String>>().join("/")),
+          format!("Could not resolve module path: '/{}.jk'", path.iter().map(|n| n.0.to_string()).collect::<Vec<String>>().join("/")),
         ));
       }
 
@@ -148,7 +151,8 @@ impl Parser {
       let store_namespace = self.current_namespace.clone();
 
       // Parse module
-      self.current_namespace = path.iter().map(|n| n.0.to_string()).collect::<Vec<String>>().join("/");
+      let module = path.iter().map(|n| n.0.to_string()).collect::<Vec<String>>().join("/");
+      self.current_namespace = module.clone();
       let ast = self.parse(code.unwrap(), self.current_namespace.clone(), self.verbose, self.testing)?;
 
       // Restore state
@@ -160,6 +164,25 @@ impl Parser {
       if names.is_none() {
         // TODO: Add every public name to the namespace
         if path.last().unwrap().0 == "*" {
+          // TODO:
+          // for expr in ast {
+          //   if let Expr::Pub ...
+          // }
+          // Temporarily importing all names:
+          for expr in &ast {
+            if let Expr::TypeDef(Literals::Identifier(Name(name), _), _) = expr.expr.clone() {
+              self.add_import_dependency(name, module.clone())?;
+            } else if let Expr::Function(Name(name), _, _, _) = expr.expr.clone() {
+              self.add_import_dependency(name, module.clone())?;
+            } else if let Expr::Class(Name(name), _, _) = expr.expr.clone() {
+              self.add_import_dependency(name, module.clone())?;
+            } else if let Expr::Assignment(ty, lit, _) = expr.expr.clone() {
+              if ty.is_none() { continue; }
+              if let Expr::Literal(Literals::Identifier(Name(name), _)) = lit.expr {
+                self.add_import_dependency(name, module.clone())?;
+              }
+            }
+          }
 
         // Add module name to namespace
         } else {
@@ -170,7 +193,7 @@ impl Parser {
           // If alias, add alias to namespace
           if name.1.is_some() {
             self.add_name(name.1.as_ref().unwrap().0.clone(), expr.clone())?;
-  
+
           // If not, add name to namespace
           } else {
             self.add_name(name.0.0.clone(), expr.clone())?;
@@ -203,6 +226,30 @@ impl Parser {
     self.current_name = None;
   }
 
+  fn add_import_dependency(&mut self, name: String, from: String) -> Result<(), Error> {
+    let namespace = self.namespaces.get_mut(self.current_namespace.as_str());
+    if namespace.is_none() {
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        "",
+        Some(0),
+        Some(0),
+        format!("Namespace not defined: {}", self.current_namespace)
+      ));
+    }
+
+    if namespace.as_ref().unwrap().imports.contains_key(from.as_str()) {
+      if !namespace.as_ref().unwrap().imports.values().any(|deps| deps.contains(&name)) {
+        namespace.unwrap().imports.get_mut(from.as_str()).unwrap().push(name);
+      }
+    } else {
+      namespace.unwrap().imports.insert(from, vec![name]);
+    }
+
+    return Ok(());
+  }
+
   /// Add named items (imports and function, class and type definitions) to the current namespace
   fn add_name(&mut self, name: String, expr: Expression) -> Result<(), Error> {
     let mut namespace = self.namespaces.get_mut(self.current_namespace.as_str());
@@ -210,6 +257,7 @@ impl Parser {
       self.namespaces.insert(self.current_namespace.clone(), Namespace {
         names: IndexMap::new(),
         dependencies: IndexMap::new(),
+        imports: IndexMap::new()
       });
       namespace = self.namespaces.get_mut(self.current_namespace.as_str());
     }

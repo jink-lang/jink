@@ -5,8 +5,10 @@ use jink::Name;
 // TODO: This will need to be updated when we flesh out a standard for modules
 pub fn resolve_module_path(module: Vec<Name>) -> PathBuf {
   let mut path = PathBuf::from("src");
-  for name in module {
-    path.push(name.0);
+  for Name(name) in module {
+    if name != "*" {
+      path.push(name);
+    }
   }
   path.set_extension("jk");
   return path;
