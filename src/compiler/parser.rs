@@ -164,28 +164,24 @@ impl Parser {
 
       // Add import names to current namespace so dependencies can be resolved
       if names.is_none() {
-        // TODO: Add every public name to the namespace
+        // Add every public name to the import dependencies / namespace
         if path.last().unwrap().0 == "*" {
-          // TODO:
-          // for expr in ast {
-          //   if let Expr::Pub ...
-          // }
-          // Temporarily importing all names:
-          for expr in &ast {
-            if let Expr::TypeDef(Literals::Identifier(Name(name), _), _) = expr.expr.clone() {
-              self.add_import_dependency(Some(name), None, module.to_string(), expr.clone())?;
-            } else if let Expr::Function(Name(name), _, _, _) = expr.expr.clone() {
-              self.add_import_dependency(Some(name), None, module.to_string(), expr.clone())?;
-            } else if let Expr::Class(Name(name), _, _) = expr.expr.clone() {
-              self.add_import_dependency(Some(name), None, module.to_string(), expr.clone())?;
-            } else if let Expr::Assignment(ty, lit, _) = expr.expr.clone() {
-              if ty.is_none() { continue; }
-              if let Expr::Literal(Literals::Identifier(Name(name), _)) = lit.expr {
-                self.add_import_dependency(Some(name), None, module.to_string(), expr.clone())?;
+          for expr in ast.clone() {
+            if let Expr::Public(exp) = expr.expr {
+              if let Expr::TypeDef(Literals::Identifier(Name(name), _), _) = exp.expr.clone() {
+                self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
+              } else if let Expr::Function(Name(name), _, _, _) = exp.expr.clone() {
+                self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
+              } else if let Expr::Class(Name(name), _, _) = exp.expr.clone() {
+                self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
+              } else if let Expr::Assignment(ty, lit, _) = exp.expr.clone() {
+                if ty.is_none() { continue; }
+                if let Expr::Literal(Literals::Identifier(Name(name), _)) = lit.expr {
+                  self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
+                }
               }
             }
           }
-
         // Add module name to namespace
         } else {
           self.add_import_dependency(None, None, module.to_string(), expr.clone())?;
@@ -771,13 +767,14 @@ impl Parser {
 
         let expression = self.parse_top()?;
 
-        match expression.expr {
-          Expr::Class(_, _, _) | Expr::Function(_, _, _, _) | Expr::TypeDef(_, _) => {
+        match expression.expr.clone() {
+          Expr::Class(Name(name), _, _) | Expr::Function(Name(name), _, _, _) | Expr::TypeDef(Literals::Identifier(Name(name), _), _) => {
+            self.add_name(name.to_string(), expression.clone())?;
             return Ok(self.get_expr(Expr::Public(Box::new(expression)),
               Some(token.line), token.start_pos, token.end_pos
             ));
           },
-          Expr::Assignment(typ, _, _) => {
+          Expr::Assignment(typ, name_expr, _) => {
             if typ.is_none() {
               return Err(Error::new(
                 Error::UnexpectedToken,
@@ -786,6 +783,13 @@ impl Parser {
                 token.start_pos,
                 token.end_pos,
                 "Expected named expression after \"pub\"".to_string()
+              ));
+            }
+
+            if let Expr::Literal(Literals::Identifier(Name(name), _)) = name_expr.expr {
+              self.add_name(name.to_string(), expression.clone())?;
+              return Ok(self.get_expr(Expr::Public(Box::new(expression)),
+                Some(token.line), token.start_pos, token.end_pos
               ));
             }
           },
