@@ -60,6 +60,7 @@ impl Parser {
           Expr::BinaryOperator(_, _, _) => {},
           Expr::ForLoop(_, _, _) => {},
           Expr::WhileLoop(_, _) => {},
+          Expr::Public(_) => {},
           // Expr::Index(_, _) => {}, // Will only be necessary when indexing at top level - module imports and class methods
           _ => {
             return Err(Error::new(
@@ -181,6 +182,9 @@ impl Parser {
     } else if init.unwrap().value.as_ref().unwrap() == "cls" {
       return self.parse_class();
 
+    } else if init.unwrap().value.as_ref().unwrap() == "pub" {
+      return self.parse_public();
+
     } else if init.unwrap().value.as_ref().unwrap() == "type" {
       self.iter.next();
       return self.parse_type();
@@ -201,7 +205,7 @@ impl Parser {
       return Err(Error::new(
         Error::UnexpectedToken,
         Some(init.unwrap().clone()),
-        self.code.lines().nth((init.unwrap().line) as usize).unwrap(),
+        self.code.lines().nth((init.unwrap().line) as usize - 1).unwrap(),
         init.unwrap().start_pos,
         init.unwrap().end_pos,
         "Unexpected token".to_string()
@@ -338,7 +342,6 @@ impl Parser {
         Some(cur.as_ref().unwrap().start_pos.unwrap() - 2), // backtrack quote and starting pos
         Some(cur.as_ref().unwrap().line)
       ));
-
     // Identifiers
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Identifier {
       let ident = self.iter.next().unwrap();
@@ -379,6 +382,8 @@ impl Parser {
     // Keywords
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Keyword {
       let keyword = self.iter.next().unwrap();
+
+      println!("{:?}", keyword);
 
       // Calls
       if self.iter.current.as_ref().unwrap().of_type == TokenTypes::LParen {
@@ -445,6 +450,45 @@ impl Parser {
       "*" | "/" | "//" | "%" => 7,
       _ => 0
     }
+  }
+
+  fn parse_public(&mut self) -> Result<Expression, Error> {
+    let init = self.iter.current.as_ref().unwrap().clone();
+
+    if let Some(token) = &self.iter.current.clone() {
+      if token.of_type == TokenTypes::Keyword && token.value.as_ref().unwrap() == "pub" {
+        self.iter.next();
+  
+        let expression = self.parse_top()?;
+  
+        match expression.expr {
+          Expr::Class(_, _, _) | Expr::Function(_, _, _, _) | Expr::TypeDef(_, _) | Expr::Assignment(_, _, _) => {
+            return Ok(self.get_expr(Expr::Public(true),
+              Some(token.line), token.start_pos, token.end_pos
+            ));
+          },
+          _ => {
+            return Err(Error::new(
+              Error::UnexpectedToken,
+              Some(token.clone()),
+              self.code.lines().nth((token.line - 1) as usize).unwrap(),
+              token.start_pos,
+              token.end_pos,
+              "Expected identifier after \"pub\"".to_string()
+            ));
+          },
+        }
+      }
+    }
+  
+    return Err(Error::new(
+      Error::UnexpectedToken,
+      Some(init.clone()),
+      self.code.lines().nth((init.line - 1) as usize).unwrap(),
+      init.start_pos,
+      init.end_pos,
+      "Missing expression after \"pub\"".to_string()
+    ));
   }
 
   fn parse_assignment(&mut self, typ: Option<&Token>, identifier: Token, indexed: Option<Expression>) -> Result<Expression, Error> {
@@ -642,7 +686,6 @@ impl Parser {
       ));
     }
   }
-
   fn parse_for_loop(&mut self) -> Result<Expression, Error> {
     let init = self.iter.next(); // Consume "for"
     
@@ -763,7 +806,7 @@ impl Parser {
 
   fn expect_keyword(&mut self, keyword: &str) -> Result<(), Error> {
     if let Some(token) = &self.iter.current {
-      if token.of_type == TokenTypes::Keyword && token.value.as_ref().map_or(false, |v| v == keyword) {
+      if token.of_type == TokenTypes::Keyword && token.value.as_ref().unwrap() == keyword {
         self.iter.next(); // Consume keyword
         Ok(())
       } else {

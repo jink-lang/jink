@@ -54,7 +54,7 @@ fn main() {
     for token in lexed.clone().iter() {
       if token.of_type == TokenTypes::Newline { continue; }
 
-      if line.len() > 0 as usize {
+      if !line.is_empty() {
         if cur != token.line {
           println!("{:4} | {}", cur, line.join(" "));
           line.clear();

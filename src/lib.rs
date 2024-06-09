@@ -126,6 +126,9 @@ pub enum Expr {
   /// class name; parent classes; body
   Class(Name, Option<Vec<Name>>, Option<Box<Vec<Expression>>>),
 
+  /// boolean value
+  Public(bool),
+
   /// parent; child
   /// 
   /// hello.there()

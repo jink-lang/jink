@@ -266,6 +266,9 @@ impl<'ctx> CodeGen<'ctx> {
         Expr::Module(name, body) => {
           println!("Module: {:?} {:?}\n", name, body);
         },
+        Expr::Public(value) => {
+          println!("Public: {:?}", value);
+        }
         // If we add a top level index expression
         // i.e. hello[0].bye() or hello.bye()
         // Expr::Index(parent, child) => {
