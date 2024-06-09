@@ -768,8 +768,7 @@ impl Parser {
         let expression = self.parse_top()?;
 
         match expression.expr.clone() {
-          Expr::Class(Name(name), _, _) | Expr::Function(Name(name), _, _, _) | Expr::TypeDef(Literals::Identifier(Name(name), _), _) => {
-            self.add_name(name.to_string(), expression.clone())?;
+          Expr::Class(_, _, _) | Expr::Function(_, _, _, _) | Expr::TypeDef(_, _) => {
             return Ok(self.get_expr(Expr::Public(Box::new(expression)),
               Some(token.line), token.start_pos, token.end_pos
             ));
