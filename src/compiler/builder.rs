@@ -245,67 +245,74 @@ impl<'ctx> CodeGen<'ctx> {
     let mut block = main_fn.get_first_basic_block().unwrap();
 
     for expr in ast {
-      match expr.clone().expr {
-        // TODO: Validate for allowed top level op expressions
-        // (Possibly move to parsing since we already validate for top level expressions there)
-        Expr::BinaryOperator(_, _, _) => {
-          self.visit(&expr.clone(), block)?;
-        },
-        Expr::UnaryOperator(_, _) => {
-          self.visit(&expr.clone(), block)?;
-        },
+      block = self.process_top(expr, main_fn, block)?;
+    }
 
-        Expr::Assignment(_, _, _) => {
-          self.build_assignment(expr, block, false)?;
-        },
-        Expr::TypeDef(name, value) => {
-          self.build_struct(Some(name), value)?;
-        },
-        Expr::Conditional(typ, expr, body, else_body) => {
-          block = self.build_if(typ, expr, body, else_body, main_fn, block, None, None)?;
-        },
-        Expr::ForLoop(value, expr, body) => {
-          block = self.build_for_loop(value, expr, body, main_fn, block)?;
-        },
-        Expr::WhileLoop(expr, body) => {
-          block = self.build_while_loop(expr, body, main_fn, block)?;
-        },
-        Expr::Call(_, _) => {
-          self.visit(&expr, block)?;
-        },
-        Expr::Function(name, ret_typ, params, body) => {
-          self.build_function(name, ret_typ, params, body, block)?;
-        },
-        Expr::Class(name, parents, body) => {
-          println!("Class: {:?} {:?} {:?}\n", name, parents, body);
-        },
-        Expr::ModuleParsed(path, _, opts, ast) => {
-          self.build_module(expr, path, opts, ast, main_fn)?;
-        },
-        Expr::Public(value) => {
-          println!("Public: {:?}", value);
-        }
-        // If we add a top level index expression
-        // i.e. hello[0].bye() or hello.bye()
-        // Expr::Index(parent, child) => {
-        //   self.build_index_extract(parent, child, block)?;
-        // },
-        // Expr::ArrayIndex(arr, index) => {
-        //   println!("ArrayIndex: {:?} {:?}\n", arr, index);
-        // },
-        _ => {
-          if let Expr::Literal(Literals::EOF) = expr.expr {
-            return Ok(block);
-          } else {
-            return Err(Error::new(
-              Error::CompilerError,
-              None,
-              self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
-              expr.first_pos,
-              expr.first_pos,
-              "Invalid top level expression".to_string()
-            ));
-          }
+    return Ok(block);
+  }
+
+  fn process_top(&mut self, expr: Expression, main_fn: FunctionValue<'ctx>, block: BasicBlock<'ctx>) -> Result<BasicBlock<'ctx>, Error> {
+    let mut block = block;
+    match expr.clone().expr {
+      // TODO: Validate for allowed top level op expressions
+      // (Possibly move to parsing since we already validate for top level expressions there)
+      Expr::BinaryOperator(_, _, _) => {
+        self.visit(&expr.clone(), block)?;
+      },
+      Expr::UnaryOperator(_, _) => {
+        self.visit(&expr.clone(), block)?;
+      },
+
+      Expr::Assignment(_, _, _) => {
+        self.build_assignment(expr, block, false)?;
+      },
+      Expr::TypeDef(name, value) => {
+        self.build_struct(Some(name), value)?;
+      },
+      Expr::Conditional(typ, expr, body, else_body) => {
+        block = self.build_if(typ, expr, body, else_body, main_fn, block, None, None)?;
+      },
+      Expr::ForLoop(value, expr, body) => {
+        block = self.build_for_loop(value, expr, body, main_fn, block)?;
+      },
+      Expr::WhileLoop(expr, body) => {
+        block = self.build_while_loop(expr, body, main_fn, block)?;
+      },
+      Expr::Call(_, _) => {
+        self.visit(&expr, block)?;
+      },
+      Expr::Function(name, ret_typ, params, body) => {
+        self.build_function(name, ret_typ, params, body, block)?;
+      },
+      Expr::Class(name, parents, body) => {
+        println!("Class: {:?} {:?} {:?}\n", name, parents, body);
+      },
+      Expr::ModuleParsed(path, _, opts, ast) => {
+        self.build_module(expr, path, opts, ast, main_fn)?;
+      },
+      Expr::Public(expr) => {
+        block = self.process_top(*expr, main_fn, block)?;
+      }
+      // When we add top level index expressions
+      // i.e. hello[0].bye() or hello.bye() or module.property and module.method()
+      // Expr::Index(parent, child) => {
+      //   self.build_index_extract(parent, child, block)?;
+      // },
+      // Expr::ArrayIndex(arr, index) => {
+      //   println!("ArrayIndex: {:?} {:?}\n", arr, index);
+      // },
+      _ => {
+        if let Expr::Literal(Literals::EOF) = expr.expr {
+          return Ok(block);
+        } else {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+            expr.first_pos,
+            expr.first_pos,
+            "Invalid top level expression".to_string()
+          ));
         }
       }
     }
@@ -1166,9 +1173,15 @@ impl<'ctx> CodeGen<'ctx> {
             _ => panic!("Invalid type for const"),
           }
         },
-        // Custom type (we know exists from builder)
         _ => {
-          self.set_symbol(name, None, set.get_type(), set);
+          if ["int", "bool", "float", "string"].contains(&ty.0.as_str()) {
+            let var = self.builder.build_alloca(set.get_type(), &name).unwrap();
+            self.builder.build_store(var, set).unwrap();
+            self.set_symbol(name, Some(var), set.get_type(), set);
+          } else {
+            // Custom type (we know exists from builder)
+            self.set_symbol(name, None, set.get_type(), set);
+          }
         },
       }
     } else {
@@ -1722,7 +1735,7 @@ impl<'ctx> CodeGen<'ctx> {
             None,
             &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
             expr.first_pos,
-            expr.last_line,
+            Some(expr.first_pos.unwrap() + name.0.len() as i32),
             format!("Unknown function: {}", name.0)
           ));
         }
