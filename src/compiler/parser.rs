@@ -100,6 +100,7 @@ impl Parser {
           Expr::BinaryOperator(_, _, _) => {},
           Expr::ForLoop(_, _, _) => {},
           Expr::WhileLoop(_, _) => {},
+          Expr::Public(_) => {},
           // Expr::Index(_, _) => {}, // Will only be necessary when indexing at top level - module imports and class methods
           _ => {
             return Err(Error::new(
@@ -485,6 +486,9 @@ impl Parser {
     } else if init.unwrap().value.as_ref().unwrap() == "cls" {
       return self.parse_class();
 
+    } else if init.unwrap().value.as_ref().unwrap() == "pub" {
+      return self.parse_public();
+
     } else if init.unwrap().value.as_ref().unwrap() == "type" {
       self.iter.next();
       return self.parse_type();
@@ -642,7 +646,6 @@ impl Parser {
         Some(cur.as_ref().unwrap().start_pos.unwrap() - 2), // backtrack quote and starting pos
         Some(cur.as_ref().unwrap().line)
       ));
-
     // Identifiers
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Identifier {
       let ident = self.iter.next().unwrap();
@@ -757,6 +760,57 @@ impl Parser {
       "*" | "/" | "//" | "%" => 7,
       _ => 0
     }
+  }
+
+  fn parse_public(&mut self) -> Result<Expression, Error> {
+    let init = self.iter.current.as_ref().unwrap().clone();
+
+    if let Some(token) = &self.iter.current.clone() {
+      if token.of_type == TokenTypes::Keyword && token.value.as_ref().unwrap() == "pub" {
+        self.iter.next();
+
+        let expression = self.parse_top()?;
+
+        match expression.expr {
+          Expr::Class(_, _, _) | Expr::Function(_, _, _, _) | Expr::TypeDef(_, _) => {
+            return Ok(self.get_expr(Expr::Public(Box::new(expression)),
+              Some(token.line), token.start_pos, token.end_pos
+            ));
+          },
+          Expr::Assignment(typ, _, _) => {
+            if typ.is_none() {
+              return Err(Error::new(
+                Error::UnexpectedToken,
+                Some(token.clone()),
+                self.code.lines().nth((token.line - 1) as usize).unwrap(),
+                token.start_pos,
+                token.end_pos,
+                "Expected named expression after \"pub\"".to_string()
+              ));
+            }
+          },
+          _ => {
+            return Err(Error::new(
+              Error::UnexpectedToken,
+              Some(token.clone()),
+              self.code.lines().nth((token.line - 1) as usize).unwrap(),
+              token.start_pos,
+              token.end_pos,
+              "Expected named expression after \"pub\"".to_string()
+            ));
+          },
+        }
+      }
+    }
+
+    return Err(Error::new(
+      Error::UnexpectedToken,
+      Some(init.clone()),
+      self.code.lines().nth((init.line - 1) as usize).unwrap(),
+      init.start_pos,
+      init.end_pos,
+      "Missing expression after \"pub\"".to_string()
+    ));
   }
 
   fn parse_assignment(&mut self, typ: Option<&Token>, identifier: Token, indexed: Option<Expression>) -> Result<Expression, Error> {
@@ -986,7 +1040,6 @@ impl Parser {
           last_line: identifier_token.end_pos,
         })
       } else {
-        eprintln!("Debug: Expected identifier, got {:?}", token);
         Err(Error::new(
           Error::UnexpectedToken,
           Some(token.clone()),
@@ -1056,7 +1109,6 @@ impl Parser {
     let token = self.iter.next().unwrap();
 
     if !self.in_loop {
-      eprintln!("Error: Unexpected {} outside of loop.", typ);
       return Err(Error::new(
         Error::UnexpectedToken,
         Some(token.clone()),
@@ -1088,11 +1140,10 @@ impl Parser {
 
   fn expect_keyword(&mut self, keyword: &str) -> Result<(), Error> {
     if let Some(token) = &self.iter.current {
-      if token.of_type == TokenTypes::Keyword && token.value.as_ref().map_or(false, |v| v == keyword) {
+      if token.of_type == TokenTypes::Keyword && token.value.as_ref().unwrap() == keyword {
         self.iter.next(); // Consume keyword
         Ok(())
       } else {
-        eprintln!("Debug: Expected keyword \"{}\", got {:?}", keyword, token);
         Err(Error::new(
           Error::UnexpectedToken,
           Some(token.clone()),

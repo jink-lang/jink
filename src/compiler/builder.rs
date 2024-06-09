@@ -282,6 +282,9 @@ impl<'ctx> CodeGen<'ctx> {
         Expr::ModuleParsed(path, _, opts, ast) => {
           self.build_module(expr, path, opts, ast, main_fn)?;
         },
+        Expr::Public(value) => {
+          println!("Public: {:?}", value);
+        }
         // If we add a top level index expression
         // i.e. hello[0].bye() or hello.bye()
         // Expr::Index(parent, child) => {
