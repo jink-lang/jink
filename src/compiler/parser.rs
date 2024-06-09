@@ -383,8 +383,6 @@ impl Parser {
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Keyword {
       let keyword = self.iter.next().unwrap();
 
-      println!("{:?}", keyword);
-
       // Calls
       if self.iter.current.as_ref().unwrap().of_type == TokenTypes::LParen {
         return self.parse_call(keyword);
@@ -458,14 +456,26 @@ impl Parser {
     if let Some(token) = &self.iter.current.clone() {
       if token.of_type == TokenTypes::Keyword && token.value.as_ref().unwrap() == "pub" {
         self.iter.next();
-  
+
         let expression = self.parse_top()?;
-  
+
         match expression.expr {
-          Expr::Class(_, _, _) | Expr::Function(_, _, _, _) | Expr::TypeDef(_, _) | Expr::Assignment(_, _, _) => {
-            return Ok(self.get_expr(Expr::Public(true),
+          Expr::Class(_, _, _) | Expr::Function(_, _, _, _) | Expr::TypeDef(_, _) => {
+            return Ok(self.get_expr(Expr::Public(Box::new(expression)),
               Some(token.line), token.start_pos, token.end_pos
             ));
+          },
+          Expr::Assignment(typ, _, _) => {
+            if typ.is_none() {
+              return Err(Error::new(
+                Error::UnexpectedToken,
+                Some(token.clone()),
+                self.code.lines().nth((token.line - 1) as usize).unwrap(),
+                token.start_pos,
+                token.end_pos,
+                "Expected named expression after \"pub\"".to_string()
+              ));
+            }
           },
           _ => {
             return Err(Error::new(
@@ -474,13 +484,13 @@ impl Parser {
               self.code.lines().nth((token.line - 1) as usize).unwrap(),
               token.start_pos,
               token.end_pos,
-              "Expected identifier after \"pub\"".to_string()
+              "Expected named expression after \"pub\"".to_string()
             ));
           },
         }
       }
     }
-  
+
     return Err(Error::new(
       Error::UnexpectedToken,
       Some(init.clone()),
@@ -686,6 +696,7 @@ impl Parser {
       ));
     }
   }
+
   fn parse_for_loop(&mut self) -> Result<Expression, Error> {
     let init = self.iter.next(); // Consume "for"
     
@@ -704,7 +715,6 @@ impl Parser {
           last_line: identifier_token.end_pos,
         })
       } else {
-        eprintln!("Debug: Expected identifier, got {:?}", token);
         Err(Error::new(
           Error::UnexpectedToken,
           Some(token.clone()),
@@ -774,7 +784,6 @@ impl Parser {
     let token = self.iter.next().unwrap();
 
     if !self.in_loop {
-      eprintln!("Error: Unexpected {} outside of loop.", typ);
       return Err(Error::new(
         Error::UnexpectedToken,
         Some(token.clone()),
@@ -810,7 +819,6 @@ impl Parser {
         self.iter.next(); // Consume keyword
         Ok(())
       } else {
-        eprintln!("Debug: Expected keyword \"{}\", got {:?}", keyword, token);
         Err(Error::new(
           Error::UnexpectedToken,
           Some(token.clone()),
