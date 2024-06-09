@@ -209,7 +209,11 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Print LLVM IR
     if verbose {
+      println!("------------------");
+      println!("------- IR -------");
+      println!("------------------");
       println!("{}", self.module.print_to_string().to_string());
+      println!("------------------");
     }
 
     // Print the symbol table
