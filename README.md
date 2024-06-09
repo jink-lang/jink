@@ -44,7 +44,9 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [x] Build while loops
 - [ ] Fix triple & multi nested loops
 - [ ] Build break and continue for loops
-- [ ] Build module/import system
+- [x] Build module/import system
+- [ ] Validate module imports
+- [ ] Handle named module indexing
 - [ ] Build string interpolation
 - [ ] Write loop tests
 - [ ] Write struct tests
@@ -60,8 +62,8 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [ ] Parse self keyword in classes
 - [ ] Parse self keyword in methods
 - [x] Parse module imports
+- [ ] Validate against circularly imported modules
 - [ ] Parse string interpolation
-- [ ] Parse pub keyword on definitions
 - [x] Parse indexing (arrays)
 - [ ] Parse recursive indexing (arrays)
 - [x] Parse indexing (object properties and methods)
@@ -70,7 +72,7 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [x] Parse while loops
 - [x] Parse for loops
 - [x] Parse break and continue for loops
-- [ ] Parse public statements
+- [x] Parse public statements
 - [ ] Parse external statements
 
 ## Examples
