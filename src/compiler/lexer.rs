@@ -198,7 +198,7 @@ impl Lexer {
     let start = self.line_pos;
 
     // While we are still working with the operator
-    while iter.peek().is_some() && OPERATORS.contains(&iter.peek().unwrap().to_string().as_str()) {
+    while iter.peek().is_some() && OPERATORS.contains(&&(operator.clone() + &iter.peek().unwrap().to_string()).as_str()) {
       operator.push(*iter.next().unwrap());
       self.pos += 1;
       self.line_pos += 1;

@@ -145,7 +145,7 @@ pub enum Expr {
   /// hello\[0]
   ArrayIndex(Box<Expression>, Box<Expression>),
 
-  /// index; aliases<parent; opt child>[]
+  /// index; is_aliased; aliases<parent; opt child>[]; ast when parsed
   /// 
   /// index is list of names in import ["std", "io"]
   /// 
@@ -154,7 +154,8 @@ pub enum Expr {
   /// for modules with no aliases, it will be none
   /// 
   /// only `from` imports will have multiple aliases, regular imports can only have one
-  Module(Vec<Name>, Option<Vec<(Name, Option<Name>)>>),
+  Module(Vec<Name>, bool, Option<Vec<(Name, Option<Name>)>>),
+  ModuleParsed(Vec<Name>, bool, Option<Vec<(Name, Option<Name>)>>, Vec<Expression>)
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -182,6 +183,15 @@ impl FutureIter {
       iter,
       current,
     }
+  }
+
+  pub fn dump(&mut self) -> Vec<Token> {
+    return self.iter.to_owned().collect::<Vec<Token>>();
+  }
+
+  pub fn load(&mut self, tokens: Vec<Token>) {
+    self.iter = tokens.into_iter().peekable();
+    self.current = self.iter.peek().cloned();
   }
 
   pub fn next(&mut self) -> Option<Token> {
@@ -218,6 +228,7 @@ pub enum Error {
   UnexpectedExpression(ErrorCtx),
   ParserError(ErrorCtx),
   NameError(ErrorCtx),
+  ImportError(ErrorCtx),
   CompilerError(ErrorCtx),
 }
 
@@ -296,6 +307,11 @@ impl std::fmt::Display for Error {
         let underline = " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat((err.end_pos.unwrap() - err.start_pos.unwrap()) as usize);
         return write!(f, "Name error at {}:{}\n  {}\n  {}\n\n{}", err.end_pos.unwrap(),
           err.start_pos.unwrap() + 1, err.line, underline, err.message
+        );
+      },
+      Error::ImportError(err) => {
+        return write!(f, "Import error at {}:{}\n  {}\n  {}\n\n{}", err.end_pos.unwrap(),
+          err.start_pos.unwrap() + 1, err.line, " ".repeat(err.start_pos.unwrap() as usize) + "^", err.message
         );
       },
       Error::CompilerError(err) => {

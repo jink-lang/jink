@@ -13,6 +13,8 @@ use inkwell::AddressSpace;
 
 use jink::{Error, Expr, Expression, Name, Type, Operator, Literals};
 
+use super::parser::Namespace;
+
 pub struct Scope<'ctx> {
   symbols: IndexMap<String, (Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>)>,
   is_function: bool,
@@ -20,6 +22,7 @@ pub struct Scope<'ctx> {
 
 pub struct CodeGen<'ctx> {
   pub code: String,
+  pub namespaces: IndexMap<String, Namespace>,
   context: &'ctx Context,
   pub module: Module<'ctx>,
   builder: Builder<'ctx>,
@@ -45,6 +48,7 @@ impl<'ctx> CodeGen<'ctx> {
 
     return CodeGen {
       code: String::new(),
+      namespaces: IndexMap::new(),
       context: &context,
       module,
       builder: context.create_builder(),
@@ -157,22 +161,34 @@ impl<'ctx> CodeGen<'ctx> {
     let scanf_type = self.context.i32_type().fn_type(&[ptr_type.into(), ptr_type.into()], true);
     self.module.add_function("scanf", scanf_type, Some(Linkage::External));
 
+    let strlen_type = self.context.i64_type().fn_type(&[ptr_type.into()], false);
+    self.module.add_function("strlen", strlen_type, Some(Linkage::External));
+
     let malloc_type = self.context.i8_type().fn_type(&[self.context.i64_type().into()], false);
     self.module.add_function("malloc", malloc_type, Some(Linkage::External));
 
     let free_type = self.context.void_type().fn_type(&[ptr_type.into()], false);
     self.module.add_function("free", free_type, Some(Linkage::External));
 
-    let strlen_type = self.context.i64_type().fn_type(&[ptr_type.into()], false);
-    self.module.add_function("strlen", strlen_type, Some(Linkage::External));
+    let fopen_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+    self.module.add_function("fopen", fopen_type, Some(Linkage::External));
 
-    // Create ptr() function to convert values to pointers
-    let ptr_func_type = self.context.ptr_type(AddressSpace::default()).fn_type(&[ptr_type.into()], false);
-    self.module.add_function("ptr", ptr_func_type, None);
+    let fwrite_type = self.context.i64_type().fn_type(&[ptr_type.into(), self.context.i64_type().into(), self.context.i64_type().into(), ptr_type.into()], false);
+    self.module.add_function("fwrite", fwrite_type, Some(Linkage::External));
+
+    let fread_type = self.context.i64_type().fn_type(&[ptr_type.into(), self.context.i64_type().into(), self.context.i64_type().into(), ptr_type.into()], false);
+    self.module.add_function("fread", fread_type, Some(Linkage::External));
+
+    let fclose_type = self.context.i64_type().fn_type(&[ptr_type.into()], false);
+    self.module.add_function("fclose", fclose_type, Some(Linkage::External));
+
+    let fputs_type = self.context.i32_type().fn_type(&[ptr_type.into(), ptr_type.into()], true);
+    self.module.add_function("fputs", fputs_type, Some(Linkage::External));
   }
 
-  pub fn build(&mut self, code: String, ast: Vec<Expression>, verbose: bool, do_execute: bool) -> Result<(), Error> {
+  pub fn build(&mut self, code: String, ast: Vec<Expression>, namespaces: IndexMap<String, Namespace>, verbose: bool, do_execute: bool) -> Result<(), Error> {
     self.code = code;
+    self.namespaces = namespaces;
 
     // Prepare the program entry point
     let main_fn = self.create_main_function();
@@ -193,7 +209,11 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Print LLVM IR
     if verbose {
+      println!("------------------");
+      println!("------- IR -------");
+      println!("------------------");
       println!("{}", self.module.print_to_string().to_string());
+      println!("------------------");
     }
 
     // Print the symbol table
@@ -229,72 +249,105 @@ impl<'ctx> CodeGen<'ctx> {
     let mut block = main_fn.get_first_basic_block().unwrap();
 
     for expr in ast {
-      match expr.clone().expr {
-        Expr::BinaryOperator(_, _, _) => {
-          // Validate for allowed top level binop expressions
-          let res = self.visit(&expr.clone(), block);
-          println!("{:?}", res);
-        },
-        Expr::UnaryOperator(_, _) => {
-          // Validate for allowed top level unop expressions
-          self.visit(&expr.clone(), block)?;
-        },
-        Expr::Assignment(_, _, _) => {
-          self.build_assignment(expr, block, false)?;
-        },
-        Expr::TypeDef(name, value) => {
-          self.build_struct(Some(name), value)?;
-        },
-        Expr::Conditional(typ, expr, body, else_body) => {
-          block = self.build_if(typ, expr, body, else_body, main_fn, block, None, None)?;
-        },
-        Expr::ForLoop(value, expr, body) => {
-          block = self.build_for_loop(value, expr, body, main_fn, block)?;
-        },
-        Expr::WhileLoop(expr, body) => {
-          block = self.build_while_loop(expr, body, main_fn, block)?;
-        },
-        Expr::Call(_, _) => {
-          self.visit(&expr, block)?;
-        },
-        Expr::Function(name, ret_typ, params, body) => {
-          self.build_function(name, ret_typ, params, body, block)?;
-        },
-        Expr::Class(name, parents, body) => {
-          println!("Class: {:?} {:?} {:?}\n", name, parents, body);
-        },
-        Expr::Module(name, body) => {
-          println!("Module: {:?} {:?}\n", name, body);
-        },
-        Expr::Public(value) => {
-          println!("Public: {:?}", value);
-        }
-        // If we add a top level index expression
-        // i.e. hello[0].bye() or hello.bye()
-        // Expr::Index(parent, child) => {
-        //   self.build_index_extract(parent, child, block)?;
-        // },
-        // Expr::ArrayIndex(arr, index) => {
-        //   println!("ArrayIndex: {:?} {:?}\n", arr, index);
-        // },
-        _ => {
-          if let Expr::Literal(Literals::EOF) = expr.expr {
-            return Ok(block);
-          } else {
-            return Err(Error::new(
-              Error::CompilerError,
-              None,
-              self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
-              expr.first_pos,
-              expr.first_pos,
-              "Invalid top level expression".to_string()
-            ));
-          }
+      block = self.process_top(expr, main_fn, block)?;
+    }
+
+    return Ok(block);
+  }
+
+  fn process_top(&mut self, expr: Expression, main_fn: FunctionValue<'ctx>, block: BasicBlock<'ctx>) -> Result<BasicBlock<'ctx>, Error> {
+    let mut block = block;
+    match expr.clone().expr {
+      // TODO: Validate for allowed top level op expressions
+      // (Possibly move to parsing since we already validate for top level expressions there)
+      Expr::BinaryOperator(_, _, _) => {
+        self.visit(&expr.clone(), block)?;
+      },
+      Expr::UnaryOperator(_, _) => {
+        self.visit(&expr.clone(), block)?;
+      },
+
+      Expr::Assignment(_, _, _) => {
+        self.build_assignment(expr, block, false)?;
+      },
+      Expr::TypeDef(name, value) => {
+        self.build_struct(Some(name), value)?;
+      },
+      Expr::Conditional(typ, expr, body, else_body) => {
+        block = self.build_if(typ, expr, body, else_body, main_fn, block, None, None)?;
+      },
+      Expr::ForLoop(value, expr, body) => {
+        block = self.build_for_loop(value, expr, body, main_fn, block)?;
+      },
+      Expr::WhileLoop(expr, body) => {
+        block = self.build_while_loop(expr, body, main_fn, block)?;
+      },
+      Expr::Call(_, _) => {
+        self.visit(&expr, block)?;
+      },
+      Expr::Function(name, ret_typ, params, body) => {
+        self.build_function(name, ret_typ, params, body, block)?;
+      },
+      Expr::Class(name, parents, body) => {
+        println!("Class: {:?} {:?} {:?}\n", name, parents, body);
+      },
+      Expr::ModuleParsed(path, _, opts, ast) => {
+        self.build_module(expr, path, opts, ast, main_fn)?;
+      },
+      Expr::Public(expr) => {
+        block = self.process_top(*expr, main_fn, block)?;
+      }
+      // When we add top level index expressions
+      // i.e. hello[0].bye() or hello.bye() or module.property and module.method()
+      // Expr::Index(parent, child) => {
+      //   self.build_index_extract(parent, child, block)?;
+      // },
+      // Expr::ArrayIndex(arr, index) => {
+      //   println!("ArrayIndex: {:?} {:?}\n", arr, index);
+      // },
+      _ => {
+        if let Expr::Literal(Literals::EOF) = expr.expr {
+          return Ok(block);
+        } else {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+            expr.first_pos,
+            expr.first_pos,
+            "Invalid top level expression".to_string()
+          ));
         }
       }
     }
 
     return Ok(block);
+  }
+
+  /// Build imported modules
+  // TODO: Ensure that modules are properly contained
+  fn build_module(&mut self, _expr: Expression, path: Vec<Name>, _opts: Option<Vec<(Name, Option<Name>)>>, ast: Vec<Expression>, _main_fn: FunctionValue<'ctx>) -> Result<(), Error> {
+    let module_name = path.iter().map(|n| n.0.to_string()).collect::<Vec<String>>().join("/");
+    let module = self.context.create_module(module_name.as_str());
+
+    // Enter the module scope
+    self.enter_scope(false);
+
+    // Process the AST
+    self.process_ast(ast, _main_fn)?;
+
+    if let Err(e) = module.verify() {
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        &"",
+        Some(0),
+        Some(0),
+        e.to_string()
+      ));
+    }
+
+    return Ok(());
   }
 
   fn build_index_extract(&mut self, parent: Box<Expression>, child: Box<Expression>, block: BasicBlock<'ctx>) -> Result<BasicValueEnum<'ctx>, Error> {
@@ -612,14 +665,14 @@ impl<'ctx> CodeGen<'ctx> {
 
       return Ok(struct_type);
     } else {
-      Err(Error::new(
+      return Err(Error::new(
         Error::CompilerError,
         None,
         &"",
         Some(0),
         Some(0),
-        "Invalid struct definition".to_string()
-      ))
+        format!("Invalid struct definition at '{}'", struct_lit_name.unwrap_or(String::new()))
+      ));
     }
   }
 
@@ -755,7 +808,9 @@ impl<'ctx> CodeGen<'ctx> {
 
     // If the condition is a number, condition on the basis of it not being 0
     if let BasicValueEnum::IntValue(i) = cond {
-      cond = self.builder.build_int_compare(inkwell::IntPredicate::NE, i, i.get_type().const_int(0, false), "ifcond").unwrap().as_basic_value_enum();
+      if i.get_type().get_bit_width() != 1 {
+        cond = self.builder.build_int_compare(inkwell::IntPredicate::NE, i, i.get_type().const_int(0, false), "ifcond").unwrap().as_basic_value_enum();
+      }
     } else if let BasicValueEnum::FloatValue(f) = cond {
       cond = self.builder.build_float_compare(inkwell::FloatPredicate::ONE, f, f.get_type().const_float(0.0), "ifcond").unwrap().as_basic_value_enum();
 
@@ -1093,6 +1148,12 @@ impl<'ctx> CodeGen<'ctx> {
               self.builder.build_store(var, s).unwrap();
               self.set_symbol(name, Some(var), s.get_type().as_basic_type_enum(), s.into());
             },
+            // Strings
+            BasicValueEnum::ArrayValue(a) => {
+              let var = self.builder.build_alloca(a.get_type(), &name).unwrap();
+              self.builder.build_store(var, a).unwrap();
+              self.set_symbol(name, Some(var), a.get_type().as_basic_type_enum(), a.into());
+            },
             BasicValueEnum::PointerValue(a) => {
               let var = self.builder.build_alloca(self.context.ptr_type(AddressSpace::default()), &name).unwrap();
               self.builder.build_store(var, a).unwrap();
@@ -1116,9 +1177,15 @@ impl<'ctx> CodeGen<'ctx> {
             _ => panic!("Invalid type for const"),
           }
         },
-        // Custom type (we know exists from builder)
         _ => {
-          self.set_symbol(name, None, set.get_type(), set);
+          if ["int", "bool", "float", "string"].contains(&ty.0.as_str()) {
+            let var = self.builder.build_alloca(set.get_type(), &name).unwrap();
+            self.builder.build_store(var, set).unwrap();
+            self.set_symbol(name, Some(var), set.get_type(), set);
+          } else {
+            // Custom type (we know exists from builder)
+            self.set_symbol(name, None, set.get_type(), set);
+          }
         },
       }
     } else {
@@ -1322,6 +1389,7 @@ impl<'ctx> CodeGen<'ctx> {
       "int" => self.context.i64_type().fn_type(&parameters, variadic),
       "float" => self.context.f64_type().fn_type(&parameters, variadic),
       "void" => self.context.void_type().fn_type(&parameters, variadic),
+      "bool" => self.context.bool_type().fn_type(&parameters, variadic),
       _ => {
         if self.struct_table.contains_key(&returns) {
           let (struct_type, _) = self.struct_table.get(&returns).unwrap();
@@ -1427,7 +1495,11 @@ impl<'ctx> CodeGen<'ctx> {
       } else if let Expr::Conditional(typ, expr, body, ebody) = ex.expr.clone() {
         func_block = self.build_if(typ, expr, body, ebody, function, func_block, None, None)?;
 
-      // TODO: Implement loops in function body
+      } else if let Expr::ForLoop(val, expr, body) = ex.expr.clone() {
+        func_block = self.build_for_loop(val, expr, body, function, func_block)?;
+
+      } else if let Expr::WhileLoop(cond, body) = ex.expr.clone() {
+        func_block = self.build_while_loop(cond, body, function, func_block)?;
 
       } else if let Expr::Assignment(_, _, _) = ex.expr.clone() {
         self.build_assignment(ex.clone(), func_block, false)?;
@@ -1667,7 +1739,7 @@ impl<'ctx> CodeGen<'ctx> {
             None,
             &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
             expr.first_pos,
-            expr.last_line,
+            Some(expr.first_pos.unwrap() + name.0.len() as i32),
             format!("Unknown function: {}", name.0)
           ));
         }
@@ -1689,10 +1761,24 @@ impl<'ctx> CodeGen<'ctx> {
 
         let mut values: Vec<BasicValueEnum> = vec![];
         let mut meta: Vec<BasicMetadataValueEnum> = vec![];
+        let mut ptrs: IndexMap<usize, Option<PointerValue<'ctx>>> = IndexMap::new();
 
         // Build args
-        for (_, arg) in args.iter().enumerate() {
-          let val = self.visit(&arg, block)?;
+        for (i, arg) in args.iter().enumerate() {
+          let val: BasicValueEnum<'ctx>;
+
+          // If arg is an identifier (variable) get the pointer and value if possible
+          if let Expr::Literal(Literals::Identifier(Name(name), _)) = arg.expr.clone() {
+            let (ptr, value) = self.var_from_ident(name, arg)?;
+            val = value;
+            if ptr.is_some() {
+              ptrs.insert(i, ptr);
+            }
+
+          // Get the value
+          } else {
+            val = self.visit(&arg, block)?;
+          }
           match val.into() {
             BasicMetadataValueEnum::IntValue(int_value) => {
               let int_type = int_value.get_type();
@@ -1739,10 +1825,16 @@ impl<'ctx> CodeGen<'ctx> {
           let param_type = param.get_type();
           if param_type.is_pointer_type() {
             if !values[i].is_pointer_value() {
-              let ptr = self.builder.build_alloca(param_type, "ptr").unwrap();
-              // self.tag_ptr(ptr, self.get_tag_by_type(values[i].get_type()));
-              self.builder.build_store(ptr, values[i]).unwrap();
-              meta[i] = ptr.into();
+              // If we can get original pointer of value
+              if ptrs.get(&i).is_some() {
+                meta[i] = ptrs.get(&i).unwrap().unwrap().into();
+              // Build new pointer
+              } else {
+                let ptr = self.builder.build_alloca(param_type, "ptr").unwrap();
+                // self.tag_ptr(ptr, self.get_tag_by_type(values[i].get_type()));
+                self.builder.build_store(ptr, values[i]).unwrap();
+                meta[i] = ptr.into();
+              }
             }
           }
         }
@@ -1812,28 +1904,30 @@ impl<'ctx> CodeGen<'ctx> {
       Literals::Null => {
         return Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum());
       },
-      Literals::Identifier(n, _) => {
-        if let Some((_, ptr, typ, val, _exited_func)) = self.get_symbol(&n.0)? {
-          // Constant value
-          if ptr.is_none() {
-            return Ok(val)
-          // If there's a pointer, load the value behind the identifier
-          } else {
-            let var = self.builder.build_load(typ, ptr.unwrap(), &n.0).unwrap();
-            return Ok(var);
-          }
-        } else {
-          return Err(Error::new(
-            Error::CompilerError,
-            None,
-            &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-            expr.first_pos,
-            expr.last_line,
-            format!("Unknown identifier: {}", n.0)
-          ));
-        }
-      },
+      Literals::Identifier(n, _) => Ok(self.var_from_ident(n.0, expr)?.1),
       Literals::EOF => todo!(),
+    }
+  }
+
+  fn var_from_ident(&self, name: String, expr: &Expression) -> Result<(Option<PointerValue<'ctx>>, BasicValueEnum<'ctx>), Error> {
+    if let Some((_, ptr, typ, val, _exited_func)) = self.get_symbol(&name)? {
+      // Constant value
+      if ptr.is_none() || typ.is_array_type() {
+        return Ok((None, val));
+      // If there's a pointer, load the value behind the identifier
+      } else {
+        let var = self.builder.build_load(typ, ptr.unwrap(), &name).unwrap();
+        return Ok((ptr, var));
+      }
+    } else {
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+        expr.first_pos,
+        Some(expr.first_pos.unwrap() + name.len() as i32),
+        format!("Unknown identifier: {}", name)
+      ));
     }
   }
 
@@ -1867,6 +1961,11 @@ impl<'ctx> CodeGen<'ctx> {
             }
           },
           "!" => {
+            if val.is_pointer_value() {
+              let null = self.context.ptr_type(AddressSpace::default()).const_null();
+              let cmp = self.builder.build_int_compare(inkwell::IntPredicate::EQ, val.into_pointer_value(), null, "notcmp").unwrap();
+              return Ok(self.builder.build_int_z_extend(cmp, self.context.i64_type(), "nottmp").unwrap().as_basic_value_enum());
+            }
             return Ok(self.builder.build_not(val.into_int_value(), "nottmp").unwrap().as_basic_value_enum());
           },
           // Pre-increment (return the new value)
@@ -1959,7 +2058,17 @@ impl<'ctx> CodeGen<'ctx> {
       (BasicValueEnum::FloatValue(_), _) => "float".to_string(),
       (_, BasicValueEnum::FloatValue(_)) => "float".to_string(),
       // Both values are integers
-      (BasicValueEnum::IntValue(_), BasicValueEnum::IntValue(_)) => "int".to_string(),
+      (BasicValueEnum::IntValue(a), BasicValueEnum::IntValue(b)) => {
+
+        // If only one of the values is a bool, convert it to an int
+        if a.get_type().get_bit_width() == 1 && b.get_type().get_bit_width() == 64 {
+          left = self.builder.build_int_z_extend(a, self.context.i64_type(), "left_int").unwrap().as_basic_value_enum();
+        } else if a.get_type().get_bit_width() == 64 && b.get_type().get_bit_width() == 1 {
+          right = self.builder.build_int_z_extend(b, self.context.i64_type(), "right_int").unwrap().as_basic_value_enum();
+        }
+
+        "int".to_string()
+      },
       (BasicValueEnum::PointerValue(a), BasicValueEnum::PointerValue(b)) => {
         // Get symbols from pointer names
         println!("a: {:?}\nb: {:?}", a, b);
@@ -2156,22 +2265,70 @@ impl<'ctx> CodeGen<'ctx> {
             return Ok(self.builder.build_or(left.into_int_value(), right.into_int_value(), "ortmp").unwrap().as_basic_value_enum());
           },
           "==" => {
-            return Ok(self.builder.build_int_compare(inkwell::IntPredicate::EQ, left.into_int_value(), right.into_int_value(), "eqtmp").unwrap().as_basic_value_enum());
+            match typ.as_str() {
+              "float" => {
+                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OEQ, left.into_float_value(), right.into_float_value(), "eqtmp").unwrap().as_basic_value_enum());
+              },
+              "int" => {
+                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::EQ, left.into_int_value(), right.into_int_value(), "eqtmp").unwrap().as_basic_value_enum());
+              },
+              _ => panic!("Invalid types for equality"), // TODO: pretty up errors
+            }
           },
           "!=" => {
-            return Ok(self.builder.build_int_compare(inkwell::IntPredicate::NE, left.into_int_value(), right.into_int_value(), "netmp").unwrap().as_basic_value_enum());
+            match typ.as_str() {
+              "float" => {
+                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::ONE, left.into_float_value(), right.into_float_value(), "netmp").unwrap().as_basic_value_enum());
+              },
+              "int" => {
+                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::NE, left.into_int_value(), right.into_int_value(), "netmp").unwrap().as_basic_value_enum());
+              },
+              _ => panic!("Invalid types for inequality"), // TODO: pretty up errors
+            }
           },
           ">" => {
-            return Ok(self.builder.build_int_compare(inkwell::IntPredicate::UGT, left.into_int_value(), right.into_int_value(), "gttmp").unwrap().as_basic_value_enum());
+            match typ.as_str() {
+              "float" => {
+                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OGT, left.into_float_value(), right.into_float_value(), "gttmp").unwrap().as_basic_value_enum());
+              },
+              "int" => {
+                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::SGT, left.into_int_value(), right.into_int_value(), "gttmp").unwrap().as_basic_value_enum());
+              },
+              _ => panic!("Invalid types for greater than"), // TODO: pretty up errors
+            }
           },
           "<" => {
-            return Ok(self.builder.build_int_compare(inkwell::IntPredicate::ULT, left.into_int_value(), right.into_int_value(), "lttmp").unwrap().as_basic_value_enum());
+            match typ.as_str() {
+              "float" => {
+                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OLT, left.into_float_value(), right.into_float_value(), "lttmp").unwrap().as_basic_value_enum());
+              },
+              "int" => {
+                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::SLT, left.into_int_value(), right.into_int_value(), "lttmp").unwrap().as_basic_value_enum());
+              },
+              _ => panic!("Invalid types for less than"), // TODO: pretty up errors
+            }
           },
           ">=" => {
-            return Ok(self.builder.build_int_compare(inkwell::IntPredicate::UGE, left.into_int_value(), right.into_int_value(), "getmp").unwrap().as_basic_value_enum());
+            match typ.as_str() {
+              "float" => {
+                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OGE, left.into_float_value(), right.into_float_value(), "getmp").unwrap().as_basic_value_enum());
+              },
+              "int" => {
+                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::SGE, left.into_int_value(), right.into_int_value(), "getmp").unwrap().as_basic_value_enum());
+              },
+              _ => panic!("Invalid types for greater than or equal"), // TODO: pretty up errors
+            }
           },
           "<=" => {
-            return Ok(self.builder.build_int_compare(inkwell::IntPredicate::ULE, left.into_int_value(), right.into_int_value(), "letmp").unwrap().as_basic_value_enum());
+            match typ.as_str() {
+              "float" => {
+                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OLE, left.into_float_value(), right.into_float_value(), "letmp").unwrap().as_basic_value_enum());
+              },
+              "int" => {
+                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::SLE, left.into_int_value(), right.into_int_value(), "letmp").unwrap().as_basic_value_enum());
+              },
+              _ => panic!("Invalid types for less than or equal"), // TODO: pretty up errors
+            }
           },
           "+=" => {
             match typ.as_str() {
@@ -2235,8 +2392,8 @@ mod tests {
     a = 3;
     let c = a + b;".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), false, false)?;
-    codegen.build(code, ast, false, true)?;
+    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    codegen.build(code, ast, IndexMap::new(), false, true)?;
     return Ok(());
   }
 
@@ -2248,8 +2405,8 @@ mod tests {
     let b = 2;
     printf(\"a:%d b:%d\", a, b);".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), false, false)?;
-    codegen.build(code, ast, false, true)?;
+    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    codegen.build(code, ast, IndexMap::new(), false, true)?;
     return Ok(());
   }
 
@@ -2261,8 +2418,8 @@ mod tests {
     let b = a[0];
     printf(\"b:%d\", b);".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), false, false)?;
-    codegen.build(code, ast, false, true)?;
+    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    codegen.build(code, ast, IndexMap::new(), false, true)?;
     return Ok(());
   }
 }

@@ -1,5 +1,4 @@
 use inkwell::context::Context;
-use jink::TokenTypes;
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -8,7 +7,6 @@ use std::io::Write;
 mod compiler;
 mod interpreter;
 use compiler::builder::CodeGen;
-use compiler::lexer::Lexer;
 use compiler::parser::Parser;
 use interpreter::simulator::Simulator;
 
@@ -45,38 +43,37 @@ fn main() {
   let code = fs::read_to_string(&args[1])
     .expect("Failed to read file.");
 
-  let mut lexer = Lexer::new();
-  let lexed = lexer.lex(code.clone(), false);
+  let mut parser = Parser::new();
+  let parsed = parser.parse(
+    code.clone(),
+    fs::canonicalize(args[1].clone()).unwrap().to_str().unwrap().to_string(),
+    verbose,
+    false
+  );
+
+  // Verbose flag output to print namespace info
   if verbose {
-    println!("Tokens:");
-    let mut cur = 0;
-    let mut line: Vec<String> = vec![];
-    for token in lexed.clone().iter() {
-      if token.of_type == TokenTypes::Newline { continue; }
-
-      if !line.is_empty() {
-        if cur != token.line {
-          println!("{:4} | {}", cur, line.join(" "));
-          line.clear();
-        } else {
-          // line.push(token.value.as_ref().unwrap().to_owned());
-          line.push(token.of_type.to_string());
-          continue;
-        }
+    println!("------------------");
+    println!("--- Namespaces ---");
+    println!("------------------");
+    for (namespace, ns) in parser.namespaces.iter() {
+      if ns.names.is_empty() { continue; }
+      println!("Namespace: {}", namespace);
+      println!("  Names:");
+      for (name, _) in ns.names.iter() {
+        println!("   - {}", name);
       }
-
-      cur = token.line;
-      // line.push(token.value.as_ref().unwrap().to_owned());
-      line.push(token.of_type.to_string());
-
-      if cur == lexed.len() as i32 {
-        println!("{:4} | {}", cur, line.join(" "));
+      println!("  Dependencies:");
+      for (name, deps) in ns.dependencies.iter() {
+        println!("   - {}: {:?}", name, deps);
+      }
+      println!(  "Import dependencies:");
+      for (name, deps) in ns.imports.iter() {
+        println!("   - {}: {:?}", name, deps);
       }
     }
   }
 
-  let mut parser = Parser::new();
-  let parsed = parser.parse(code.clone(), verbose, false);
   if let Err(err) = parsed {
     println!("{}", err);
     return;
@@ -104,6 +101,7 @@ fn main() {
     let main = builder.build(
       code.clone(),
       parsed.unwrap(),
+      parser.namespaces,
       verbose,
       do_execute
     );

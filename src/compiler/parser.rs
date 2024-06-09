@@ -1,3 +1,5 @@
+use indexmap::IndexMap;
+
 use jink::Error;
 use jink::FutureIter;
 use jink::Token;
@@ -10,12 +12,37 @@ use jink::Expr;
 use jink::Type;
 
 use super::lexer::Lexer;
+use super::module_loader;
+
+#[derive(Debug)]
+pub struct Namespace {
+  // TODO: Maybe wiser to store array index of expression in AST instead of the expression itself here
+  // Would need to make AST part of the parser struct and add a flag not to push to it when parsing modules
+  // TODO: Keep track of public names
+  pub names: IndexMap<String, Expression>,
+  // dependency; dependent
+  pub dependencies: IndexMap<String, Vec<String>>,
+  // module; (name; alias)
+  pub imports: IndexMap<String, Option<Vec<(Option<String>, Option<String>)>>>
+}
 
 pub struct Parser {
   pub code: String,
   pub iter: FutureIter,
+  pub verbose: bool,
   pub testing: bool,
   pub in_loop: bool,
+  pub is_indexing: bool,
+  /// Current namespace absolute path
+  pub current_namespace: String,
+  /// Current named item (imports and function, class and type definitions)
+  /// If None, we are in the main scope
+  pub current_name: Option<String>,
+  /// The current scope's *definitions* that we can ignore when storing dependencies
+  /// (they are already within the namespace if locally defined)
+  pub current_scope_defs: Vec<String>,
+  /// Namespace absolute path; Namespace
+  pub namespaces: IndexMap<String, Namespace>,
 }
 
 impl Parser {
@@ -23,18 +50,33 @@ impl Parser {
     Parser {
       code: String::new(),
       iter: FutureIter::new(vec![]),
+      verbose: false,
       testing: false,
       in_loop: false,
+      is_indexing: false,
+      current_namespace: String::new(),
+      current_name: None,
+      current_scope_defs: Vec::new(),
+      namespaces: IndexMap::new(),
     }
   }
 
   // Build AST
-  pub fn parse(&mut self, code: String, _verbose: bool, testing: bool) -> Result<Vec<Expression>, Error> {
+  pub fn parse(&mut self, code: String, main_file_path: String, verbose: bool, testing: bool) -> Result<Vec<Expression>, Error> {
     let tokens = Lexer::new().lex(code.clone(), false);
     let iterator = FutureIter::new(tokens);
     self.code = code;
     self.iter = iterator;
+    self.verbose = verbose;
     self.testing = testing;
+
+    // Add main namespace
+    self.current_namespace = main_file_path.clone();
+    self.namespaces.insert(main_file_path, Namespace {
+      names: IndexMap::new(),
+      dependencies: IndexMap::new(),
+      imports: IndexMap::new()
+    });
 
     let mut ast: Vec<Expression> = Vec::new();
     while self.iter.current.is_some() {
@@ -42,9 +84,7 @@ impl Parser {
       let parsed: Result<Expression, Error> = self.parse_top();
 
       // Error
-      if let Err(err) = parsed {
-        return Err(err);
-      }
+      if let Err(err) = parsed { return Err(err); }
 
       // Validate top level expressions
       if parsed.as_ref().unwrap().expr != Expr::Literal(Literals::EOF) {
@@ -53,7 +93,7 @@ impl Parser {
           Expr::Call(_, _) => {},
           Expr::TypeDef(_, _) => {},
           Expr::Class(_, _, _) => {},
-          Expr::Module(_, _) => {},
+          Expr::ModuleParsed(_, _, _, _) => {},
           Expr::Assignment(_, _, _) => {},
           Expr::Conditional(_, _, _, _) => {},
           Expr::UnaryOperator(_, _) => {},
@@ -68,8 +108,8 @@ impl Parser {
               Some(self.iter.current.as_ref().unwrap().clone()),
               self.code.lines().nth((parsed.as_ref().unwrap().first_line.unwrap() - 1) as usize).unwrap(),
               parsed.as_ref().unwrap().first_pos,
-              parsed.as_ref().unwrap().last_line,
-              "Unexpected expression".to_string()
+              parsed.as_ref().unwrap().first_pos,
+              "Unexpected top level expression".to_string()
             ));
           }
         }
@@ -78,15 +118,275 @@ impl Parser {
       // End of file
       if self.iter.current.is_none() || self.iter.current.as_ref().unwrap().of_type == TokenTypes::EOF {
         ast.push(parsed.unwrap());
+
         return Ok(ast);
       }
 
-      // Distinguish expressions in the main scope
+      // End of statement
       self.consume(&[TokenTypes::Semicolon, TokenTypes::Newline], false)?;
       ast.push(parsed.unwrap());
     }
 
     return Ok(ast);
+  }
+
+  /// Load module via constructed index expression
+  /// 
+  /// Loads module, attaches AST to expression, builds namespace and returns expression back
+  fn process_module(&mut self, expr: Expression) -> Result<Vec<Expression>, Error> {
+    if let Expr::Module(path, is_aliased, names) = expr.expr.clone() {
+      let code = module_loader::load_module(path.clone(), self.verbose);
+      if code.is_none() {
+        return Err(Error::new(
+          Error::ImportError,
+          None,
+          &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+          expr.first_pos,
+          expr.first_pos,
+          format!("Could not resolve module path: '/{}.jk'", path.iter().map(|n| n.0.to_string()).collect::<Vec<String>>().join("/")),
+        ));
+      }
+
+      // Store current state
+      let remaining = self.iter.dump();
+      let store_code = self.code.clone();
+      let store_namespace = self.current_namespace.clone();
+
+      // Parse module
+      let module = path.iter().map(|n| n.0.to_string()).collect::<Vec<String>>().join("/");
+      self.current_namespace = module.clone();
+      let ast = self.parse(code.unwrap(), self.current_namespace.clone(), self.verbose, self.testing)?;
+
+      // Restore state
+      self.iter.load(remaining);
+      self.code = store_code;
+      self.current_namespace = store_namespace;
+
+      // Add import names to current namespace so dependencies can be resolved
+      if names.is_none() {
+        // Add every public name to the import dependencies / namespace
+        if path.last().unwrap().0 == "*" {
+          for expr in ast.clone() {
+            if let Expr::Public(exp) = expr.expr {
+              if let Expr::TypeDef(Literals::Identifier(Name(name), _), _) = exp.expr.clone() {
+                self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
+              } else if let Expr::Function(Name(name), _, _, _) = exp.expr.clone() {
+                self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
+              } else if let Expr::Class(Name(name), _, _) = exp.expr.clone() {
+                self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
+              } else if let Expr::Assignment(ty, lit, _) = exp.expr.clone() {
+                if ty.is_none() { continue; }
+                if let Expr::Literal(Literals::Identifier(Name(name), _)) = lit.expr {
+                  self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
+                }
+              }
+            }
+          }
+        // Add module name to namespace
+        } else {
+          self.add_import_dependency(None, None, module.to_string(), expr.clone())?;
+        }
+      } else {
+        for (Name(name), alias) in names.as_ref().unwrap() {
+          // If alias, add alias to namespace
+          if alias.is_some() {
+
+            // The module itself is aliased, no `from` names were specified
+            if is_aliased {
+              self.add_import_dependency(None, Some(alias.clone().unwrap().0), module.to_string(), expr.clone())?;
+            } else {
+              self.add_import_dependency(Some(name.to_string()), Some(alias.clone().unwrap().0), module.to_string(), expr.clone())?;
+            }
+
+          // If not, add name to namespace
+          } else {
+            self.add_import_dependency(Some(name.to_string()), None, module.to_string(), expr.clone())?;
+          }
+        }
+      }
+
+      return Ok(ast);
+    } else {
+      unreachable!();
+    }
+  }
+
+  /// Enter a definition scope
+  /// Assignments, functions, classes and type definitions
+  fn enter_scope(&mut self, name: String) {
+    // If we are already in a scope, push the current name to the list of scoped definitions
+    if self.current_name.is_some() {
+      self.current_scope_defs.push(name);
+
+    // Otherwise, set the current name
+    } else {
+      self.current_name = Some(name);
+    }
+  }
+
+  /// Exit a definition scope
+  fn exit_scope(&mut self) {
+    self.current_name = None;
+  }
+
+  /// Add various import dependencies to the current namespace
+  /// 
+  /// No name means the whole module is being imported
+  fn add_import_dependency(&mut self, name: Option<String>, alias: Option<String>, from: String, expr: Expression) -> Result<(), Error> {
+    let namespace = self.namespaces.get_mut(self.current_namespace.as_str());
+    if namespace.is_none() {
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        "",
+        Some(0),
+        Some(0),
+        format!("Namespace not defined: {}", self.current_namespace)
+      ));
+    }
+
+    let f = from.split("/").last().unwrap();
+    if alias.is_none() {
+      if namespace.as_ref().unwrap().names.contains_key(f) {
+        return Err(Error::new(
+          Error::NameError,
+          None,
+          "",
+          Some(0),
+          Some(0),
+          format!("Name '{}' from '{}' already defined in file {}", f, from, self.current_namespace)
+        ));
+      }
+    } else {
+      if namespace.as_ref().unwrap().names.contains_key(alias.as_ref().unwrap().as_str()) {
+        return Err(Error::new(
+          Error::NameError,
+          None,
+          self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+          expr.first_pos,
+          expr.first_pos,
+          format!("Name '{}' already defined in scope", alias.as_ref().unwrap())
+        ));
+      }
+    }
+
+    for (path, _) in namespace.as_ref().unwrap().imports.iter() {
+      let p = path.split("/").last().unwrap();
+      if name.is_none() && alias.is_none() && p != "*" && f != "*" && p == f {
+        return Err(Error::new(
+          Error::ImportError,
+          None,
+          self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+          expr.first_pos,
+          expr.first_pos,
+          format!("Name '{}' from '{}' already imported in file {}", f, from, self.current_namespace) 
+        ));
+      }
+    }
+
+    // Import location exists
+    if namespace.as_ref().unwrap().imports.contains_key(from.as_str()) {
+      // Continue adding import names to existing list
+      if let Some(list) = namespace.unwrap().imports.get_mut(from.as_str()).unwrap() {
+        list.push((name, alias));
+
+      // List doesn't exist but import does, we already imported the whole module
+      } else {
+        return Err(Error::new(
+          Error::ImportError,
+          None,
+          self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+          expr.first_pos,
+          expr.first_pos,
+          format!("Whole module has already been imported: '{}'.", from)
+        ));
+      }
+
+    // Location isn't set yet
+    } else {
+      // No name so full module is being imported
+      if name.is_none() {
+        if alias.is_none() {
+          namespace.unwrap().imports.insert(from, None);
+
+        // Aliased import
+        } else {
+          namespace.unwrap().imports.insert(from, Some(vec![(None, alias)]));
+        }
+
+      // from { name as alias }
+      } else {
+        namespace.unwrap().imports.insert(from, Some(vec![(name, alias)]));
+      }
+    }
+
+    return Ok(());
+  }
+
+  /// Add named items (imports and function, class and type definitions) to the current namespace
+  fn add_name(&mut self, name: String, expr: Expression) -> Result<(), Error> {
+    let mut namespace = self.namespaces.get_mut(self.current_namespace.as_str());
+    if namespace.is_none() {
+      self.namespaces.insert(self.current_namespace.clone(), Namespace {
+        names: IndexMap::new(),
+        dependencies: IndexMap::new(),
+        imports: IndexMap::new()
+      });
+      namespace = self.namespaces.get_mut(self.current_namespace.as_str());
+    }
+
+    // If we are not in a scope, add the name to the namespace
+    if self.current_name.is_none() {
+      if namespace.as_ref().unwrap().names.contains_key(name.as_str()) {
+        return Err(Error::new(
+          Error::NameError,
+          None,
+          self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+          expr.first_pos,
+          expr.first_pos,
+          format!("Name '{}' already defined in scope", name)
+        ));
+      }
+      namespace.unwrap().names.insert(name, expr);
+
+    // If we are in a scope, add the name to the namespace if it is not in the list of scoped definitions
+    } else {
+      if !self.current_scope_defs.contains(&name) {
+        namespace.unwrap().names.insert(name, expr);
+      }
+    }
+
+    return Ok(());
+  }
+
+  /// Add dependencies (names that depend upon others) to the current namespace
+  /// 
+  /// If there is no current_name, we are in the main scope and we can ignore dependencies
+  fn add_dependency(&mut self, dependency: String) -> Result<(), Error> {
+    let namespace = self.namespaces.get_mut(self.current_namespace.as_str());
+    if namespace.is_none() {
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        "",
+        Some(0),
+        Some(0),
+        format!("Namespace not defined: {}", self.current_namespace)
+      ));
+    }
+
+    if self.current_name.is_none() { return Ok(()); }
+
+    // Add dependency to the namespace
+    if namespace.as_ref().unwrap().dependencies.contains_key(self.current_name.as_ref().unwrap()) {
+      if !namespace.as_ref().unwrap().dependencies.values().any(|deps| deps.contains(&dependency)) {
+        namespace.unwrap().dependencies.get_mut(self.current_name.as_ref().unwrap()).unwrap().push(dependency);
+      }
+    } else {
+      namespace.unwrap().dependencies.insert(self.current_name.as_ref().unwrap().to_owned(), vec![dependency]);
+    }
+
+    return Ok(());
   }
 
   fn get_expr(&self, expr: Expr, first_line: Option<i32>, first_pos: Option<i32>, last_line: Option<i32>) -> Expression {
@@ -205,7 +505,7 @@ impl Parser {
       return Err(Error::new(
         Error::UnexpectedToken,
         Some(init.unwrap().clone()),
-        self.code.lines().nth((init.unwrap().line) as usize - 1).unwrap(),
+        self.code.lines().nth((init.unwrap().line - 1) as usize).unwrap(),
         init.unwrap().start_pos,
         init.unwrap().end_pos,
         "Unexpected token".to_string()
@@ -352,10 +652,18 @@ impl Parser {
           Some(ident.line), ident.start_pos, Some(ident.line)
         ));
 
+      // Index
       } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "." {
+        // Add top-most identifier being indexed as a dependency
+        if !self.is_indexing {
+          self.add_dependency(ident.value.as_ref().unwrap().to_owned())?;
+        }
         return self.parse_index(ident);
 
+      // Array index
       } else if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type == TokenTypes::LBracket {
+        // Add top-most identifier being indexed as a dependency
+        self.add_dependency(ident.value.as_ref().unwrap().to_owned())?;
         return self.parse_array_index(ident);
 
       // Call
@@ -459,13 +767,13 @@ impl Parser {
 
         let expression = self.parse_top()?;
 
-        match expression.expr {
+        match expression.expr.clone() {
           Expr::Class(_, _, _) | Expr::Function(_, _, _, _) | Expr::TypeDef(_, _) => {
             return Ok(self.get_expr(Expr::Public(Box::new(expression)),
               Some(token.line), token.start_pos, token.end_pos
             ));
           },
-          Expr::Assignment(typ, _, _) => {
+          Expr::Assignment(typ, name_expr, _) => {
             if typ.is_none() {
               return Err(Error::new(
                 Error::UnexpectedToken,
@@ -474,6 +782,13 @@ impl Parser {
                 token.start_pos,
                 token.end_pos,
                 "Expected named expression after \"pub\"".to_string()
+              ));
+            }
+
+            if let Expr::Literal(Literals::Identifier(Name(name), _)) = name_expr.expr {
+              self.add_name(name.to_string(), expression.clone())?;
+              return Ok(self.get_expr(Expr::Public(Box::new(expression)),
+                Some(token.line), token.start_pos, token.end_pos
               ));
             }
           },
@@ -525,7 +840,7 @@ impl Parser {
     } else if [TokenTypes::Newline, TokenTypes::Semicolon].contains(&self.iter.current.as_ref().unwrap().of_type) {
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())), None)),
           Some(identifier.line), identifier.start_pos, Some(identifier.line)
         )),
         None
@@ -535,7 +850,7 @@ impl Parser {
       let assign = self.parse_expression(0)?;
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())), None)),
           Some(identifier.line), identifier.start_pos, Some(identifier.line)
         )),
         Some(Box::new(assign.clone()))
@@ -543,7 +858,7 @@ impl Parser {
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RParen {
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())), None)),
           Some(identifier.line), identifier.start_pos, Some(identifier.line)
         )),
         None
@@ -552,11 +867,20 @@ impl Parser {
       let assign = self.parse_expression(0)?;
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)),
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())), None)),
           Some(identifier.line), identifier.start_pos, Some(identifier.line)
         )),
         Some(Box::new(assign.clone()))
       ), Some(identifier.line), identifier.start_pos, assign.last_line);
+    }
+
+    // If type (let a = 5), definition
+    if typ.is_some() {
+      self.add_name(identifier.value.as_ref().unwrap().to_owned(), assignment.clone())?;
+
+    // If no type (a = 5), reassigment
+    } else {
+      self.add_dependency(identifier.value.as_ref().unwrap().to_owned())?;
     }
 
     return Ok(assignment);
@@ -614,14 +938,18 @@ impl Parser {
     // If type alias
     if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Identifier {
       let t = self.iter.next().unwrap();
-      return Ok(self.get_expr(Expr::TypeDef(
-        Literals::Identifier(Name(String::from(ident.value.unwrap())), None),
+      let type_alias = self.get_expr(Expr::TypeDef(
+        Literals::Identifier(Name(String::from(ident.value.clone().unwrap())), None),
         Box::new(Literals::Identifier(Name(String::from(t.value.unwrap())), None))
-      ), Some(ident.line), ident.start_pos, Some(t.line)));
+      ), Some(ident.line), ident.start_pos, Some(t.line));
+      self.add_name(ident.value.unwrap(), type_alias.clone())?;
+      return Ok(type_alias);
 
     // If typedef / struct
     } else {
-      return self.parse_object(Some(ident));
+      let struct_type = self.parse_object(Some(ident.clone()))?;
+      self.add_name(ident.value.unwrap(), struct_type.clone())?;
+      return Ok(struct_type);
     }
   }
 
@@ -840,9 +1168,12 @@ impl Parser {
     }
   }
 
+  /// Parse index chain (recursive)
   fn parse_index(&mut self, identifier: Token) -> Result<Expression, Error> {
     self.iter.next(); // Consume `.`
+    self.is_indexing = true;
     let index = self.parse_expression(0)?;
+    self.is_indexing = false;
 
     return Ok(self.get_expr(Expr::Index(
       Box::new(self.get_expr(Expr::Literal(
@@ -868,6 +1199,11 @@ impl Parser {
   }
 
   fn parse_call(&mut self, identifier: Token) -> Result<Expression, Error> {
+    // Save name if this is a function call and not an index/method call
+    if !self.is_indexing {
+      self.add_dependency(identifier.value.as_ref().unwrap().to_owned())?;
+    }
+
     let args = self.parse_args_params("args")?;
     return Ok(self.get_expr(Expr::Call(Name(identifier.value.unwrap().to_owned()), Box::new(args)),
       Some(identifier.line),
@@ -890,12 +1226,14 @@ impl Parser {
       return_type = Some(self.consume(&[TokenTypes::Identifier], false)?);
     }
 
+    self.enter_scope(identifier.value.as_ref().unwrap().to_owned());
     let body = self.parse_func_block()?;
+    self.exit_scope();
 
     if return_type.is_some() {
-      return Ok(self.get_expr(
+      let func = self.get_expr(
         Expr::Function(
-          Name(identifier.value.unwrap().to_owned()),
+          Name(identifier.clone().value.unwrap().to_owned()),
           Some(Literals::Identifier(Name(return_type.unwrap().value.unwrap()), None)),
           Some(Box::new(params)),
           Some(Box::new(body))
@@ -903,11 +1241,13 @@ impl Parser {
         Some(init.as_ref().unwrap().line),
         init.unwrap().start_pos,
         Some(self.iter.current.as_ref().unwrap().line)
-      ));
+      );
+      self.add_name(identifier.value.as_ref().unwrap().to_owned(), func.clone())?;
+      return Ok(func);
     } else {
-      return Ok(self.get_expr(
+      let func = self.get_expr(
         Expr::Function(
-          Name(identifier.value.unwrap().to_owned()),
+          Name(identifier.clone().value.unwrap().to_owned()),
           None,
           Some(Box::new(params)),
           Some(Box::new(body))
@@ -915,7 +1255,9 @@ impl Parser {
         Some(init.as_ref().unwrap().line),
         init.unwrap().start_pos,
         Some(self.iter.current.as_ref().unwrap().line)
-      ));
+      );
+      self.add_name(identifier.value.as_ref().unwrap().to_owned(), func.clone())?;
+      return Ok(func);
     }
   }
 
@@ -1276,7 +1618,7 @@ impl Parser {
         "",
         Some(0),
         Some(0),
-        "Expected '}' to end for loop block, got end of file.".into(),
+        "Expected '}' to end loop body, got end of file.".into(),
       ));
     }
 
@@ -1338,17 +1680,21 @@ impl Parser {
     let end = self.consume(&[TokenTypes::RBrace], false)?;
 
     if parents.is_some() {
-      return Ok(self.get_expr(Expr::Class(
-        Name(ident.value.unwrap()),
+      let cls = self.get_expr(Expr::Class(
+        Name(ident.value.clone().unwrap()),
         parents,
         Some(Box::new(body))
-      ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(end.line)));
+      ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(end.line));
+      self.add_name(ident.value.unwrap(), cls.clone())?;
+      return Ok(cls);
     } else {
-      return Ok(self.get_expr(Expr::Class(
-        Name(ident.value.unwrap()),
+      let cls = self.get_expr(Expr::Class(
+        Name(ident.value.clone().unwrap()),
         None,
         Some(Box::new(body))
-      ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(end.line)));
+      ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(end.line));
+      self.add_name(ident.value.unwrap(), cls.clone())?;
+      return Ok(cls);
     }
   }
 
@@ -1432,18 +1778,38 @@ impl Parser {
 
         // No alias
         if alias.is_none() {
-          return Ok(self.get_expr(Expr::Module(vec![Name(String::from(index[0].value.as_ref().unwrap()))], None),
+          let idx = vec![Name(String::from(index[0].value.as_ref().unwrap()))];
+          let expr = self.get_expr(Expr::Module(idx.clone(), false, None),
             Some(init.as_ref().unwrap().line),
             init.unwrap().start_pos,
             Some(index[0].line)
-          ));
+          );
+          let mut parsed = expr.clone();
+          parsed.expr = Expr::ModuleParsed(
+            idx,
+            false,
+            None,
+            self.process_module(expr.clone())?
+          );
+          return Ok(parsed);
         }
 
         // Alias
-        return Ok(self.get_expr(Expr::Module(
-          vec![Name(String::from(index[0].value.as_ref().unwrap()))],
-          Some(vec![(name, alias)])
-        ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(index[0].line)));
+        let idx = vec![Name(String::from(index[0].value.as_ref().unwrap()))];
+        let names = Some(vec![(name, alias)]);
+        let expr = self.get_expr(Expr::Module(
+          idx.clone(),
+          true,
+          names.clone()
+        ), Some(init.as_ref().unwrap().line), init.unwrap().start_pos, Some(index[0].line));
+        let mut parsed = expr.clone();
+        parsed.expr = Expr::ModuleParsed(
+          idx,
+          true,
+          names.clone(),
+          self.process_module(expr.clone())?
+        );
+        return Ok(parsed);
       }
 
       // Has index //
@@ -1453,27 +1819,44 @@ impl Parser {
 
       // No alias
       if alias.is_none() {
-        return Ok(
-          self.get_expr(Expr::Module(
-            index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
-            None
-          ),
+        let idx = index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>();
+        let expr = self.get_expr(Expr::Module(
+          idx.clone(),
+          false,
+          None),
           Some(init.as_ref().unwrap().line),
           init.unwrap().start_pos,
           Some(index.last().unwrap().line)
-        ));
+        );
+        let mut parsed = expr.clone();
+        parsed.expr = Expr::ModuleParsed(
+          idx,
+          false,
+          None,
+          self.process_module(expr.clone())?
+        );
+        return Ok(parsed);
       }
 
       // Alias
-      return Ok(
-        self.get_expr(Expr::Module(
-          index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
-          Some(vec![(name, alias)])
-        ),
+      let idx = index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>();
+      let names = Some(vec![(name, alias)]);
+      let expr = self.get_expr(Expr::Module(
+        idx.clone(),
+        true,
+        names.clone()),
         Some(init.as_ref().unwrap().line),
         init.unwrap().start_pos,
         Some(index.last().unwrap().line)
-      ));
+      );
+      let mut parsed = expr.clone();
+      parsed.expr = Expr::ModuleParsed(
+        idx,
+        true,
+        names,
+        self.process_module(expr.clone())?
+      );
+      return Ok(parsed);
 
     // Has "from"
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Keyword
@@ -1511,15 +1894,23 @@ impl Parser {
       }
       let end = self.consume(&[TokenTypes::RBrace], false)?;
 
-      return Ok(
-        self.get_expr(Expr::Module(
-          index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>(),
-          Some(names)
-        ),
+      let idx = index.iter().map(|t| Name(t.value.as_ref().unwrap().to_owned())).collect::<Vec<Name>>();
+      let expr = self.get_expr(Expr::Module(
+        idx.clone(),
+        false,
+        Some(names.clone())),
         Some(init.as_ref().unwrap().line),
         init.unwrap().start_pos,
         Some(end.line)
-      ));
+      );
+      let mut parsed = expr.clone();
+      parsed.expr = Expr::ModuleParsed(
+        idx,
+        false,
+        Some(names),
+        self.process_module(expr.clone())?
+      );
+      return Ok(parsed);
 
     // No "from" or identifier
     } else {
@@ -1542,9 +1933,9 @@ mod tests {
   #[test]
   fn test_parse_assignments() -> Result<(), Error> {
     let mut parser = Parser::new();
-    let ast = parser.parse("let a = 1;
+    let ast = parser.parse(String::from("let a = 1;
     const name = \"Jink\"
-    type Number = int;".to_string(), false, true)?;
+    type Number = int;"), String::new(), false, true)?;
     return Ok(assert_eq!(ast, vec![
       parser.get_expr(Expr::Assignment(
         Some(Type(String::from("let"))),
@@ -1575,11 +1966,11 @@ mod tests {
   #[test]
   fn test_parse_conditional() -> Result<(), Error> {
     let mut parser = Parser::new();
-    let ast = parser.parse("if (a == 1) {
+    let ast = parser.parse(String::from("if (a == 1) {
       return a;
     } else {
       return b;
-    }".to_string(), false, true)?;
+    }"), String::new(), false, true)?;
     return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Conditional(
       Type(String::from("if")),
       Some(Box::new(parser.get_expr(Expr::BinaryOperator(
@@ -1610,7 +2001,7 @@ mod tests {
   #[test]
   fn test_parse_function_call() -> Result<(), Error> {
     let mut parser = Parser::new();
-    let ast = parser.parse("print(\"Hello, world!\");".to_string(), false, true)?;
+    let ast = parser.parse(String::from("print(\"Hello, world!\");"), String::new(), false, true)?;
     return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Call(
       Name(String::from("print")),
       Box::new(vec![parser.get_expr(Expr::Literal(Literals::String(String::from("Hello, world!"))), None, None, None)])
@@ -1620,9 +2011,9 @@ mod tests {
   #[test]
   fn test_parse_function_def() -> Result<(), Error> {
     let mut parser = Parser::new();
-    let ast = parser.parse("fun add(let a, let b) {
+    let ast = parser.parse(String::from("fun add(let a, let b) {
       return a + b;
-    }".to_string(), false, true)?;
+    }"), String::new(), false, true)?;
     return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Function(
       Name(String::from("add")),
       None,
@@ -1657,7 +2048,7 @@ mod tests {
   #[test]
   fn test_parse_function_def_inline() -> Result<(), Error> {
     let mut parser = Parser::new();
-    let ast = parser.parse("fun sub(let a, let b) return a - b;".to_string(), false, true)?;
+    let ast = parser.parse(String::from("fun sub(let a, let b) return a - b;"), String::new(), false, true)?;
     return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Function(
       Name(String::from("sub")),
       None,
@@ -1692,9 +2083,9 @@ mod tests {
   #[test]
   fn test_parse_function_with_defaults() -> Result<(), Error> {
     let mut parser = Parser::new();
-    let ast = parser.parse("fun pow(let a: 1, let b: 2, let c: 3) {
+    let ast = parser.parse(String::from("fun pow(let a: 1, let b: 2, let c: 3) {
       return a ^ b ^ c;
-    }".to_string(), false, true)?;
+    }"), String::new(), false, true)?;
     return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Function(
       Name(String::from("pow")),
       None,
@@ -1740,9 +2131,9 @@ mod tests {
   #[test]
   fn test_parse_function_def_with_return_type() -> Result<(), Error> {
     let mut parser = Parser::new();
-    let ast = parser.parse("fun add(int a, int b) -> int {
+    let ast = parser.parse(String::from("fun add(int a, int b) -> int {
       return a + b;
-    }".to_string(), false, true)?;
+    }"), String::new(), false, true)?;
     return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Function(
       Name(String::from("add")),
       Some(Literals::Identifier(Name(String::from("int")), None)),
@@ -1777,10 +2168,10 @@ mod tests {
   #[test]
   fn test_parse_function_def_with_inline_conditional() -> Result<(), Error> {
     let mut parser = Parser::new();
-    let ast = parser.parse("fun are_even(int a, int b) -> int {
+    let ast = parser.parse(String::from("fun are_even(int a, int b) -> int {
       if (a % 2 == 0 && b % 2 == 0) return true
       else return false
-    }".to_string(), false, true)?;
+    }"), String::new(), false, true)?;
     return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Function(
       Name(String::from("are_even")),
       Some(Literals::Identifier(Name(String::from("int")), None)),
@@ -1851,9 +2242,9 @@ mod tests {
   #[test]
   fn test_function_with_constants() {
     let mut parser = Parser::new();
-    let ast = parser.parse("fun add(const a, const int b) {
+    let ast = parser.parse(String::from("fun add(const a, const int b) {
       return a + b;
-    }".to_string(), false, true).unwrap();
+    }"), String::new(), false, true).unwrap();
     assert_eq!(ast[0], parser.get_expr(Expr::Function(
       Name(String::from("add")),
       None,
