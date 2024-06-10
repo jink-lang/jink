@@ -1083,7 +1083,7 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Extract identifier name
     let name = match ident_or_idx.expr {
-      Expr::Literal(Literals::Identifier(name, _)) => name,
+      Expr::Literal(Literals::Identifier(Name(name), _)) => name,
       _ => {
         return Err(Error::new(
           Error::ParserError,
@@ -1094,7 +1094,7 @@ impl<'ctx> CodeGen<'ctx> {
           "Invalid assignment".to_string()
         ));
       }
-    }.0;
+    };
 
     let set: BasicValueEnum;
     if value.is_some() {
@@ -1116,7 +1116,7 @@ impl<'ctx> CodeGen<'ctx> {
     // TODO: Check for constants
 
     // Setting new variable
-    if let Some(ty) = ty {
+    if let Some(Type(ty)) = ty {
 
       // Check if variable already exists
       let symbol = self.get_symbol(&name)?;
@@ -1131,7 +1131,7 @@ impl<'ctx> CodeGen<'ctx> {
         ));
       }
 
-      match ty.0.as_str() {
+      match ty.as_str() {
         "let" => {
           match set {
             BasicValueEnum::IntValue(i) => {
@@ -1191,7 +1191,7 @@ impl<'ctx> CodeGen<'ctx> {
           }
         },
         _ => {
-          if ["int", "bool", "float", "string"].contains(&ty.0.as_str()) {
+          if ["int", "bool", "float", "string"].contains(&ty.as_str()) {
             let var = self.builder.build_alloca(set.get_type(), &name).unwrap();
             self.builder.build_store(var, set).unwrap();
             self.set_symbol(name, Some(var), set.get_type(), set);
@@ -1278,7 +1278,7 @@ impl<'ctx> CodeGen<'ctx> {
               ty.unwrap(),
               is_const,
               match name {
-                Literals::Identifier(name, _) => name,
+                Literals::Identifier(Name(name), _) => name,
                 _ => panic!("Invalid function parameter"),
               },
               default_val,
@@ -1380,7 +1380,7 @@ impl<'ctx> CodeGen<'ctx> {
 
           // If parameter has default
           if val.is_some() {
-            defaults.push((i, name.0, val.unwrap()));
+            defaults.push((i, name, val.unwrap()));
 
           // If parameter is a placeholder (no default)
           // TODO: Change this around. I think we can get the parameter pointers instead of re-allocating
@@ -1430,12 +1430,7 @@ impl<'ctx> CodeGen<'ctx> {
 
       // Get name
       let name: String = match params.clone().unwrap()[i].clone().expr {
-        Expr::FunctionParam(_, _, name, _, _) => {
-          match name {
-            Literals::Identifier(name, _) => name.0,
-            _ => panic!("Invalid function parameter"),
-          }
-        },
+        Expr::FunctionParam(_, _, Literals::Identifier(Name(name), _), _, _) => name,
         _ => panic!("Invalid function parameter"),
       };
 
@@ -1590,8 +1585,8 @@ impl<'ctx> CodeGen<'ctx> {
       return self.build_index(&parent);
     }
 
-    if let Expr::Literal(Literals::Identifier(n, _)) = parent.expr {
-      let symbol = self.get_symbol(&n.0)?;
+    if let Expr::Literal(Literals::Identifier(Name(n), _)) = parent.expr {
+      let symbol = self.get_symbol(&n)?;
       if symbol.is_none() {
         return Err(Error::new(
           Error::NameError,
@@ -1599,7 +1594,7 @@ impl<'ctx> CodeGen<'ctx> {
           &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
           expr.first_pos,
           expr.last_line,
-          format!("Variable {} not found", n.0)
+          format!("Variable {} not found", n)
         ));
       }
 
@@ -1611,7 +1606,7 @@ impl<'ctx> CodeGen<'ctx> {
           &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
           expr.first_pos,
           expr.last_line,
-          format!("Variable {} is not an array", n.0)
+          format!("Variable {} is not an array", n)
         ));
       }
 
@@ -1627,7 +1622,7 @@ impl<'ctx> CodeGen<'ctx> {
             &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
             expr.first_pos,
             Some(expr.first_pos.unwrap() + 1),
-            format!("Variable {} is not an array", n.0)
+            format!("Variable {} is not an array", n)
           ));
         }
       } else {
@@ -1637,7 +1632,7 @@ impl<'ctx> CodeGen<'ctx> {
           &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
           expr.first_pos,
           Some(expr.first_pos.unwrap() + 1),
-          format!("Variable {} is not an array", n.0)
+          format!("Variable {} is not an array", n)
         ));
       };
 
@@ -1650,6 +1645,7 @@ impl<'ctx> CodeGen<'ctx> {
       // let temp_array_ptr = self.builder.build_pointer_cast(struct_gep, self.context.ptr_type(AddressSpace::default()), "temp_array_ptr").unwrap();
 
       // Temp: Build a new array out of the array pointer (RETHINK THIS)
+      // println!("array type: {:?}", array.get_type());
       let temp_array_ptr = self.builder.build_array_alloca(array.get_type(), array_len, "temp_array_ptr").unwrap();
       self.builder.build_store(temp_array_ptr, array).unwrap();
 
