@@ -26,7 +26,11 @@ impl Lexer {
     Lexer {
       code: String::new(),
       pos: 0,
+      // Windows and Unix have different line positions for some reason
+      #[cfg(target_os = "windows")]
       line: 1,
+      #[cfg(not(target_os = "windows"))]
+      line: 2,
       line_pos: 0,
       code_end: 0,
       tokens: vec![],
