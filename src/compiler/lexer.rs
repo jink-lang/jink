@@ -43,6 +43,10 @@ impl Lexer {
     let code = self.code.chars().collect::<Vec<char>>();
     self.code_end = code.len() as i32;
     self.testing = testing;
+
+    #[cfg(not(target_os = "windows"))]
+    if self.testing { self.line -= 1; }
+
     let mut iter = code.iter().peekable();
     return self.parse_tokens(&mut iter);
   }
