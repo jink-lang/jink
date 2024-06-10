@@ -2423,4 +2423,18 @@ mod tests {
     codegen.build(code, ast, IndexMap::new(), false, true)?;
     return Ok(());
   }
+
+  #[test]
+  fn test_array_reassign_index() -> Result<(), Error> {
+    let context = Context::create();
+    let mut codegen = CodeGen::new(&context);
+    let code = "let a = [1, 2, 3];
+    a[0] = 4;
+    let b = a[0];
+    printf(\"b:%d\", b);".to_string();
+    let mut parser = crate::Parser::new();
+    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    codegen.build(code, ast, IndexMap::new(), false, true)?;
+    return Ok(());
+  }
 }
