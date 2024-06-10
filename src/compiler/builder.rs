@@ -507,10 +507,18 @@ impl<'ctx> CodeGen<'ctx> {
       let loop_index = self.builder.build_load(i64_type, var, &name.0).unwrap().into_int_value();
 
       // Visit the iterable that we are looping over
-      let iterable = self.visit(&expr, cond_block)?;
+      let mut ptr: Option<PointerValue<'ctx>> = None;
+      let iterable: BasicValueEnum<'ctx>;
+      if let Expr::Literal(Literals::Identifier(Name(n), _)) = expr.expr.clone() {
+        let (p, iter) = self.var_from_ident(n, &expr)?;
+        ptr = p;
+        iterable = iter;
+      } else {
+        iterable = self.visit(&expr, cond_block)?;
+      }
 
       // Check if this is an Array type struct
-      if !iterable.is_struct_value() || iterable.get_type().into_struct_type() != self.context.struct_type(&[self.context.ptr_type(AddressSpace::default()).into(), self.context.i64_type().into()], false) {
+      if !iterable.is_struct_value() || iterable.get_type().into_struct_type() != self.context.struct_type(&[self.context.i64_type().into(), self.context.ptr_type(AddressSpace::default()).into()], false) {
         return Err(Error::new(
           Error::CompilerError,
           None,
@@ -521,9 +529,14 @@ impl<'ctx> CodeGen<'ctx> {
         ));
       }
 
-      // let array_val = self.builder.build_extract_value(iterable.into_struct_value(), 1, "arr_len").unwrap();
-      let array_len = self.builder.build_extract_value(iterable.into_struct_value(), 1, "arr_len").unwrap();
-      let end_condition = array_len.into_int_value();
+      let end_condition: IntValue;
+      if ptr.is_some() {
+        let array_len = self.builder.build_struct_gep(iterable.get_type(), ptr.unwrap(), 0, "arr_len").unwrap();
+        end_condition = self.builder.build_load(i64_type, array_len, "arr_len").unwrap().into_int_value();
+      } else {
+        let array_len = self.builder.build_extract_value(iterable.into_struct_value(), 1, "arr_len").unwrap();
+        end_condition = array_len.into_int_value();
+      }
 
       // Build the conditional branching
       let cond = self.builder.build_int_compare(inkwell::IntPredicate::ULT, loop_index, end_condition, "loop_cond").unwrap();
@@ -1604,9 +1617,9 @@ impl<'ctx> CodeGen<'ctx> {
 
       // Get the array value and length from the array struct type
       let (array, array_len) = if typ.is_struct_type() {
-        if val.get_type().into_struct_type() == self.context.struct_type(&[self.context.ptr_type(AddressSpace::default()).into(), self.context.i64_type().into()], false) {
-          (self.builder.build_extract_value(val.into_struct_value(), 0, "arr_ptr").unwrap(),
-          self.builder.build_extract_value(val.into_struct_value(), 1, "arr_len").unwrap().into_int_value())
+        if val.get_type().into_struct_type() == self.context.struct_type(&[self.context.i64_type().into(), self.context.ptr_type(AddressSpace::default()).into()], false) {
+          (self.builder.build_extract_value(val.into_struct_value(), 1, "arr_ptr").unwrap(),
+          self.builder.build_extract_value(val.into_struct_value(), 0, "arr_len").unwrap().into_int_value())
         } else {
           return Err(Error::new(
             Error::CompilerError,
@@ -1700,8 +1713,8 @@ impl<'ctx> CodeGen<'ctx> {
         }
 
         let struct_type = self.context.struct_type(&[
+          self.context.i64_type().into(),                        // len
           self.context.ptr_type(AddressSpace::default()).into(), // arr ptr
-          self.context.i64_type().into()                         // len
         ], false);
 
         // TODO: Build the array struct properly
@@ -1710,19 +1723,19 @@ impl<'ctx> CodeGen<'ctx> {
 
         // let array_struct_alloca = self.builder.build_alloca(struct_type, "array_set").unwrap();
 
-        // let array_field_ptr = self.builder.build_struct_gep(struct_type, array_struct_alloca, 0, "arr_ptr").unwrap();
-        // let array = self.context.i64_type().const_array(&values);
-        // self.builder.build_store(array_ptr, array).unwrap();
-
-        // let length_field_ptr = self.builder.build_struct_gep(struct_type, array_struct_alloca, 1, "arr_len").unwrap();
+        // let length_field_ptr = self.builder.build_struct_gep(struct_type, array_struct_alloca, 0, "arr_len").unwrap();
         // let length = self.context.i64_type().const_int(values.len() as u64, false);
-        // self.builder.build_store(length_ptr, length).unwrap();
+        // self.builder.build_store(length_field_ptr, length).unwrap();
+
+        // let array_field_ptr = self.builder.build_struct_gep(struct_type, array_struct_alloca, 1, "arr_ptr").unwrap();
+        // let array = self.context.i64_type().const_array(&values);
+        // self.builder.build_store(array_field_ptr, array).unwrap();
 
         // return Ok(array_struct_alloca.as_basic_value_enum());
 
         let array = self.context.i64_type().const_array(&values).as_basic_value_enum();
         let length = self.context.i64_type().const_int(values.len() as u64, false).as_basic_value_enum();
-        let struct_val = struct_type.const_named_struct(&[array, length]).as_basic_value_enum();
+        let struct_val = struct_type.const_named_struct(&[length, array]).as_basic_value_enum();
         return Ok(struct_val);
       },
       Expr::ArrayIndex(_, _) => {
