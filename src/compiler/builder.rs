@@ -2258,6 +2258,12 @@ impl<'ctx> CodeGen<'ctx> {
           "^" => {
             todo!();
           },
+          "<<" => {
+            return Ok(self.builder.build_left_shift(left.into_int_value(), right.into_int_value(), "shltmp").unwrap().as_basic_value_enum());
+          },
+          ">>" => {
+            return Ok(self.builder.build_right_shift(left.into_int_value(), right.into_int_value(), false, "shrtmp").unwrap().as_basic_value_enum());
+          },
           "&&" => {
             return Ok(self.builder.build_and(left.into_int_value(), right.into_int_value(), "andtmp").unwrap().as_basic_value_enum());
           },
