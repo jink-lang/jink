@@ -42,7 +42,7 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [ ] Build nested struct indexing
 - [x] Build for loops
 - [x] Build while loops
-- [ ] Fix triple & multi nested loops
+- [x] Build nested loops
 - [ ] Build break and continue for loops
 - [x] Build module/import system
 - [ ] Validate module imports
