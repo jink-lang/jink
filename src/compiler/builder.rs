@@ -7,7 +7,7 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::execution_engine::ExecutionEngine;
 use inkwell::module::{Linkage, Module};
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType};
+use inkwell::types::{ArrayType, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::AddressSpace;
 
@@ -490,13 +490,13 @@ impl<'ctx> CodeGen<'ctx> {
     self.builder.position_at_end(block);
 
     // Collect the name
-    if let Expr::Literal(Literals::Identifier(name, _)) = value.expr {
+    if let Expr::Literal(Literals::Identifier(Name(name), _)) = value.expr {
 
       let i64_type = self.context.i64_type();
       let init_value = i64_type.const_int(0, false);
 
       // Initialize an int to manage the index of the loop
-      let var = self.builder.build_alloca(init_value.get_type(), &name.0).unwrap();
+      let var = self.builder.build_alloca(init_value.get_type(), &name).unwrap();
       self.builder.build_store(var, init_value).unwrap();
 
       // Initialize the conditional block to ascertain whether the loop should continue
@@ -504,61 +504,47 @@ impl<'ctx> CodeGen<'ctx> {
       self.builder.position_at_end(cond_block);
 
       // Load the loop index in the conditional block
-      let loop_index = self.builder.build_load(i64_type, var, &name.0).unwrap().into_int_value();
+      let loop_index = self.builder.build_load(i64_type, var, &name).unwrap().into_int_value();
 
       // Visit the iterable that we are looping over
-      let mut ptr: Option<PointerValue<'ctx>> = None;
-      let iterable: BasicValueEnum<'ctx>;
       if let Expr::Literal(Literals::Identifier(Name(n), _)) = expr.expr.clone() {
-        let (p, iter) = self.var_from_ident(n, &expr)?;
-        ptr = p;
-        iterable = iter;
-      } else {
-        iterable = self.visit(&expr, cond_block)?;
+        let (_, typ, _) = self.var_from_ident(n.clone(), &expr)?;
+        if !typ.is_array_type() {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap(),
+            expr.first_pos,
+            Some(expr.first_pos.unwrap() + n.len() as i32),
+            "Invalid iterable type".to_string()
+          ));
+        }
+
+        // Get the length of the array
+        let array_len = typ.into_array_type().len();
+        let end_condition = i64_type.const_int(array_len as u64, false);
+
+        // Build the conditional branching
+        let cond = self.builder.build_int_compare(inkwell::IntPredicate::ULT, loop_index, end_condition, "loop_cond").unwrap();
+        self.builder.build_conditional_branch(cond, body_block, end_block).unwrap();
+
+        // Build the loop body
+        self.builder.position_at_end(body_block);
+        let current_value = self.builder.build_load(i64_type, var, "current_value").unwrap().into_int_value();
+        self.set_symbol(name.clone(), Some(var), current_value.get_type().as_basic_type_enum(), current_value.into());
+        self.build_loop_body("for", body, Some(var), Some(current_value), body_block, cond_block, end_block)?;
+
+        // If we terminated in a block that is not the end block, branch back to the conditional block to be sure if the loop should continue
+        if self.builder.get_insert_block().unwrap() != end_block {
+          self.builder.build_unconditional_branch(cond_block).unwrap();
+        }
+
+        self.builder.position_at_end(end_block);
+        return Ok(end_block);
       }
-
-      // Check if this is an Array type struct
-      if !iterable.is_struct_value() || iterable.get_type().into_struct_type() != self.context.struct_type(&[self.context.i64_type().into(), self.context.ptr_type(AddressSpace::default()).into()], false) {
-        return Err(Error::new(
-          Error::CompilerError,
-          None,
-          &"",
-          Some(0),
-          Some(0),
-          "Invalid iterable type".to_string()
-        ));
-      }
-
-      let end_condition: IntValue;
-      if ptr.is_some() {
-        let array_len = self.builder.build_struct_gep(iterable.get_type(), ptr.unwrap(), 0, "arr_len").unwrap();
-        end_condition = self.builder.build_load(i64_type, array_len, "arr_len").unwrap().into_int_value();
-      } else {
-        let array_len = self.builder.build_extract_value(iterable.into_struct_value(), 1, "arr_len").unwrap();
-        end_condition = array_len.into_int_value();
-      }
-
-      // Build the conditional branching
-      let cond = self.builder.build_int_compare(inkwell::IntPredicate::ULT, loop_index, end_condition, "loop_cond").unwrap();
-      self.builder.build_conditional_branch(cond, body_block, end_block).unwrap();
-
-      // Build the loop body
-      self.builder.position_at_end(body_block);
-      let current_value = self.builder.build_load(i64_type, var, "current_value").unwrap().into_int_value();
-      self.set_symbol(name.0.clone(), Some(var), current_value.get_type().as_basic_type_enum(), current_value.into());
-      self.build_loop_body("for", body, Some(var), Some(current_value), body_block, cond_block, end_block)?;
-
-      // If we terminated in a block that is not the end block, branch back to the conditional block to be sure if the loop should continue
-      if self.builder.get_insert_block().unwrap() != end_block {
-        self.builder.build_unconditional_branch(cond_block).unwrap();
-      }
-
-      self.builder.position_at_end(end_block);
-    } else {
-      panic!("Unreachable");
     }
 
-    return Ok(end_block);
+    panic!("Unreachable");
   }
 
   // TODO: DRY this up with the repeat pattern in build_for_loop
@@ -1105,6 +1091,13 @@ impl<'ctx> CodeGen<'ctx> {
         } else {
           set = self.visit(&value.unwrap(), block)?;
         }
+
+      // If assignment value is an array, we need to extract the type
+      } else if let Expr::Array(_) = value.as_ref().unwrap().expr.clone() {
+        let (ptr, arr_type, val) = self.visit_array(*value.unwrap(), block)?;
+        self.set_symbol(name, Some(ptr), arr_type.as_basic_type_enum(), val);
+        return Ok(());
+
       } else {
         set = self.visit(&value.unwrap(), block)?;
       }
@@ -1598,7 +1591,7 @@ impl<'ctx> CodeGen<'ctx> {
         ));
       }
 
-      let (_, ptr, typ, val, _) = symbol.unwrap();
+      let (_, ptr, typ, _val, _) = symbol.unwrap();
       if ptr.is_none() {
         return Err(Error::new(
           Error::CompilerError,
@@ -1610,48 +1603,31 @@ impl<'ctx> CodeGen<'ctx> {
         ));
       }
 
+      // TODO: Return to this code - will need to extract length when we perform bounds checking
       // Get the array value and length from the array struct type
-      let (array, array_len) = if typ.is_struct_type() {
-        if val.get_type().into_struct_type() == self.context.struct_type(&[self.context.i64_type().into(), self.context.ptr_type(AddressSpace::default()).into()], false) {
-          (self.builder.build_extract_value(val.into_struct_value(), 1, "arr_ptr").unwrap(),
-          self.builder.build_extract_value(val.into_struct_value(), 0, "arr_len").unwrap().into_int_value())
-        } else {
-          return Err(Error::new(
-            Error::CompilerError,
-            None,
-            &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-            expr.first_pos,
-            Some(expr.first_pos.unwrap() + 1),
-            format!("Variable {} is not an array", n)
-          ));
-        }
-      } else {
-        return Err(Error::new(
-          Error::CompilerError,
-          None,
-          &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-          expr.first_pos,
-          Some(expr.first_pos.unwrap() + 1),
-          format!("Variable {} is not an array", n)
-        ));
-      };
-
-      // Get a pointer to the array value
-      // TODO: Fix (does not work beyond first two bytes)
-      // let struct_gep = self.builder.build_struct_gep(
-      //   val.get_type().into_struct_type(),
-      //   ptr.unwrap(), 0, "arr_ptr"
-      // ).unwrap();
-      // let temp_array_ptr = self.builder.build_pointer_cast(struct_gep, self.context.ptr_type(AddressSpace::default()), "temp_array_ptr").unwrap();
-
-      // Temp: Build a new array out of the array pointer (RETHINK THIS)
-      // println!("array type: {:?}", array.get_type());
-      let temp_array_ptr = self.builder.build_array_alloca(array.get_type(), array_len, "temp_array_ptr").unwrap();
-      self.builder.build_store(temp_array_ptr, array).unwrap();
+      // let (_array, _array_len) = if typ.is_array_type() {
+      //   let struct_load = self.builder.build_load(
+      //     self.context.struct_type(&[self.context.i64_type().into(), self.context.ptr_type(AddressSpace::default()).into()], false),
+      //     ptr.unwrap(), "load_array"
+      //   ).unwrap();
+      //   (
+      //     self.builder.build_extract_value(struct_load.into_struct_value(), 1, "arr_ptr").unwrap(),
+      //     self.builder.build_extract_value(struct_load.into_struct_value(), 0, "arr_len").unwrap().into_int_value()
+      //   )
+      // } else {
+      //   return Err(Error::new(
+      //     Error::CompilerError,
+      //     None,
+      //     &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+      //     expr.first_pos,
+      //     Some(expr.first_pos.unwrap() + 1),
+      //     format!("Variable {} is not an array", n)
+      //   ));
+      // };
 
       // Get the array's element type
       // TODO: This will have to be modified for nested and dynamic arrays
-      let element_type = array.get_type().into_array_type().get_element_type();
+      let element_type = typ.into_array_type().get_element_type();
 
       // Load the value to index with
       let idx = self.visit(&index, self.builder.get_insert_block().unwrap())?.into_int_value();
@@ -1678,7 +1654,7 @@ impl<'ctx> CodeGen<'ctx> {
       // self.builder.position_at_end(continue_block);
 
       // Get the pointer to the index and load its value
-      let idx_ptr = unsafe { self.builder.build_gep(element_type, temp_array_ptr, &[idx], "get_index").unwrap() };
+      let idx_ptr = unsafe { self.builder.build_gep(element_type, ptr.unwrap(), &[idx], "get_index").unwrap() };
       let val = self.builder.build_load(element_type, idx_ptr, "array_value").unwrap();
       return Ok((idx_ptr, val));
     }
@@ -1693,6 +1669,47 @@ impl<'ctx> CodeGen<'ctx> {
     ));
   }
 
+  fn visit_array(&mut self, expr: Expression, block: BasicBlock<'ctx>) -> Result<(PointerValue<'ctx>, ArrayType<'ctx>, BasicValueEnum<'ctx>), Error> {
+    let a = match expr.expr {
+      Expr::Array(a) => a,
+      _ => {
+        return Err(Error::new(
+          Error::ParserError,
+          None,
+          &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
+          expr.first_pos,
+          expr.last_line,
+          "Invalid array".to_string()
+        ));
+      }
+    };
+
+    let mut values = Vec::new();
+    for v in a.iter() {
+      values.push(self.visit(&v, block)?.into_int_value());
+    }
+
+    let struct_type = self.context.struct_type(&[
+      self.context.i64_type().into(),                        // len
+      self.context.ptr_type(AddressSpace::default()).into(), // arr ptr
+    ], false);
+
+    let array = self.context.i64_type().const_array(&values);
+    let arr_alloca = self.builder.build_alloca(array.get_type(), "arr").unwrap();
+    self.builder.build_store(arr_alloca, array).unwrap();
+
+    let array_struct_alloca = self.builder.build_alloca(struct_type, "array_set").unwrap();
+
+    let length = self.context.i64_type().const_int(values.len() as u64, false);
+    let length_field_ptr = self.builder.build_struct_gep(struct_type, array_struct_alloca, 0, "arr_len").unwrap();
+    self.builder.build_store(length_field_ptr, length).unwrap();
+
+    let array_field_ptr = self.builder.build_struct_gep(struct_type, array_struct_alloca, 1, "arr_ptr").unwrap();
+    self.builder.build_store(array_field_ptr, arr_alloca).unwrap();
+
+    return Ok((arr_alloca, array.get_type(), array_struct_alloca.as_basic_value_enum()));
+  }
+
   fn visit(&mut self, expr: &Expression, block: BasicBlock<'ctx>) -> Result<BasicValueEnum<'ctx>, Error> {
 
     // Position the builder at the end of the current block
@@ -1702,38 +1719,7 @@ impl<'ctx> CodeGen<'ctx> {
       Expr::Literal(literal) => self.handle_literal(literal, expr),
       Expr::BinaryOperator(op, lhs, rhs) => self.handle_binop(op, lhs, rhs, block),
       Expr::UnaryOperator(op, value) => self.handle_unop(op, value, block),
-      Expr::Array(a) => {
-        let mut values = Vec::new();
-        for v in a.iter() {
-          values.push(self.visit(&v, block)?.into_int_value());
-        }
-
-        let struct_type = self.context.struct_type(&[
-          self.context.i64_type().into(),                        // len
-          self.context.ptr_type(AddressSpace::default()).into(), // arr ptr
-        ], false);
-
-        // TODO: Build the array struct properly
-        // What I'm thinking we'll need to do is move building the array to a separate function
-        // where we can set_symbol properly because returning a pointer as we need to here means losing the array type
-
-        // let array_struct_alloca = self.builder.build_alloca(struct_type, "array_set").unwrap();
-
-        // let length_field_ptr = self.builder.build_struct_gep(struct_type, array_struct_alloca, 0, "arr_len").unwrap();
-        // let length = self.context.i64_type().const_int(values.len() as u64, false);
-        // self.builder.build_store(length_field_ptr, length).unwrap();
-
-        // let array_field_ptr = self.builder.build_struct_gep(struct_type, array_struct_alloca, 1, "arr_ptr").unwrap();
-        // let array = self.context.i64_type().const_array(&values);
-        // self.builder.build_store(array_field_ptr, array).unwrap();
-
-        // return Ok(array_struct_alloca.as_basic_value_enum());
-
-        let array = self.context.i64_type().const_array(&values).as_basic_value_enum();
-        let length = self.context.i64_type().const_int(values.len() as u64, false).as_basic_value_enum();
-        let struct_val = struct_type.const_named_struct(&[length, array]).as_basic_value_enum();
-        return Ok(struct_val);
-      },
+      Expr::Array(_) => panic!("Array not allowed in visit(), has its own visitor"),
       Expr::ArrayIndex(_, _) => {
         let (_, val) = self.build_index(expr)?;
         return Ok(val);
@@ -1778,7 +1764,7 @@ impl<'ctx> CodeGen<'ctx> {
 
           // If arg is an identifier (variable) get the pointer and value if possible
           if let Expr::Literal(Literals::Identifier(Name(name), _)) = arg.expr.clone() {
-            let (ptr, value) = self.var_from_ident(name, arg)?;
+            let (ptr, _, value) = self.var_from_ident(name, arg)?;
             val = value;
             if ptr.is_some() {
               ptrs.insert(i, ptr);
@@ -1913,20 +1899,20 @@ impl<'ctx> CodeGen<'ctx> {
       Literals::Null => {
         return Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum());
       },
-      Literals::Identifier(n, _) => Ok(self.var_from_ident(n.0, expr)?.1),
+      Literals::Identifier(n, _) => Ok(self.var_from_ident(n.0, expr)?.2),
       Literals::EOF => todo!(),
     }
   }
 
-  fn var_from_ident(&self, name: String, expr: &Expression) -> Result<(Option<PointerValue<'ctx>>, BasicValueEnum<'ctx>), Error> {
+  fn var_from_ident(&self, name: String, expr: &Expression) -> Result<(Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>), Error> {
     if let Some((_, ptr, typ, val, _exited_func)) = self.get_symbol(&name)? {
       // Constant value
       if ptr.is_none() || typ.is_array_type() {
-        return Ok((None, val));
+        return Ok((None, typ, val));
       // If there's a pointer, load the value behind the identifier
       } else {
         let var = self.builder.build_load(typ, ptr.unwrap(), &name).unwrap();
-        return Ok((ptr, var));
+        return Ok((ptr, typ, var));
       }
     } else {
       return Err(Error::new(
