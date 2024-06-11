@@ -849,7 +849,7 @@ impl Parser {
       }
     }
   
-    Err(Error::new(
+    return Err(Error::new(
       Error::UnexpectedToken,
       Some(init.clone()),
       self.code.lines().nth((init.line - 1) as usize).unwrap(),
