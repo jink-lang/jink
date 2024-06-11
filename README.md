@@ -68,7 +68,7 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [ ] Parse recursive indexing (arrays)
 - [x] Parse indexing (object properties and methods)
 - [x] Parse recursive indexing (object properties and methods)
-- [ ] Parse del statements
+- [x] Parse del statements
 - [x] Parse while loops
 - [x] Parse for loops
 - [x] Parse break and continue for loops
