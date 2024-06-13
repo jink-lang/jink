@@ -101,7 +101,7 @@ impl Simulator {
     match expr.clone().expr {
       Expr::Literal(literal) => {
         match literal {
-          Literals::Identifier(name, _) => {
+          Literals::Identifier(name) => {
             if let Some(value) = self.get_symbol(&name.0) {
               return Ok(value.0);
             } else {
@@ -151,7 +151,7 @@ impl Simulator {
         }
 
         // Get name from identifier
-        if let Expr::Literal(Literals::Identifier(name, _)) = ident_or_idx.expr {
+        if let Expr::Literal(Literals::Identifier(name)) = ident_or_idx.expr {
 
           // Type exists, is new assignment
           if typ.is_some() {

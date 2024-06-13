@@ -169,7 +169,7 @@ impl Parser {
         if path.last().unwrap().0 == "*" {
           for expr in ast.clone() {
             if let Expr::Public(exp) = expr.expr {
-              if let Expr::TypeDef(Literals::Identifier(Name(name), _), _) = exp.expr.clone() {
+              if let Expr::TypeDef(Literals::Identifier(Name(name)), _) = exp.expr.clone() {
                 self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
               } else if let Expr::Function(Name(name), _, _, _) = exp.expr.clone() {
                 self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
@@ -177,7 +177,7 @@ impl Parser {
                 self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
               } else if let Expr::Assignment(ty, lit, _) = exp.expr.clone() {
                 if ty.is_none() { continue; }
-                if let Expr::Literal(Literals::Identifier(Name(name), _)) = lit.expr {
+                if let Expr::Literal(Literals::Identifier(Name(name))) = lit.expr {
                   self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
                 }
               }
@@ -652,7 +652,7 @@ impl Parser {
 
       // EOF, return ident literal
       if self.iter.current.is_none() || self.iter.current.as_ref().unwrap().of_type == TokenTypes::EOF {
-        return Ok(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(ident.value.unwrap())), None)),
+        return Ok(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(ident.value.unwrap())))),
           Some(ident.line), ident.start_pos, Some(ident.line)
         ));
 
@@ -687,7 +687,7 @@ impl Parser {
       // Literal
       } else {
         return Ok(self.get_expr(Expr::Literal(
-          Literals::Identifier(Name(String::from(ident.value.unwrap())), None)
+          Literals::Identifier(Name(String::from(ident.value.unwrap())))
         ), Some(ident.line), ident.start_pos, Some(ident.line)));
       }
 
@@ -788,23 +788,24 @@ impl Parser {
             ));
           }
 
-          if let Expr::Literal(Literals::Identifier(Name(name), _)) = name_expr.expr {
-            self.add_name(name.to_string(), expression.clone())?;
-            return Ok(self.get_expr(Expr::Public(Box::new(expression)),
-              Some(token.line), token.start_pos, token.end_pos
+            if let Expr::Literal(Literals::Identifier(Name(name))) = name_expr.expr {
+              self.add_name(name.to_string(), expression.clone())?;
+              return Ok(self.get_expr(Expr::Public(Box::new(expression)),
+                Some(token.line), token.start_pos, token.end_pos
+              ));
+            }
+          },
+          _ => {
+            return Err(Error::new(
+              Error::UnexpectedToken,
+              Some(token.clone()),
+              self.code.lines().nth((token.line - 1) as usize).unwrap(),
+              token.start_pos,
+              token.end_pos,
+              "Expected named expression after \"pub\"".to_string()
             ));
-          }
-        },
-        _ => {
-          return Err(Error::new(
-            Error::UnexpectedToken,
-            Some(token.clone()),
-            self.code.lines().nth((token.line - 1) as usize).unwrap(),
-            token.start_pos,
-            token.end_pos,
-            "Expected named expression after \"pub\"".to_string()
-          ));
-        },
+          },
+        }
       }
     }
 
@@ -883,7 +884,7 @@ impl Parser {
     } else if [TokenTypes::Newline, TokenTypes::Semicolon].contains(&self.iter.current.as_ref().unwrap().of_type) {
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())), None)),
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())))),
           Some(identifier.line), identifier.start_pos, Some(identifier.line)
         )),
         None
@@ -893,7 +894,7 @@ impl Parser {
       let assign = self.parse_expression(0)?;
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())), None)),
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())))),
           Some(identifier.line), identifier.start_pos, Some(identifier.line)
         )),
         Some(Box::new(assign.clone()))
@@ -901,7 +902,7 @@ impl Parser {
     } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RParen {
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())), None)),
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())))),
           Some(identifier.line), identifier.start_pos, Some(identifier.line)
         )),
         None
@@ -910,7 +911,7 @@ impl Parser {
       let assign = self.parse_expression(0)?;
       assignment = self.get_expr(Expr::Assignment(
         assignment_type,
-        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())), None)),
+        Box::new(self.get_expr(Expr::Literal(Literals::Identifier(Name(String::from(identifier.value.clone().unwrap())))),
           Some(identifier.line), identifier.start_pos, Some(identifier.line)
         )),
         Some(Box::new(assign.clone()))
@@ -982,8 +983,8 @@ impl Parser {
     if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Identifier {
       let t = self.iter.next().unwrap();
       let type_alias = self.get_expr(Expr::TypeDef(
-        Literals::Identifier(Name(String::from(ident.value.clone().unwrap())), None),
-        Box::new(Literals::Identifier(Name(String::from(t.value.unwrap())), None))
+        Literals::Identifier(Name(String::from(ident.value.clone().unwrap()))),
+        Box::new(Literals::Identifier(Name(String::from(t.value.unwrap()))))
       ), Some(ident.line), ident.start_pos, Some(t.line));
       self.add_name(ident.value.unwrap(), type_alias.clone())?;
       return Ok(type_alias);
@@ -1021,7 +1022,7 @@ impl Parser {
         obj.push(Literals::ObjectProperty(
           Some(Name(key.value.unwrap())),
           Box::new(self.get_expr(
-            Expr::Literal(Literals::Identifier(Name(val.value.unwrap()), None)),
+            Expr::Literal(Literals::Identifier(Name(val.value.unwrap()))),
             Some(val.line), val.start_pos, Some(val.line)
           ))
         ));
@@ -1049,7 +1050,7 @@ impl Parser {
       // typedef / struct
       } else {
         return Ok(self.get_expr(Expr::TypeDef(
-          Literals::Identifier(Name(String::from(type_tok.as_ref().unwrap().value.as_ref().unwrap())), None),
+          Literals::Identifier(Name(String::from(type_tok.as_ref().unwrap().value.as_ref().unwrap()))),
           Box::new(Literals::Object(Box::new(obj)))
         ),
         Some(type_tok.as_ref().unwrap().line),
@@ -1080,7 +1081,7 @@ impl Parser {
       if token.of_type == TokenTypes::Identifier {
         let identifier_token = self.iter.next().unwrap();
         Ok(Expression {
-          expr: Expr::Literal(Literals::Identifier(Name(identifier_token.value.unwrap()), None)),
+          expr: Expr::Literal(Literals::Identifier(Name(identifier_token.value.unwrap()))),
           first_line: Some(identifier_token.line),
           first_pos: identifier_token.start_pos,
           last_line: identifier_token.end_pos,
@@ -1220,7 +1221,7 @@ impl Parser {
 
     return Ok(self.get_expr(Expr::Index(
       Box::new(self.get_expr(Expr::Literal(
-        Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)
+        Literals::Identifier(Name(String::from(identifier.value.unwrap())))
       ), Some(identifier.line), identifier.start_pos, Some(identifier.line))),
       Box::new(index.clone())),
       Some(identifier.line), identifier.start_pos, index.last_line
@@ -1234,7 +1235,7 @@ impl Parser {
 
     return Ok(self.get_expr(Expr::ArrayIndex(
       Box::new(self.get_expr(Expr::Literal(
-        Literals::Identifier(Name(String::from(identifier.value.unwrap())), None)
+        Literals::Identifier(Name(String::from(identifier.value.unwrap())))
       ), Some(identifier.line), identifier.start_pos, Some(identifier.line))),
       Box::new(index.clone())),
       Some(identifier.line), identifier.start_pos, index.last_line)
@@ -1277,7 +1278,7 @@ impl Parser {
       let func = self.get_expr(
         Expr::Function(
           Name(identifier.clone().value.unwrap().to_owned()),
-          Some(Literals::Identifier(Name(return_type.unwrap().value.unwrap()), None)),
+          Some(Literals::Identifier(Name(return_type.unwrap().value.unwrap()))),
           Some(Box::new(params)),
           Some(Box::new(body))
         ),
@@ -1376,14 +1377,14 @@ impl Parser {
               (
                 Some(Type(String::from(ident_or_ty.value.unwrap()))),
                 true,
-                Literals::Identifier(Name(String::from(const_ident.as_ref().unwrap().value.as_ref().unwrap())), None)
+                Literals::Identifier(Name(String::from(const_ident.as_ref().unwrap().value.as_ref().unwrap())))
               )
             // Regular constant - `const a`
             } else {
               (
                 Some(Type(String::from(cur.value.unwrap()))),
                 true,
-                Literals::Identifier(Name(String::from(ident_or_ty.value.unwrap())), None)
+                Literals::Identifier(Name(String::from(ident_or_ty.value.unwrap())))
               )
             }
           // Not a constant - `let a`, `int b`
@@ -1391,7 +1392,7 @@ impl Parser {
             (
               Some(Type(String::from(cur.value.unwrap()))),
               false,
-              Literals::Identifier(Name(String::from(ident_or_ty.value.unwrap())), None)
+              Literals::Identifier(Name(String::from(ident_or_ty.value.unwrap())))
             )
           };
 
@@ -1532,7 +1533,7 @@ impl Parser {
       return Ok(self.get_expr(Expr::Conditional(
         Type(String::from("else")),
         None,
-        Some(Box::new(block)),
+        Box::new(block),
         None
       ), Some(init.line), init.start_pos, Some(self.iter.current.as_ref().unwrap().line)));
     }
@@ -1565,7 +1566,7 @@ impl Parser {
     return Ok(self.get_expr(Expr::Conditional(
       Type(String::from(init.value.unwrap())),
       Some(Box::new(expr)),
-      Some(Box::new(body)),
+      Box::new(body),
       Some(Box::new(else_body))
     ), Some(init.line), init.start_pos, Some(self.iter.current.as_ref().unwrap().line)));
   }
@@ -1982,7 +1983,7 @@ mod tests {
     return Ok(assert_eq!(ast, vec![
       parser.get_expr(Expr::Assignment(
         Some(Type(String::from("let"))),
-        Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)),
+        Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")))),
           None, None, None
         )),
         Some(Box::new(
@@ -1991,7 +1992,7 @@ mod tests {
       )), None, None, None),
       parser.get_expr(Expr::Assignment(
         Some(Type(String::from("const"))),
-        Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("name")), None)),
+        Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("name")))),
           None, None, None
         )),
         Some(Box::new(
@@ -1999,8 +2000,8 @@ mod tests {
         )
       )), None, None, None),
       parser.get_expr(Expr::TypeDef(
-        Literals::Identifier(Name(String::from("Number")), None),
-        Box::new(Literals::Identifier(Name(String::from("int")), None))
+        Literals::Identifier(Name(String::from("Number"))),
+        Box::new(Literals::Identifier(Name(String::from("int"))))
       ), None, None, None),
       parser.get_expr(Expr::Literal(Literals::EOF), None, None, None)
     ]));
@@ -2018,23 +2019,23 @@ mod tests {
       Type(String::from("if")),
       Some(Box::new(parser.get_expr(Expr::BinaryOperator(
         Operator(String::from("==")),
-        Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)),
+        Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")))), None, None, None)),
         Box::new(parser.get_expr(Expr::Literal(Literals::Integer(1)), None, None, None))
       ), None, None, None))),
-      Some(Box::new(vec![
+      Box::new(vec![
         parser.get_expr(Expr::Return(Box::new(
-          parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)
+          parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")))), None, None, None)
         )), None, None, None)
-      ])),
+      ]),
       Some(Box::new(vec![
         parser.get_expr(Expr::Conditional(
           Type(String::from("else")),
           None,
-          Some(Box::new(vec![
+          Box::new(vec![
             parser.get_expr(Expr::Return(Box::new(
-              parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")), None)), None, None, None)
+              parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")))), None, None, None)
             )), None, None, None)
-          ])),
+          ]),
           None
         ), None, None, None)
       ]))
@@ -2064,14 +2065,14 @@ mod tests {
         parser.get_expr(Expr::FunctionParam(
           Some(Type(String::from("let"))),
           false,
-          Literals::Identifier(Name(String::from("a")), None),
+          Literals::Identifier(Name(String::from("a"))),
           None,
           false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
           Some(Type(String::from("let"))),
           false,
-          Literals::Identifier(Name(String::from("b")), None),
+          Literals::Identifier(Name(String::from("b"))),
           None,
           false
         ), None, None, None)
@@ -2080,8 +2081,8 @@ mod tests {
         parser.get_expr(Expr::Return(Box::new(
           parser.get_expr(Expr::BinaryOperator(
             Operator(String::from("+")),
-            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)),
-            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")), None)), None, None, None))
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")))), None, None, None)),
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")))), None, None, None))
           ), None, None, None)
         )), None, None, None)
       ]))
@@ -2099,14 +2100,14 @@ mod tests {
         parser.get_expr(Expr::FunctionParam(
           Some(Type(String::from("let"))),
           false,
-          Literals::Identifier(Name(String::from("a")), None),
+          Literals::Identifier(Name(String::from("a"))),
           None,
           false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
           Some(Type(String::from("let"))),
           false,
-          Literals::Identifier(Name(String::from("b")), None),
+          Literals::Identifier(Name(String::from("b"))),
           None,
           false
         ), None, None, None)
@@ -2115,8 +2116,8 @@ mod tests {
         parser.get_expr(Expr::Return(Box::new(
           parser.get_expr(Expr::BinaryOperator(
             Operator(String::from("-")),
-            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)),
-            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")), None)), None, None, None))
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")))), None, None, None)),
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")))), None, None, None))
           ), None, None, None)
         )), None, None, None)
       ]))
@@ -2136,21 +2137,21 @@ mod tests {
         parser.get_expr(Expr::FunctionParam(
           Some(Type(String::from("let"))),
           false,
-          Literals::Identifier(Name(String::from("a")), None),
+          Literals::Identifier(Name(String::from("a"))),
           Some(Box::new(parser.get_expr(Expr::Literal(Literals::Integer(1)), None, None, None))),
           false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
           Some(Type(String::from("let"))),
           false,
-          Literals::Identifier(Name(String::from("b")), None),
+          Literals::Identifier(Name(String::from("b"))),
           Some(Box::new(parser.get_expr(Expr::Literal(Literals::Integer(2)), None, None, None))),
           false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
           Some(Type(String::from("let"))),
           false,
-          Literals::Identifier(Name(String::from("c")), None),
+          Literals::Identifier(Name(String::from("c"))),
           Some(Box::new(parser.get_expr(Expr::Literal(Literals::Integer(3)), None, None, None))),
           false
         ), None, None, None)
@@ -2161,10 +2162,10 @@ mod tests {
             Operator(String::from("^")),
             Box::new(parser.get_expr(Expr::BinaryOperator(
               Operator(String::from("^")),
-              Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)),
-              Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")), None)), None, None, None))
+              Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")))), None, None, None)),
+              Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")))), None, None, None))
             ), None, None, None)),
-            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("c")), None)), None, None, None))
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("c")))), None, None, None))
           ), None, None, None)
         )), None, None, None)
       ]))
@@ -2179,19 +2180,19 @@ mod tests {
     }"), String::new(), false, true)?;
     return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Function(
       Name(String::from("add")),
-      Some(Literals::Identifier(Name(String::from("int")), None)),
+      Some(Literals::Identifier(Name(String::from("int")))),
       Some(Box::new(vec![
         parser.get_expr(Expr::FunctionParam(
           Some(Type(String::from("int"))),
           false,
-          Literals::Identifier(Name(String::from("a")), None),
+          Literals::Identifier(Name(String::from("a"))),
           None,
           false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
           Some(Type(String::from("int"))),
           false,
-          Literals::Identifier(Name(String::from("b")), None),
+          Literals::Identifier(Name(String::from("b"))),
           None,
           false
         ), None, None, None)
@@ -2200,8 +2201,8 @@ mod tests {
         parser.get_expr(Expr::Return(Box::new(
           parser.get_expr(Expr::BinaryOperator(
             Operator(String::from("+")),
-            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)),
-            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")), None)), None, None, None))
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")))), None, None, None)),
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")))), None, None, None))
           ), None, None, None)
         )), None, None, None)
       ]))
@@ -2217,19 +2218,19 @@ mod tests {
     }"), String::new(), false, true)?;
     return Ok(assert_eq!(ast[0], parser.get_expr(Expr::Function(
       Name(String::from("are_even")),
-      Some(Literals::Identifier(Name(String::from("int")), None)),
+      Some(Literals::Identifier(Name(String::from("int")))),
       Some(Box::new(vec![
         parser.get_expr(Expr::FunctionParam(
           Some(Type(String::from("int"))),
           false,
-          Literals::Identifier(Name(String::from("a")), None),
+          Literals::Identifier(Name(String::from("a"))),
           None,
           false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
           Some(Type(String::from("int"))),
           false,
-          Literals::Identifier(Name(String::from("b")), None),
+          Literals::Identifier(Name(String::from("b"))),
           None,
           false
         ), None, None, None)
@@ -2244,7 +2245,7 @@ mod tests {
                 Operator(String::from("==")),
                 Box::new(parser.get_expr(Expr::BinaryOperator(
                   Operator(String::from("%")),
-                  Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)),
+                  Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")))), None, None, None)),
                   Box::new(parser.get_expr(Expr::Literal(Literals::Integer(2)), None, None, None))
                 ), None, None, None)),
                 Box::new(parser.get_expr(Expr::Literal(Literals::Integer(0)), None, None, None))
@@ -2253,27 +2254,27 @@ mod tests {
                 Operator(String::from("==")),
                 Box::new(parser.get_expr(Expr::BinaryOperator(
                   Operator(String::from("%")),
-                  Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")), None)), None, None, None)),
+                  Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")))), None, None, None)),
                   Box::new(parser.get_expr(Expr::Literal(Literals::Integer(2)), None, None, None))
                 ), None, None, None)),
                 Box::new(parser.get_expr(Expr::Literal(Literals::Integer(0)), None, None, None))
               ), None, None, None))
             ), None, None, None)
           )),
-          Some(Box::new(vec![
+          Box::new(vec![
             parser.get_expr(Expr::Return(Box::new(
               parser.get_expr(Expr::Literal(Literals::Boolean(true)), None, None, None)
             )), None, None, None)
-          ])),
+          ]),
           Some(Box::new(vec![
             parser.get_expr(Expr::Conditional(
               Type(String::from("else")),
               None,
-              Some(Box::new(vec![
+              Box::new(vec![
                 parser.get_expr(Expr::Return(Box::new(
                   parser.get_expr(Expr::Literal(Literals::Boolean(false)), None, None, None)
                 )), None, None, None)
-              ])),
+              ]),
               None
             ), None, None, None)
           ]))
@@ -2295,14 +2296,14 @@ mod tests {
         parser.get_expr(Expr::FunctionParam(
           Some(Type(String::from("const"))),
           true,
-          Literals::Identifier(Name(String::from("a")), None),
+          Literals::Identifier(Name(String::from("a"))),
           None,
           false
         ), None, None, None),
         parser.get_expr(Expr::FunctionParam(
           Some(Type(String::from("int"))),
           true,
-          Literals::Identifier(Name(String::from("b")), None),
+          Literals::Identifier(Name(String::from("b"))),
           None,
           false
         ), None, None, None)
@@ -2311,8 +2312,8 @@ mod tests {
         parser.get_expr(Expr::Return(Box::new(
           parser.get_expr(Expr::BinaryOperator(
             Operator(String::from("+")),
-            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)),
-            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")), None)), None, None, None))
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")))), None, None, None)),
+            Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")))), None, None, None))
           ), None, None, None)
         )), None, None, None)
       ])

@@ -76,7 +76,7 @@ pub enum Literals {
   Boolean(bool),
   Object(Box<Vec<Self>>),
   ObjectProperty(Option<Name>, Box<Expression>),
-  Identifier(Name, Option<Box<Self>>),
+  Identifier(Name),
   Null,
   EOF
 }
@@ -109,7 +109,7 @@ pub enum Expr {
   TypeDef(Literals, Box<Literals>),
 
   /// if/else/elseif; expression; body; else-body
-  Conditional(Type, Option<Box<Expression>>, Option<Box<Vec<Expression>>>, Option<Box<Vec<Expression>>>),
+  Conditional(Type, Option<Box<Expression>>, Box<Vec<Expression>>, Option<Box<Vec<Expression>>>),
 
   /// func name; args
   Call(Name, Box<Vec<Expression>>),
