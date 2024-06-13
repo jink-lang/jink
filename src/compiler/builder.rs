@@ -10,6 +10,7 @@ use inkwell::module::{Linkage, Module};
 use inkwell::types::{ArrayType, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::AddressSpace;
+use inkwell::support::LLVMString;
 
 use jink::{Error, Expr, Expression, Name, Type, Operator, Literals};
 
@@ -186,7 +187,7 @@ impl<'ctx> CodeGen<'ctx> {
     self.module.add_function("fputs", fputs_type, Some(Linkage::External));
   }
 
-  pub fn build(&mut self, code: String, ast: Vec<Expression>, namespaces: IndexMap<String, Namespace>, verbose: bool, do_execute: bool) -> Result<(), Error> {
+  pub fn build(&mut self, code: String, ast: Vec<Expression>, namespaces: IndexMap<String, Namespace>, verbose: bool, do_execute: bool) -> Result<LLVMString, Error> {
     self.code = code;
     self.namespaces = namespaces;
 
@@ -240,7 +241,7 @@ impl<'ctx> CodeGen<'ctx> {
       unsafe { self.execution_engine.run_function_as_main(main_fn, &[]); }
     }
 
-    return Ok(());
+    return Ok(self.module.print_to_string());
   }
 
   fn process_ast(&mut self, ast: Vec<Expression>, main_fn: FunctionValue<'ctx>) -> Result<BasicBlock<'ctx>, Error> {
@@ -2367,10 +2368,64 @@ impl<'ctx> CodeGen<'ctx> {
 }
 
 // Tests
-// TODO: Find way to validate output of tests
 #[cfg(test)]
 mod tests {
+  use std::fs;
+  use std::fs::File;
+  use std::io::Write;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+  static COUNTER: AtomicUsize = AtomicUsize::new(0);
   use super::*;
+
+  // Compile the IR and assert the output matches
+  fn build_and_assert(ir: LLVMString, output: &str) {
+    let test_count = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let llvm_ir_name = format!("test{}.ll", test_count);
+    let executable_name = format!("test{}", test_count);
+
+    // Generate LLVM IR file
+    let mut file = File::create(format!("./{}", &llvm_ir_name)).unwrap();
+    file.write_all(ir.to_bytes()).unwrap();
+
+    // Compile and execute the binary
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("clang")
+      .arg("-o")
+      .arg(format!("{}.exe", &executable_name)) // `test1.exe`
+      .arg(&llvm_ir_name)                      // `test1.ll`
+      .output()
+      .expect("Failed to compile LLVM IR");
+    #[cfg(not(target_os = "windows"))]
+    std::process::Command::new("clang")
+      .arg("-o")
+      .arg(&executable_name) // `test1`
+      .arg(&llvm_ir_name)   // `test1.ll`
+      .output()
+      .expect("Failed to compile LLVM IR");
+    #[cfg(target_os = "windows")]
+    let test = std::process::Command::new(format!("./{}.exe", &executable_name))
+      .output()
+      .expect("Failed to run executable");
+    #[cfg(not(target_os = "windows"))]
+    let test = std::process::Command::new(format!("./{}", &executable_name))
+      .output()
+      .expect("Failed to run executable");
+
+    // Delete the test execution files
+    fs::remove_file(llvm_ir_name).unwrap();
+    #[cfg(target_os = "windows")]
+    fs::remove_file(format!("{}.exe", executable_name)).unwrap();
+    #[cfg(not(target_os = "windows"))]
+    fs::remove_file(executable_name).unwrap();
+
+    // Assert the output is correct
+    if !test.status.success() && String::from_utf8_lossy(&test.stderr) != "" {
+      eprintln!("Error: {}", String::from_utf8_lossy(&test.stderr));
+      assert!(false);
+    } else {
+      assert_eq!(String::from_utf8_lossy(&test.stdout), output);
+    }
+  }
 
   #[test]
   fn test_compile_assignment_reassignment() -> Result<(), Error> {
@@ -2379,36 +2434,40 @@ mod tests {
     let code = "let a = 1;
     let b = 2;
     a = 3;
-    let c = a + b;".to_string();
+    let c = a + b;
+    printf(\"%d\", c);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    build_and_assert(ir, "5");
     return Ok(());
   }
 
   #[test]
-  fn test_compile_print_numbers() -> Result<(), Error> {
+  fn test_compile_multi_binop() -> Result<(), Error> {
     let context = Context::create();
     let mut codegen = CodeGen::new(&context);
-    let code = "let a = 1;
-    let b = 2;
-    printf(\"a:%d b:%d\", a, b);".to_string();
+    let code = "let a = (1 + 2) * 3;
+    let b = 3;
+    printf(\"%d\", a / b);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    build_and_assert(ir, "3");
     return Ok(());
   }
 
   #[test]
-  fn test_assign_array() -> Result<(), Error> {
+  fn test_assign_array_and_indexing() -> Result<(), Error> {
     let context = Context::create();
     let mut codegen = CodeGen::new(&context);
     let code = "let a = [1, 2, 3];
-    let b = a[0];
-    printf(\"b:%d\", b);".to_string();
+    let b = a[2];
+    printf(\"%d\", b);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    build_and_assert(ir, "3");
     return Ok(());
   }
 
@@ -2419,10 +2478,11 @@ mod tests {
     let code = "let a = [1, 2, 3];
     a[0] = 4;
     let b = a[0];
-    printf(\"b:%d\", b);".to_string();
+    printf(\"%d\", b);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    build_and_assert(ir, "4");
     return Ok(());
   }
 }
