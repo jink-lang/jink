@@ -33,6 +33,7 @@ pub struct Parser {
   pub testing: bool,
   pub in_loop: bool,
   pub is_indexing: bool,
+  pub is_parsing_class_body: bool,
   /// Current namespace absolute path
   pub current_namespace: String,
   /// Current named item (imports and function, class and type definitions)
@@ -54,6 +55,7 @@ impl Parser {
       testing: false,
       in_loop: false,
       is_indexing: false,
+      is_parsing_class_body: false,
       current_namespace: String::new(),
       current_name: None,
       current_scope_defs: Vec::new(),
@@ -482,6 +484,9 @@ impl Parser {
     } else if init.unwrap().value.as_ref().unwrap() == "cls" {
       return self.parse_class();
 
+    } else if init.unwrap().value.as_ref().unwrap() == "self" {
+      return self.parse_self();
+
     } else if init.unwrap().value.as_ref().unwrap() == "pub" {
       return self.parse_public();
 
@@ -700,6 +705,9 @@ impl Parser {
         return Ok(self.get_expr(Expr::Literal(Literals::Boolean(keyword.value.as_ref().unwrap() == "true")),
           Some(keyword.line), keyword.start_pos, Some(keyword.line)
         ));
+      
+      } else if keyword.value.as_ref().unwrap() == "self" {
+        return self.parse_self();
 
       // Nulls
       } else if keyword.value.as_ref().unwrap() == "null" {
@@ -1174,6 +1182,15 @@ impl Parser {
     self.is_indexing = true;
     let index = self.parse_expression(0)?;
     self.is_indexing = false;
+
+    // If indexing `self`, return self initial expression instead of identifier
+    if identifier.value.as_ref().unwrap() == "self" {
+      return Ok(self.get_expr(Expr::Index(
+        Box::new(self.get_expr(Expr::SelfRef, Some(identifier.line), identifier.start_pos, Some(identifier.line))),
+        Box::new(index.clone())),
+        Some(identifier.line), identifier.start_pos, index.last_line
+      ));
+    }
 
     return Ok(self.get_expr(Expr::Index(
       Box::new(self.get_expr(Expr::Literal(
@@ -1670,13 +1687,16 @@ impl Parser {
 
     // Class body
     self.consume(&[TokenTypes::LBrace], false)?;
+    self.skip_newlines(None);
     let mut body: Vec<Expression> = vec![];
+    self.is_parsing_class_body = true;
     while self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type != TokenTypes::RBrace {
       self.skip_newlines(None);
       body.push(self.parse_top()?);
       self.consume(&[TokenTypes::Semicolon, TokenTypes::Newline], false)?;
       self.skip_newlines(None);
     }
+    self.is_parsing_class_body = false;
     let end = self.consume(&[TokenTypes::RBrace], false)?;
 
     if parents.is_some() {
@@ -1696,6 +1716,32 @@ impl Parser {
       self.add_name(ident.value.unwrap(), cls.clone())?;
       return Ok(cls);
     }
+  }
+
+  fn parse_self(&mut self) -> Result<Expression, Error> {
+    let init = self.iter.next();
+    if !self.is_parsing_class_body {
+      return Err(Error::new(
+        Error::UnexpectedToken,
+        Some(init.as_ref().unwrap().clone()),
+        self.code.lines().nth((init.as_ref().unwrap().line - 1) as usize).unwrap(),
+        init.as_ref().unwrap().start_pos,
+        init.as_ref().unwrap().end_pos,
+        "Cannot use `self` outside of class body".to_string()
+      ));
+    }
+
+    if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator
+      && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "." {
+      let index = self.parse_index(init.unwrap())?;
+      return Ok(index);
+    }
+
+    return Ok(self.get_expr(Expr::SelfRef,
+      Some(init.as_ref().unwrap().line),
+      init.as_ref().unwrap().start_pos,
+      Some(init.as_ref().unwrap().line)
+    ));
   }
 
   fn parse_import_name_or_alias(&mut self, has_name: Option<Token>) -> Result<(Name, Option<Name>), Error> {

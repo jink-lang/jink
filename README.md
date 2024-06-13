@@ -59,8 +59,8 @@ Here are a list of goals that scope out the Jink project and repository, not in 
 ##### Parser
 - [ ] Parse enum definitions
 - [x] Parse objects
-- [ ] Parse self keyword in classes
-- [ ] Parse self keyword in class methods
+- [x] Parse self keyword in classes
+- [x] Parse self keyword in class methods
 - [x] Parse module imports
 - [ ] Validate against circularly imported modules
 - [ ] Parse string interpolation
