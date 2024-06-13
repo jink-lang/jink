@@ -2534,4 +2534,21 @@ mod tests {
     build_and_assert(ir, "5");
     return Ok(());
   }
+
+  #[test]
+  fn test_type_struct_index() -> Result<(), Error> {
+    let context = Context::create();
+    let mut codegen = CodeGen::new(&context);
+    let code = "type Test = {
+      a: int,
+      b: int,
+    }
+    Test test = { a: 1, b: 2 };
+    printf(\"%d\", test.b);".to_string();
+    let mut parser = crate::Parser::new();
+    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    build_and_assert(ir, "2");
+    return Ok(());
+  }
 }
