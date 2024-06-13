@@ -76,7 +76,7 @@ pub enum Literals {
   Boolean(bool),
   Object(Box<Vec<Self>>),
   ObjectProperty(Option<Name>, Box<Expression>),
-  Identifier(Name, Option<Box<Self>>),
+  Identifier(Name),
   Null,
   EOF
 }

@@ -383,7 +383,7 @@ impl<'ctx> CodeGen<'ctx> {
         ));
       }
 
-      if let Expr::Literal(Literals::Identifier(name, _)) = child.expr {
+      if let Expr::Literal(Literals::Identifier(name)) = child.expr {
 
         for (i, (field_name, _field_type)) in struct_ref.unwrap().1.iter().enumerate() {
           if field_name == &name.0 {
@@ -490,7 +490,7 @@ impl<'ctx> CodeGen<'ctx> {
     self.builder.position_at_end(block);
 
     // Collect the name
-    if let Expr::Literal(Literals::Identifier(Name(name), _)) = value.expr {
+    if let Expr::Literal(Literals::Identifier(Name(name))) = value.expr {
 
       let i64_type = self.context.i64_type();
       let init_value = i64_type.const_int(0, false);
@@ -507,7 +507,7 @@ impl<'ctx> CodeGen<'ctx> {
       let loop_index = self.builder.build_load(i64_type, var, &name).unwrap().into_int_value();
 
       // Visit the iterable that we are looping over
-      if let Expr::Literal(Literals::Identifier(Name(n), _)) = expr.expr.clone() {
+      if let Expr::Literal(Literals::Identifier(Name(n))) = expr.expr.clone() {
         let (_, typ, _) = self.var_from_ident(n.clone(), &expr)?;
         if !typ.is_array_type() {
           return Err(Error::new(
@@ -589,7 +589,7 @@ impl<'ctx> CodeGen<'ctx> {
     let mut struct_lit_name: Option<String> = None;
     if name.is_some() {
       struct_lit_name = match name.unwrap() {
-        Literals::Identifier(name, _) => Some(name.0),
+        Literals::Identifier(name) => Some(name.0),
         _ => None,
       };
     }
@@ -681,7 +681,7 @@ impl<'ctx> CodeGen<'ctx> {
         let s = self.build_struct(None, v)?;
         return Ok(s.as_basic_type_enum());
       },
-      Expr::Literal(Literals::Identifier(n, _)) => {
+      Expr::Literal(Literals::Identifier(n)) => {
         match n.0.as_str() {
           "int" => return Ok(self.context.i64_type().as_basic_type_enum()),
           "float" => return Ok(self.context.f64_type().as_basic_type_enum()),
@@ -1048,7 +1048,7 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Extract identifier name
     let name = match ident_or_idx.expr {
-      Expr::Literal(Literals::Identifier(Name(name), _)) => name,
+      Expr::Literal(Literals::Identifier(Name(name))) => name,
       _ => {
         return Err(Error::new(
           Error::ParserError,
@@ -1250,7 +1250,7 @@ impl<'ctx> CodeGen<'ctx> {
               ty.unwrap(),
               is_const,
               match name {
-                Literals::Identifier(Name(name), _) => name,
+                Literals::Identifier(Name(name)) => name,
                 _ => panic!("Invalid function parameter"),
               },
               default_val,
@@ -1365,7 +1365,7 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Get return type
     let returns: String = ret_typ.map_or("void".to_string(), |ty| match ty {
-      Literals::Identifier(name, _) => name.0,
+      Literals::Identifier(name) => name.0,
       _ => panic!("Invalid return type"),
     });
 
@@ -1402,7 +1402,7 @@ impl<'ctx> CodeGen<'ctx> {
 
       // Get name
       let name: String = match params.clone().unwrap()[i].clone().expr {
-        Expr::FunctionParam(_, _, Literals::Identifier(Name(name), _), _, _) => name,
+        Expr::FunctionParam(_, _, Literals::Identifier(Name(name)), _, _) => name,
         _ => panic!("Invalid function parameter"),
       };
 
@@ -1558,7 +1558,7 @@ impl<'ctx> CodeGen<'ctx> {
       return self.build_index(&parent);
     }
 
-    if let Expr::Literal(Literals::Identifier(Name(n), _)) = parent.expr {
+    if let Expr::Literal(Literals::Identifier(Name(n))) = parent.expr {
       let symbol = self.get_symbol(&n)?;
       if symbol.is_none() {
         return Err(Error::new(
@@ -1743,7 +1743,7 @@ impl<'ctx> CodeGen<'ctx> {
           let val: BasicValueEnum<'ctx>;
 
           // If arg is an identifier (variable) get the pointer and value if possible
-          if let Expr::Literal(Literals::Identifier(Name(name), _)) = arg.expr.clone() {
+          if let Expr::Literal(Literals::Identifier(Name(name))) = arg.expr.clone() {
             let (ptr, _, value) = self.var_from_ident(name, arg)?;
             val = value;
             if ptr.is_some() {
@@ -1879,7 +1879,7 @@ impl<'ctx> CodeGen<'ctx> {
       Literals::Null => {
         return Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum());
       },
-      Literals::Identifier(n, _) => Ok(self.var_from_ident(n.0, expr)?.2),
+      Literals::Identifier(n) => Ok(self.var_from_ident(n.0, expr)?.2),
       Literals::EOF => todo!(),
     }
   }
@@ -1909,7 +1909,7 @@ impl<'ctx> CodeGen<'ctx> {
   fn handle_unop(&mut self, op: Operator, value: Box<Expression>, block: BasicBlock<'ctx>) -> Result<BasicValueEnum<'ctx>, Error> {
     let val: BasicValueEnum<'ctx>;
     let mut name: Option<String> = None;
-    if let Expr::Literal(Literals::Identifier(n, _)) = value.clone().expr {
+    if let Expr::Literal(Literals::Identifier(n)) = value.clone().expr {
       val = self.get_symbol(&n.0)?.unwrap().3;
       name = Some(n.0);
       // val = self.builder.build_load(val.into_pointer_value(), val.into_pointer_value(), &name.0).unwrap().as_basic_value_enum();
@@ -2314,7 +2314,7 @@ impl<'ctx> CodeGen<'ctx> {
           "+=" => {
             match typ.as_str() {
               "float" => {
-                if let Expr::Literal(Literals::Identifier(n, _)) = lhs.clone().expr {
+                if let Expr::Literal(Literals::Identifier(n)) = lhs.clone().expr {
                   let a = self.get_symbol(&n.0)?.unwrap().1.unwrap();
                   if a.is_const() {
                     panic!("Cannot assign to a constant");
@@ -2329,7 +2329,7 @@ impl<'ctx> CodeGen<'ctx> {
                 }
               },
               "int" => {
-                if let Expr::Literal(Literals::Identifier(n, _)) = lhs.clone().expr {
+                if let Expr::Literal(Literals::Identifier(n)) = lhs.clone().expr {
                   let a = self.get_symbol(&n.0)?.unwrap().1.unwrap();
                   if a.is_const() {
                     panic!("Cannot assign to a constant");
