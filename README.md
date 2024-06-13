@@ -32,7 +32,7 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [ ] Add pull request templates
 ##### Compiler
 - [ ] Standardize type inference
-- [ ] Fix nested conditionals
+- [x] Fix nested conditionals
 - [ ] Build dynamic array type
 - [ ] Build heterogenous array type
 - [ ] Build nested arrays
@@ -44,6 +44,10 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [x] Build while loops
 - [x] Build nested loops
 - [ ] Build break and continue for loops
+- [ ] Build classes
+- [ ] Build class inheritance
+- [ ] Build external statements
+- [ ] Build del statements
 - [x] Build module/import system
 - [ ] Validate module imports
 - [ ] Handle named module indexing

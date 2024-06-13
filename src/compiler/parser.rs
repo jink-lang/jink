@@ -1489,7 +1489,7 @@ impl Parser {
       return Ok(self.get_expr(Expr::Conditional(
         Type(String::from("else")),
         None,
-        Some(Box::new(block)),
+        Box::new(block),
         None
       ), Some(init.line), init.start_pos, Some(self.iter.current.as_ref().unwrap().line)));
     }
@@ -1522,7 +1522,7 @@ impl Parser {
     return Ok(self.get_expr(Expr::Conditional(
       Type(String::from(init.value.unwrap())),
       Some(Box::new(expr)),
-      Some(Box::new(body)),
+      Box::new(body),
       Some(Box::new(else_body))
     ), Some(init.line), init.start_pos, Some(self.iter.current.as_ref().unwrap().line)));
   }
@@ -1978,20 +1978,20 @@ mod tests {
         Box::new(parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)),
         Box::new(parser.get_expr(Expr::Literal(Literals::Integer(1)), None, None, None))
       ), None, None, None))),
-      Some(Box::new(vec![
+      Box::new(vec![
         parser.get_expr(Expr::Return(Box::new(
           parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("a")), None)), None, None, None)
         )), None, None, None)
-      ])),
+      ]),
       Some(Box::new(vec![
         parser.get_expr(Expr::Conditional(
           Type(String::from("else")),
           None,
-          Some(Box::new(vec![
+          Box::new(vec![
             parser.get_expr(Expr::Return(Box::new(
               parser.get_expr(Expr::Literal(Literals::Identifier(Name(String::from("b")), None)), None, None, None)
             )), None, None, None)
-          ])),
+          ]),
           None
         ), None, None, None)
       ]))
@@ -2217,20 +2217,20 @@ mod tests {
               ), None, None, None))
             ), None, None, None)
           )),
-          Some(Box::new(vec![
+          Box::new(vec![
             parser.get_expr(Expr::Return(Box::new(
               parser.get_expr(Expr::Literal(Literals::Boolean(true)), None, None, None)
             )), None, None, None)
-          ])),
+          ]),
           Some(Box::new(vec![
             parser.get_expr(Expr::Conditional(
               Type(String::from("else")),
               None,
-              Some(Box::new(vec![
+              Box::new(vec![
                 parser.get_expr(Expr::Return(Box::new(
                   parser.get_expr(Expr::Literal(Literals::Boolean(false)), None, None, None)
                 )), None, None, None)
-              ])),
+              ]),
               None
             ), None, None, None)
           ]))

@@ -109,7 +109,7 @@ pub enum Expr {
   TypeDef(Literals, Box<Literals>),
 
   /// if/else/elseif; expression; body; else-body
-  Conditional(Type, Option<Box<Expression>>, Option<Box<Vec<Expression>>>, Option<Box<Vec<Expression>>>),
+  Conditional(Type, Option<Box<Expression>>, Box<Vec<Expression>>, Option<Box<Vec<Expression>>>),
 
   /// func name; args
   Call(Name, Box<Vec<Expression>>),

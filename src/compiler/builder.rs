@@ -226,7 +226,6 @@ impl<'ctx> CodeGen<'ctx> {
     // }
 
     if let Err(e) = self.module.verify() {
-      // println!("Code generation error: {}", e.to_string());
       return Err(Error::new(
         Error::CompilerError,
         None,
@@ -274,7 +273,8 @@ impl<'ctx> CodeGen<'ctx> {
         self.build_struct(Some(name), value)?;
       },
       Expr::Conditional(typ, expr, body, else_body) => {
-        block = self.build_if(typ, expr, body, else_body, main_fn, block, None, None)?;
+        let merge_block = self.context.append_basic_block(main_fn, "merge");
+        (_, _, block) = self.build_if(true, typ, expr, body, else_body, main_fn, block, merge_block, None, None)?;
       },
       Expr::ForLoop(value, expr, body) => {
         block = self.build_for_loop(value, expr, body, main_fn, block)?;
@@ -433,9 +433,9 @@ impl<'ctx> CodeGen<'ctx> {
     if let Some(body) = body {
       for expr in body {
 
-        // TODO: Bring out the merge block from the conditional
         if let Expr::Conditional(typ, expr, body, ebody) = expr.expr.clone() {
-          current_block = self.build_if(typ, expr, body, ebody, body_block.get_parent().unwrap(), body_block, Some(cond_block), Some(end_block))?;
+          let merge_block = self.context.append_basic_block(body_block.get_parent().unwrap(), "merge");
+          (_, _, current_block) = self.build_if(true, typ, expr, body, ebody, body_block.get_parent().unwrap(), body_block, merge_block, Some(cond_block), Some(end_block))?;
 
         } else if let Expr::Return(ret) = expr.expr.clone() {
           let val = self.visit(&ret, current_block)?;
@@ -801,8 +801,8 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(struct_ptr);
   }
 
-  // Top level builder for conditional expressions
-  fn build_if(&mut self, _typ: Type, expr: Option<Box<Expression>>, body: Option<Box<Vec<Expression>>>, else_body: Option<Box<Vec<Expression>>>, function: FunctionValue<'ctx>, block: BasicBlock<'ctx>, loop_cond_block: Option<BasicBlock<'ctx>>, exit_loop_block: Option<BasicBlock<'ctx>>) -> Result<BasicBlock<'ctx>, Error> {
+  // Builder for conditional expressions
+  fn build_if(&mut self, top_level: bool, _typ: Type, expr: Option<Box<Expression>>, body: Box<Vec<Expression>>, else_body: Option<Box<Vec<Expression>>>, function: FunctionValue<'ctx>, block: BasicBlock<'ctx>, top_level_merge_block: BasicBlock<'ctx>, loop_cond_block: Option<BasicBlock<'ctx>>, exit_loop_block: Option<BasicBlock<'ctx>>) -> Result<(BasicBlock<'ctx>, BasicBlock<'ctx>, BasicBlock<'ctx>), Error> {
     let mut cond = self.visit(&expr.unwrap(), block)?;
 
     // If the condition is a number, condition on the basis of it not being 0
@@ -829,69 +829,16 @@ impl<'ctx> CodeGen<'ctx> {
 
     self.builder.build_conditional_branch(cond.into_int_value(), then_block, else_block).unwrap();
 
-    // Build the conditonal block - if this then do this
-    self.builder.position_at_end(then_block);
-    // Push a new scope for conditional block
+    // Build the "then" block and collect the resulting values
     self.enter_scope(false);
-    for exp in body.unwrap().iter() {
-      if let Expr::Conditional(typ, expr, body, ebody) = exp.expr.clone() {
-        self.build_if(typ, expr, body, ebody, function, then_block, loop_cond_block, exit_loop_block)?;
-
-      } else if let Expr::Return(ret) = exp.expr.clone() {
-        let val = self.visit(&ret, then_block)?;
-        if val != self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum() {
-          self.builder.build_return(Some(&val)).unwrap();
-        } else {
-          self.builder.build_return(None).unwrap();
-        }
-
-      } else if let Expr::Assignment(_, _, _) = exp.expr.clone() {
-        self.build_assignment(exp.clone(), then_block, false)?;
-
-      } else if let Expr::BreakLoop = exp.expr.clone() {
-        if exit_loop_block.is_none() {
-          return Err(Error::new(
-            Error::CompilerError,
-            None,
-            &"",
-            Some(0),
-            Some(0),
-            "Cannot break outside of loop".to_string()
-          ));
-        }
-
-        // TODO: Break out of loop
-        // We still need to build else block(s) below so we can't return here
-
-      } else if let Expr::ContinueLoop = exp.expr.clone() {
-        if exit_loop_block.is_none() {
-          return Err(Error::new(
-            Error::CompilerError,
-            None,
-            &"",
-            Some(0),
-            Some(0),
-            "Cannot continue outside of loop".to_string()
-          ));
-        }
-
-        // TODO: Continue loop (branch back to loop condition block)
-        // We still need to build else block(s) below so we can't return here
-
-      } else {
-        self.visit(&exp, then_block)?;
-      }
-    }
-    // Save the values of the then block
+    let then_out = self.build_conditional_block(then_block, Some(body.clone()), function, top_level_merge_block, loop_cond_block, exit_loop_block)?;
     let then_vals = self.get_all_cur_symbols();
-    // Pop the scope
     self.exit_scope();
     self.builder.build_unconditional_branch(merge_block).unwrap();
 
-    // Build the "else" block
-    self.builder.position_at_end(else_block);
+    // Build the "else" block and collect the resulting values
     self.enter_scope(false);
-    self.build_else_body(else_block, else_body)?;
+    let else_out = self.build_conditional_block(else_block, else_body, function, top_level_merge_block, loop_cond_block, exit_loop_block)?;
     let else_vals = self.get_all_cur_symbols();
     self.exit_scope();
     self.builder.build_unconditional_branch(merge_block).unwrap();
@@ -951,8 +898,8 @@ impl<'ctx> CodeGen<'ctx> {
 
       // Add incoming values from both branches
       phi.add_incoming(&[
-        (&then_val.2, then_block),
-        (&else_val.2, else_block),
+        (&then_val.2, then_out),
+        (&else_val.2, else_out),
       ]);
 
       // Check if the symbol exists in the symbol table
@@ -979,55 +926,87 @@ impl<'ctx> CodeGen<'ctx> {
       }
     }
 
-    // for (name, then_val) in &then_vals {
-    //   let else_val = else_vals.get(name).unwrap_or(then_val);
-    //   let phi = self.builder.build_phi(self.context.i64_type(), name).unwrap();
-    //   phi.add_incoming(&[
-    //     (&then_val.1, then_block),
-    //     (&else_val.1, else_block),
-    //   ]);
+    // Branch to the final merge block
+    if top_level {
+      self.builder.build_unconditional_branch(top_level_merge_block).unwrap();
+    }
 
-    //   // Check if symbol exists
-    //   let symbol = self.get_symbol(name);
-    //   if symbol.is_none() {
-    //     // Create new variable
-    //     let var = self.builder.build_alloca(self.context.i64_type(), &name).unwrap();
-    //     self.set_symbol(name.to_string(), var, phi.as_basic_value());
-    //   } else {
-    //     // Update existing variable
-    //     let (name, inst, _) = symbol.unwrap();
-    //     self.builder.build_store(inst, phi.as_basic_value()).unwrap();
-    //     self.set_symbol(name.to_string(), inst, phi.as_basic_value());
-    //   }
-    // }
-
-    // Return merge block
-    return Ok(merge_block);
+    // Return then, else and merge blocks
+    if !top_level {
+      return Ok((then_block, else_block, merge_block));
+    } else {
+      return Ok((then_block, else_block, top_level_merge_block));
+    }
   }
 
-  // Recursive function to build "else" conditional blocks
-  fn build_else_body(&mut self, block: BasicBlock<'ctx>, else_body: Option<Box<Vec<Expression>>>) -> Result<(), Error> {
-    if let Some(else_body) = else_body {
-      for exp in else_body.iter() {
-        if let Expr::Conditional(typ, expr, body, ebody) = exp.expr.clone() {
-          if typ.0 == "else" {
+  fn build_conditional_block(&mut self, block: BasicBlock<'ctx>, body: Option<Box<Vec<Expression>>>, function: FunctionValue<'ctx>, top_level_merge_block: BasicBlock<'ctx>, loop_cond_block: Option<BasicBlock<'ctx>>, exit_loop_block: Option<BasicBlock<'ctx>>) -> Result<BasicBlock<'ctx>, Error> {
+    self.builder.position_at_end(block);
+    let mut current_block = block;
+
+    if let Some(body) = body {
+      for expr in body.iter() {
+        match expr.expr.clone() {
+          Expr::Conditional(typ, exp, body, ebody) => {
             // This is the end, build the body
-            self.build_else_body(block, body)?;
-          } else {
+            if typ.0 == "else" {
+              current_block = self.build_conditional_block(current_block, Some(body), function, top_level_merge_block, loop_cond_block, exit_loop_block)?;
             // This is a new branch, return to the top
-            self.build_if(typ, expr, body, ebody, block.get_parent().unwrap(), block, None, None)?;
+            } else {
+              (_, _, current_block) = self.build_if(false, typ, exp, body, ebody, function, current_block, top_level_merge_block, loop_cond_block, exit_loop_block)?;
+            }
+          },
+          Expr::Assignment(_, _, _) => {
+            self.build_assignment(expr.clone(), block, false)?;
+          },
+          Expr::Return(ret) => {
+            let val = self.visit(&ret, block)?;
+            if val != self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum() {
+              self.builder.build_return(Some(&val)).unwrap();
+            // Null != void
+            } else {
+              self.builder.build_return(None).unwrap();
+            }
+          },
+          Expr::BreakLoop => {
+            if exit_loop_block.is_none() {
+              return Err(Error::new(
+                Error::CompilerError,
+                None,
+                &"",
+                Some(0),
+                Some(0),
+                "Cannot break outside of loop".to_string()
+              ));
+            }
+
+            // TODO: Break out of loop
+            // We still need to build else block(s) below so we can't return here
+
+          },
+          Expr::ContinueLoop => {
+            if exit_loop_block.is_none() {
+              return Err(Error::new(
+                Error::CompilerError,
+                None,
+                &"",
+                Some(0),
+                Some(0),
+                "Cannot continue outside of loop".to_string()
+              ));
+            }
+
+            // TODO: Continue loop (branch back to loop condition block)
+            // We still need to build else block(s) below so we can't return here
+
           }
-
-        } else if let Expr::Assignment(_, _, _) = exp.expr.clone() {
-          self.build_assignment(exp.clone(), block, false)?;
-
-        } else {
-          self.visit(&exp, block)?;
+          _ => {
+            self.visit(expr, current_block)?;
+          }
         }
       }
     }
 
-    return Ok(());
+    return Ok(current_block);
   }
 
   fn build_assignment(&mut self, expr: Expression, block: BasicBlock<'ctx>, is_new_scope: bool) -> Result<(), Error> {
@@ -1494,7 +1473,8 @@ impl<'ctx> CodeGen<'ctx> {
         }
 
       } else if let Expr::Conditional(typ, expr, body, ebody) = ex.expr.clone() {
-        func_block = self.build_if(typ, expr, body, ebody, function, func_block, None, None)?;
+        let merge_block = self.context.append_basic_block(function, "merge");
+        (_, _, func_block) = self.build_if(true, typ, expr, body, ebody, function, func_block, merge_block, None, None)?;
 
       } else if let Expr::ForLoop(val, expr, body) = ex.expr.clone() {
         func_block = self.build_for_loop(val, expr, body, function, func_block)?;
