@@ -851,26 +851,28 @@ impl<'ctx> CodeGen<'ctx> {
 
     for name in all_keys {
 
-      // Get values from then_vals and else_vals or use the original value if not present
-      let then_val = if let Some(val) = then_vals.get(name) {
-        val.clone()
-      } else {
-        self.get_symbol(name)?
-          .map(|(_, pval, typ, val, exited_func)| (pval, typ, val, exited_func))
-          .expect("Value should be present in then_vals or symbol table")
-      };
+      // Get values from then_vals and else_vals or use the value above the loop blocks if it exists
+      let then_val: Option<(Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool)> = then_vals.get(name)
+        .cloned()
+        .or_else(|| {
+        self.get_symbol(name).unwrap_or(None).map(|(_, pval, typ, val, exited_func)| {
+          (pval, typ, val, exited_func)
+        })
+      });
+      let else_val: Option<(Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool)> = else_vals.get(name)
+        .cloned()
+        .or_else(|| {
+        self.get_symbol(name).unwrap_or(None).map(|(_, pval, typ, val, exited_func)| {
+          (pval, typ, val, exited_func)
+        })
+      });
 
-      let else_val = if let Some(val) = else_vals.get(name) {
-        val.clone()
-      } else {
-        self.get_symbol(name)?
-          .map(|(_, pval, typ, val, exited_func)| (pval, typ, val, exited_func))
-          .expect("Value should be present in else_vals or symbol table")
-      };
+      // If one branch initializes or uses one of its own new values
+      if then_val.is_none() || else_val.is_none() { continue; }
 
       // Determine the types of the values
-      let then_type = then_val.1;
-      let else_type = else_val.1;
+      let then_type = then_val.unwrap().1;
+      let else_type = else_val.unwrap().1;
 
       // Determine the common type for the phi node
       let phi_type = if then_type.is_int_type() && else_type.is_int_type() {
@@ -898,8 +900,8 @@ impl<'ctx> CodeGen<'ctx> {
 
       // Add incoming values from both branches
       phi.add_incoming(&[
-        (&then_val.2, then_out),
-        (&else_val.2, else_out),
+        (&then_val.unwrap().2, then_out),
+        (&else_val.unwrap().2, else_out),
       ]);
 
       // Check if the symbol exists in the symbol table
@@ -966,6 +968,12 @@ impl<'ctx> CodeGen<'ctx> {
             } else {
               self.builder.build_return(None).unwrap();
             }
+          },
+          Expr::ForLoop(value, expr, body) => {
+            current_block = self.build_for_loop(value, expr, body, function, current_block)?;
+          },
+          Expr::WhileLoop(expr, body) => {
+            current_block = self.build_while_loop(expr, body, function, current_block)?;
           },
           Expr::BreakLoop => {
             if exit_loop_block.is_none() {
