@@ -788,24 +788,23 @@ impl Parser {
             ));
           }
 
-            if let Expr::Literal(Literals::Identifier(Name(name))) = name_expr.expr {
-              self.add_name(name.to_string(), expression.clone())?;
-              return Ok(self.get_expr(Expr::Public(Box::new(expression)),
-                Some(token.line), token.start_pos, token.end_pos
-              ));
-            }
-          },
-          _ => {
-            return Err(Error::new(
-              Error::UnexpectedToken,
-              Some(token.clone()),
-              self.code.lines().nth((token.line - 1) as usize).unwrap(),
-              token.start_pos,
-              token.end_pos,
-              "Expected named expression after \"pub\"".to_string()
+          if let Expr::Literal(Literals::Identifier(Name(name))) = name_expr.expr {
+            self.add_name(name.to_string(), expression.clone())?;
+            return Ok(self.get_expr(Expr::Public(Box::new(expression)),
+              Some(token.line), token.start_pos, token.end_pos
             ));
-          },
-        }
+          }
+        },
+        _ => {
+          return Err(Error::new(
+            Error::UnexpectedToken,
+            Some(token.clone()),
+            self.code.lines().nth((token.line - 1) as usize).unwrap(),
+            token.start_pos,
+            token.end_pos,
+            "Expected named expression after \"pub\"".to_string()
+          ));
+        },
       }
     }
 
@@ -821,15 +820,14 @@ impl Parser {
 
   fn parse_delete(&mut self) -> Result<Expression, Error> {
     let init = self.iter.current.as_ref().unwrap();
-  
+
     if let Some(token) = &self.iter.current.clone() {
       self.iter.next();
 
       let expression = self.parse_top()?;
 
       match &expression.expr {
-        Expr::Array(_) | Expr::ArrayIndex(_, _) | Expr::Index(_, _) | 
-        Expr::Literal(Literals::Identifier(Name(_), _)) | Expr::Literal(Literals::Object(_)) | Expr::Literal(Literals::ObjectProperty(_, _)) => {
+        Expr::Array(_) | Expr::ArrayIndex(_, _) | Expr::Index(_, _) | Expr::Literal(Literals::Identifier(Name(_))) | Expr::Literal(Literals::Object(_)) => {
           return Ok(self.get_expr(
             Expr::Delete(Box::new(expression)),
             Some(token.line),
@@ -844,12 +842,12 @@ impl Parser {
             self.code.lines().nth((token.line - 1) as usize).unwrap(),
             token.start_pos,
             token.end_pos,
-            "Expected named expression after \"del\"".to_string(),
+            "Unsupported expression after \"del\"".to_string(),
           ));
         }
       }
     }
-  
+
     return Err(Error::new(
       Error::UnexpectedToken,
       Some(init.clone()),
