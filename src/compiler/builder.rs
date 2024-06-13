@@ -2485,4 +2485,53 @@ mod tests {
     build_and_assert(ir, "4");
     return Ok(());
   }
+
+  #[test]
+  fn test_for_loop() -> Result<(), Error> {
+    let context = Context::create();
+    let mut codegen = CodeGen::new(&context);
+    let code = "let array = [1, 2, 3, 4, 5];
+    for (let i in array) {
+      printf(\"%d\", array[i]);
+    }".to_string();
+    let mut parser = crate::Parser::new();
+    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    build_and_assert(ir, "12345");
+    return Ok(());
+  }
+
+  #[test]
+  fn test_while_loop() -> Result<(), Error> {
+    let context = Context::create();
+    let mut codegen = CodeGen::new(&context);
+    let code = "let i = 0;
+    while (i < 5) {
+      printf(\"%d\", i);
+      i = i + 1;
+    }".to_string();
+    let mut parser = crate::Parser::new();
+    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    build_and_assert(ir, "01234");
+    return Ok(());
+  }
+
+  #[test]
+  fn test_conditional_phi() -> Result<(), Error> {
+    let context = Context::create();
+    let mut codegen = CodeGen::new(&context);
+    let code = "let a = 1;
+    if (a == 1) {
+      a = 5;
+    } else {
+      a = 10;
+    }
+    printf(\"%d\", a);".to_string();
+    let mut parser = crate::Parser::new();
+    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    build_and_assert(ir, "5");
+    return Ok(());
+  }
 }
