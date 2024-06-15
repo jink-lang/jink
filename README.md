@@ -40,7 +40,7 @@ Here are a list of goals that scope out the Jink project and repository, not in 
 - [x] Build structs/types
 - [x] Build nested structs
 - [x] Build struct indexing
-- [ ] Build nested struct indexing
+- [x] Build nested struct indexing
 - [ ] Build break and continue in loops
 - [ ] Build classes
 - [ ] Build class inheritance
@@ -51,7 +51,7 @@ Here are a list of goals that scope out the Jink project and repository, not in 
 - [ ] Validate module imports
 - [ ] Handle named module indexing
 - [ ] Build string interpolation
-- [ ] Write struct tests
+- [x] Write struct tests
 - [ ] Write function tests
 - [ ] Write module tests
 ##### Lexer

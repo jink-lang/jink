@@ -29,9 +29,16 @@ pub struct CodeGen<'ctx> {
   builder: Builder<'ctx>,
   /// Stack of symbol tables
   symbol_table_stack: Vec<Scope<'ctx>>,
-  /// Table of struct types and their fields
-  struct_table: IndexMap<String, (StructType<'ctx>, Vec<(String, BasicTypeEnum<'ctx>)>)>,
-  /// Stack of struct names and their corresponding type struct names
+  /// Table of struct types
+  struct_table: IndexMap<
+    String,                // Struct type name
+    Vec<(                  // Struct fields
+      String,              // Field name
+      BasicTypeEnum<'ctx>, // Field type
+      Option<String>       // Struct type name if field is a struct
+    )>
+  >,
+  /// Stack of variables known to be structs and their corresponding struct type names
   struct_stack: IndexMap<String, String>,
   _type_tags: IndexMap<String, u64>,
   execution_engine: ExecutionEngine<'ctx>
@@ -351,80 +358,121 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(());
   }
 
-  fn build_index_extract(&mut self, parent: Box<Expression>, child: Box<Expression>, block: BasicBlock<'ctx>) -> Result<BasicValueEnum<'ctx>, Error> {
-    let parent_val = self.visit(&parent, block)?;
-
-    // If parent is struct
-    // Visiting a struct always returns a pointer
-    if parent_val.is_pointer_value() {
-
-      // Get struct type from name
-      let struct_type = self.struct_stack.get(parent_val.get_name().to_str().unwrap());
-      if struct_type.is_none() {
+  fn build_index_extract(&mut self, getting_inner_parent: bool, passing_type_name: bool, parent_struct_ptr_if_recursing: Option<PointerValue<'ctx>>, parent: Box<Expression>, child: Box<Expression>, block: BasicBlock<'ctx>) -> Result<(BasicValueEnum<'ctx>, Option<String>), Error> {
+    // Get struct type name from parent
+    let (parent_val, parent_name) = if getting_inner_parent && !passing_type_name {
+      let parent_val = self.visit(&parent, block)?;
+      // Visiting a struct always returns a pointer
+      // TODO: Do further analysis to ensure that we have a struct
+      if !parent_val.is_pointer_value() {
         return Err(Error::new(
           Error::CompilerError,
           None,
-          self.code.lines().nth(parent.first_line.unwrap() as usize).unwrap(),
+          self.code.lines().nth((parent.first_line.unwrap() - 1) as usize).unwrap(),
           parent.first_pos,
           parent.first_pos,
-          format!("Unknown symbol: {}", parent_val.get_name().to_str().unwrap())
+          "Indexed must be of struct type".to_string()
         ));
       }
+      (Some(parent_val), parent_val.get_name().to_str().unwrap().to_owned())
+    } else {
+      match parent.expr {
+        Expr::Literal(Literals::Identifier(Name(ref name))) => (
+          Some(parent_struct_ptr_if_recursing.unwrap().as_basic_value_enum()),
+          name.to_owned()
+        ),
+        _ => unreachable!(),
+      }
+    };
 
-      // Get type information with name
-      let struct_ref = self.struct_table.get(struct_type.unwrap());
+    // Get struct information by type
+    let struct_type_name = if getting_inner_parent && !passing_type_name {
+      self.struct_stack.get(&parent_name)
+    } else {
+      Some(&parent_name)
+    };
+    if struct_type_name.is_none() {
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        self.code.lines().nth((parent.first_line.unwrap() - 1) as usize).unwrap(),
+        parent.first_pos,
+        parent.first_pos,
+        format!("Unknown symbol: {}", &parent_name)
+      ));
+    }
+
+    // Get value of child
+    // Used at final index as well as passing indexes back through recursively
+    if let Expr::Literal(Literals::Identifier(Name(name))) = child.expr {
+      let struct_ref = self.struct_table.get(struct_type_name.unwrap());
       if struct_ref.is_none() {
         return Err(Error::new(
           Error::CompilerError,
           None,
-          &"",
-          Some(0),
-          Some(0),
-          format!("Unknown type: {}", struct_type.unwrap())
+          self.code.lines().nth((parent.first_line.unwrap() - 1) as usize).unwrap(),
+          parent.first_pos,
+          parent.first_pos,
+          format!("Unknown type: {}", struct_type_name.unwrap())
         ));
       }
+      let struct_type = self.context.get_struct_type(struct_type_name.unwrap()).unwrap();
 
-      if let Expr::Literal(Literals::Identifier(name)) = child.expr {
-
-        for (i, (field_name, _field_type)) in struct_ref.unwrap().1.iter().enumerate() {
-          if field_name == &name.0 {
-            let struct_val = self.builder.build_load(struct_ref.unwrap().0, parent_val.into_pointer_value(), "struct_val").unwrap();
-            let value = self.builder.build_extract_value(struct_val.into_struct_value(), i as u32, "indexed_value").unwrap();
-            return Ok(value);
-          }
+      // Try to find the index field on the struct
+      for (i, (field_name, _, struct_type_if_any)) in struct_ref.unwrap().iter().enumerate() {
+        if field_name == &name {
+          let struct_val = self.builder.build_load(struct_type, parent_val.unwrap().into_pointer_value(), "struct_val").unwrap();
+          let value = self.builder.build_extract_value(struct_val.into_struct_value(), i as u32, "indexed_value").unwrap();
+          return Ok((value, struct_type_if_any.clone()));
         }
-
-        // Invalid index at child
-        return Err(Error::new(
-          Error::CompilerError,
-          None,
-          self.code.lines().nth((child.first_line.unwrap() - 1) as usize).unwrap(),
-          child.first_pos,
-          child.first_pos,
-          format!("Field {} not found on index {}", name.0, parent_val.get_name().to_str().unwrap())
-        ));
-
-      } else {
-        // Invalid index at child
-        return Err(Error::new(
-          Error::CompilerError,
-          None,
-          self.code.lines().nth(child.first_line.unwrap() as usize).unwrap(),
-          child.first_pos,
-          child.first_pos,
-          "Struct index must be an identifier".to_string()
-        ));
       }
-    }
 
-    return Err(Error::new(
-      Error::CompilerError,
-      None,
-      self.code.lines().nth(parent.first_line.unwrap() as usize).unwrap(),
-      parent.first_pos,
-      parent.first_pos,
-      "Indexed must be of struct type".to_string()
-    ));
+      // Invalid index at child
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        self.code.lines().nth((child.first_line.unwrap() - 1) as usize).unwrap(),
+        child.first_pos,
+        child.first_pos,
+        format!("Field `{}` not found on index type `{}`", name, struct_type_name.unwrap())
+      ));
+
+    // Nested field access
+    } else if let Expr::Index(inner_parent, inner_child) = child.expr {
+      // If we are already getting an inner parent, we can't pass the type name
+      let (parent_value, field_struct_type_name) = if getting_inner_parent {
+        self.build_index_extract(true, false, Some(parent_val.unwrap().into_pointer_value()), parent.clone(), inner_parent, block)?
+      } else {
+        self.build_index_extract(true, true, Some(parent_val.unwrap().into_pointer_value()), parent.clone(), inner_parent, block)?
+      };
+
+      // Wrap the extracted field type in an expression to use as the new parent expr
+      // Hacky but it works
+      let parent_expr = Expression {
+        expr: Expr::Literal(Literals::Identifier(Name(field_struct_type_name.unwrap()))),
+        first_line: parent.first_line,
+        first_pos: parent.first_pos,
+        last_line: parent.last_line
+      };
+
+      // Recurse to get the inner child
+      if parent_value.is_pointer_value() {
+        return self.build_index_extract(false, true, Some(parent_value.into_pointer_value()), Box::new(parent_expr), inner_child, block);
+      // We are getting the value next
+      } else {
+        return self.build_index_extract(false, true, None, Box::new(parent_expr), inner_child, block);
+      }
+    } else {
+      // Invalid index at child
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        self.code.lines().nth((child.first_line.unwrap() - 1) as usize).unwrap(),
+        child.first_pos,
+        child.first_pos,
+        "Struct index must be an identifier".to_string()
+      ));
+    }
   }
 
   fn build_loop_body(&mut self, typ: &str, body: Option<Vec<Expression>>, var: Option<PointerValue<'ctx>>, current_value: Option<IntValue>, body_block: BasicBlock<'ctx>, cond_block: BasicBlock<'ctx>, end_block: BasicBlock<'ctx>) -> Result<(), Error> {
@@ -599,12 +647,12 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Build struct if value is an object
     if let Literals::Object(obj) = value.as_ref().to_owned() {
-      let mut fields: Vec<(String, BasicTypeEnum<'ctx>)> = vec![];
+      let mut fields: Vec<(String, BasicTypeEnum<'ctx>, Option<String>)> = vec![];
       for literal in obj.iter() {
         if let Literals::ObjectProperty(n, val) = literal.to_owned() {
 
           // Ensure name doesn't already exist in fields
-          if fields.iter().any(|(name, _)| name == &n.as_ref().unwrap().0) {
+          if fields.iter().any(|(name, _, _)| name == &n.as_ref().unwrap().0) {
             return Err(Error::new(
               Error::CompilerError,
               None,
@@ -616,7 +664,8 @@ impl<'ctx> CodeGen<'ctx> {
           }
 
           // Build the field
-          let field: (String, BasicTypeEnum<'ctx>) = (n.unwrap().0, self.build_struct_field(val.expr)?);
+          let (typ, struct_name_if_any) = self.build_struct_field(val.expr)?;
+          let field: (String, BasicTypeEnum<'ctx>, Option<String>) = (n.unwrap().0, typ, struct_name_if_any);
           fields.push(field);
 
         // Field was not an object property, parsing error
@@ -634,7 +683,7 @@ impl<'ctx> CodeGen<'ctx> {
 
       // Create the struct type
       let mut field_types: Vec<BasicTypeEnum> = vec![];
-      for (_, t) in fields.clone() {
+      for (_, t, _) in fields.clone() {
 
         // Change child struct types to pointers for mapping
         if t.is_struct_type() {
@@ -644,7 +693,13 @@ impl<'ctx> CodeGen<'ctx> {
         }
       }
 
-      let struct_type = self.context.struct_type(&field_types, false);
+      let struct_type = if struct_lit_name.is_none() {
+        self.context.struct_type(&field_types, false)
+      } else {
+        let struct_type = self.context.opaque_struct_type(&struct_lit_name.clone().unwrap());
+        struct_type.set_body(&field_types, false);
+        struct_type
+      };
 
       // Save a reference to the struct
       if let Some(n) = struct_lit_name {
@@ -659,7 +714,7 @@ impl<'ctx> CodeGen<'ctx> {
             format!("Name {} already defined", n)
           ));
         } else {
-          self.struct_table.insert(n, (struct_type, fields));
+          self.struct_table.insert(n, fields);
         }
       }
 
@@ -676,20 +731,20 @@ impl<'ctx> CodeGen<'ctx> {
     }
   }
 
-  fn build_struct_field(&mut self, val: Expr) -> Result<BasicTypeEnum<'ctx>, Error> {
+  fn build_struct_field(&mut self, val: Expr) -> Result<(BasicTypeEnum<'ctx>, Option<String>), Error> {
     match val {
       Expr::TypeDef(_, v) => {
         let s = self.build_struct(None, v)?;
-        return Ok(s.as_basic_type_enum());
+        return Ok((s.as_basic_type_enum(), Some(s.get_name().unwrap().to_str().unwrap().to_string())));
       },
-      Expr::Literal(Literals::Identifier(n)) => {
-        match n.0.as_str() {
-          "int" => return Ok(self.context.i64_type().as_basic_type_enum()),
-          "float" => return Ok(self.context.f64_type().as_basic_type_enum()),
-          "bool" => return Ok(self.context.bool_type().as_basic_type_enum()),
+      Expr::Literal(Literals::Identifier(Name(name))) => {
+        match name.as_str() {
+          "int" => return Ok((self.context.i64_type().as_basic_type_enum(), None)),
+          "float" => return Ok((self.context.f64_type().as_basic_type_enum(), None)),
+          "bool" => return Ok((self.context.bool_type().as_basic_type_enum(), None)),
           _ => {
             // Check for existing type alias
-            let struct_type = self.struct_table.get(&n.0);
+            let struct_type = self.struct_table.get(&name);
             if struct_type.is_none() {
               return Err(Error::new(
                 Error::CompilerError,
@@ -697,10 +752,11 @@ impl<'ctx> CodeGen<'ctx> {
                 &"",
                 Some(0),
                 Some(0),
-                format!("Invalid struct field type {}", n.0)
+                format!("Invalid struct field type {}", name)
               ));
             } else {
-              return Ok(struct_type.unwrap().0.as_basic_type_enum());
+              let struct_type = self.context.get_struct_type(&name);
+              return Ok((struct_type.unwrap().as_basic_type_enum(), Some(name)));
             }
           }
         }
@@ -718,7 +774,8 @@ impl<'ctx> CodeGen<'ctx> {
 
   // Name of type struct; name of variable; fields
   fn build_initialize_struct(&mut self, struct_name: String, var_name: String, fields: Vec<Literals>, block: BasicBlock<'ctx>) -> Result<PointerValue<'ctx>, Error> {
-    let (struct_type, field_types) = self.struct_table.get(&struct_name)
+    let struct_type = self.context.get_struct_type(&struct_name).unwrap();
+    let field_types = self.struct_table.get(&struct_name)
       .ok_or_else(|| Error::new(
         Error::CompilerError,
         None,
@@ -754,9 +811,9 @@ impl<'ctx> CodeGen<'ctx> {
         // Ensure type consistency
         if field_val_type.is_pointer_type() {
           // Check struct table for ptr name
-          let struct_type = self.struct_table.get(&struct_name);
-          if struct_type.is_some() {
-            field_val_type = struct_type.unwrap().0.as_basic_type_enum();
+          let struct_ref = self.struct_table.get(&struct_name);
+          if struct_ref.is_some() {
+            field_val_type = self.context.get_struct_type(&struct_name).unwrap().as_basic_type_enum();
 
           // Check symbol table
           } else {
@@ -1340,8 +1397,8 @@ impl<'ctx> CodeGen<'ctx> {
             },
             _ => {
               // Check for defined type (TODO: add aliases)
-              let struct_type = self.struct_table.get(&typ.0);
-              if struct_type.is_none() {
+              let struct_ref = self.struct_table.get(&typ.0);
+              if struct_ref.is_none() {
                 return Err(Error::new(
                   Error::NameError,
                   None,
@@ -1351,7 +1408,7 @@ impl<'ctx> CodeGen<'ctx> {
                   format!("Type {} not found", typ.0)
                 ));
               } else {
-                let (struct_type, _) = struct_type.unwrap();
+                let struct_type = self.context.get_struct_type(&typ.0).unwrap();
                 let t = struct_type.as_basic_type_enum();
                 parameters.push(t.into());
                 t.into()
@@ -1386,8 +1443,7 @@ impl<'ctx> CodeGen<'ctx> {
       "bool" => self.context.bool_type().fn_type(&parameters, variadic),
       _ => {
         if self.struct_table.contains_key(&returns) {
-          let (struct_type, _) = self.struct_table.get(&returns).unwrap();
-          struct_type.fn_type(&parameters, variadic)
+          self.context.get_struct_type(&returns).unwrap().fn_type(&parameters, variadic)
         } else {
           return Err(Error::new(
             Error::NameError,
@@ -1846,7 +1902,7 @@ impl<'ctx> CodeGen<'ctx> {
         return Ok(val);
       },
       Expr::Index(parent, child) => {
-        return self.build_index_extract(parent, child, block);
+        return Ok(self.build_index_extract(true, false, None, parent, child, block)?.0);
       }
       Expr::Assignment(_, _, _) => panic!("Assignment not allowed here"),
       _ => panic!("Invalid expression"),
@@ -2549,6 +2605,33 @@ mod tests {
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
     let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
     build_and_assert(ir, "2");
+    return Ok(());
+  }
+
+  #[test]
+  fn test_deep_type_struct_index() -> Result<(), Error> {
+    let context = Context::create();
+    let mut codegen = CodeGen::new(&context);
+    let code = "// types
+    type TestType = { a: int, b: int, c: int, d: int, };
+    type TestTypeTwo = { test_one: TestType, };
+    type TestTypeThree = { test_two: TestTypeTwo, };
+    type TestTypeFour = { test_three: TestTypeThree, };
+    // vars
+    TestType test_var = { a: 1, b: 2, c: 3, d: 4 };
+    TestTypeTwo test_var_two = { test_one: test_var };
+    TestTypeThree test_var_three = { test_two: test_var_two };
+    TestTypeFour test_var_four = { test_three: test_var_three };
+    printf(\"%d, %d, %d, %d\",
+      test_var_four.test_three.test_two.test_one.a,
+      test_var_three.test_two.test_one.b,
+      test_var_two.test_one.c,
+      test_var.d
+    );".to_string();
+    let mut parser = crate::Parser::new();
+    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    build_and_assert(ir, "1, 2, 3, 4");
     return Ok(());
   }
 }
