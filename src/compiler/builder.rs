@@ -2566,7 +2566,7 @@ mod tests {
     printf(\"%d\", c);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "5");
     return Ok(());
   }
@@ -2580,7 +2580,7 @@ mod tests {
     printf(\"%d\", a / b);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "3");
     return Ok(());
   }
@@ -2594,7 +2594,7 @@ mod tests {
     printf(\"%d\", b);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "3");
     return Ok(());
   }
@@ -2609,7 +2609,7 @@ mod tests {
     printf(\"%d\", b);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "4");
     return Ok(());
   }
@@ -2624,7 +2624,7 @@ mod tests {
     }".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "12345");
     return Ok(());
   }
@@ -2640,7 +2640,7 @@ mod tests {
     }".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "01234");
     return Ok(());
   }
@@ -2658,7 +2658,7 @@ mod tests {
     printf(\"%d\", a);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "5");
     return Ok(());
   }
@@ -2675,7 +2675,7 @@ mod tests {
     printf(\"%d\", test.b);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "2");
     return Ok(());
   }
@@ -2702,7 +2702,7 @@ mod tests {
     );".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "1, 2, 3, 4");
     return Ok(());
   }
@@ -2720,7 +2720,7 @@ mod tests {
     printf(\"%d\", test_var);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "2");
     return Ok(());
   }
