@@ -532,6 +532,9 @@ impl Parser {
       && self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator
       && self.get_precedence(self.iter.current.as_ref().unwrap().clone()) >= precedence {
 
+      // If we are indexing and we encounter an operator, we are done indexing
+      if self.is_indexing { break; };
+
       let operator = self.iter.next().unwrap();
       if ["++", "--"].contains(&&operator.value.as_ref().unwrap().as_str()) {
         return Ok(self.get_expr(Expr::UnaryOperator(
