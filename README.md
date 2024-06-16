@@ -9,18 +9,20 @@ The Jink programming language
 ![GitHub Repo stars](https://img.shields.io/github/stars/jink-lang/jink?style=for-the-badge)
 
 ## About
-This is the home of the [Jink](https://github.com/jink-lang/jink) programming language. This is a WIP and any contributions are welcome. Read more in the [Contributing](#contributing) section below.
+Jink is a functional, object-oriented programming language designed with programmer familiarity in mind. Inspired by JavaScript, C++, Python and Go, Jink aims to offer a streamlined, modern and flexible but familiar syntax with enough power behind it to leave more room and time for actually writing good software.
 
-There is a [Discord server](https://discord.gg/cWzcQz2) that hosts the project where you can ask questions, get help, and chat with other contributors.
+This is a WIP and any contributions are welcome. Read more in the [Contributing](#contributing) section below. <!-- To read on the current state of the language, visit the [Wiki](https://github.com/jink-lang/jink/wiki). -->
+
+There is a [Discord](https://discord.gg/cWzcQz2) server that hosts the project where you can ask questions, get help, and chat with other contributors. And [another](https://discord.gg/hUhDG8cfF9) broader community from contributors to this project where we chat about projects in general. Jink repo updates are posted in both.
 
 ## Status
-The project is in its very early stages and being actively developed. If you have familiarity with compilers and/or LLVM, your expertise would be greatly appreciated.
+Jink is in its early stages and being actively developed. If you have familiarity with compilers and/or LLVM, your expertise would be greatly appreciated.
 
-We have begun implementing the first stage compiler in Rust. The interpreter exists solely to mess about with the language and to test/simulate it. There are a number of issues and features that need to be addressed before we can move on to the next stage.
+We have begun implementing the first stage compiler in Rust. There are a number of issues and features that need to be addressed before we can move on to the next stage.
 
 #### Goal Checklist / TODOs
 
-The lexer and parser are now up to snuff with and surpass the original interpreted implementation. Here are a list of goals that scope out the new project and repository, not in or by any particular order or specification.
+Here are a list of goals that scope out the Jink project and repository, not in or by any particular order or specification.
 
 ##### General
 - [ ] Design standard for modules
@@ -32,39 +34,33 @@ The lexer and parser are now up to snuff with and surpass the original interpret
 - [ ] Add pull request templates
 ##### Compiler
 - [ ] Standardize type inference
-- [x] Fix nested conditionals
 - [ ] Build dynamic array type
 - [ ] Build heterogenous array type
 - [ ] Build nested arrays
 - [x] Build structs/types
 - [x] Build nested structs
 - [x] Build struct indexing
-- [ ] Build nested struct indexing
-- [x] Build for loops
-- [x] Build while loops
-- [x] Build nested loops
-- [ ] Build break and continue for loops
+- [x] Build nested struct indexing
+- [ ] Build break and continue in loops
 - [ ] Build classes
 - [ ] Build class inheritance
+- [ ] Build enums
 - [ ] Build external statements
 - [ ] Build del statements
 - [x] Build module/import system
 - [ ] Validate module imports
 - [ ] Handle named module indexing
 - [ ] Build string interpolation
-- [ ] Write loop tests
-- [ ] Write struct tests
+- [x] Write struct tests
 - [ ] Write function tests
 - [ ] Write module tests
 ##### Lexer
 - [ ] Lex string interpolation
 ##### Parser
-- [x] Parse type definitions
+- [ ] Parse enum definitions
 - [x] Parse objects
-- [x] Parse arrays
-- [x] Parse classes
 - [ ] Parse self keyword in classes
-- [ ] Parse self keyword in methods
+- [ ] Parse self keyword in class methods
 - [x] Parse module imports
 - [ ] Validate against circularly imported modules
 - [ ] Parse string interpolation

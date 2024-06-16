@@ -98,14 +98,14 @@ fn main() {
 
     let do_execute = !out && !out_llvm;
 
-    let main = builder.build(
+    let ir = builder.build(
       code.clone(),
       parsed.unwrap(),
       parser.namespaces,
       verbose,
       do_execute
     );
-    if let Err(err) = main {
+    if let Err(err) = ir {
       println!("{}", err);
       return;
     }
@@ -113,7 +113,7 @@ fn main() {
 
     // Put LLVM IR to file
     let mut file = File::create("output.ll").unwrap();
-    file.write_all(builder.module.print_to_string().to_bytes()).unwrap();
+    file.write_all(ir.unwrap().to_bytes()).unwrap();
     if out_llvm {
       println!("Outputted LLVM IR to output.ll");
       return;
