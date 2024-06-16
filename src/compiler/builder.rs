@@ -313,6 +313,9 @@ impl<'ctx> CodeGen<'ctx> {
       },
       Expr::Public(expr) => {
         block = self.process_top(*expr, main_fn, block)?;
+      },
+      Expr::Delete(expr) => {
+        println!("Delete: {:?}", expr);
       }
       // When we add top level index expressions
       // i.e. hello[0].bye() or hello.bye() or module.property and module.method()

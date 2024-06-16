@@ -68,7 +68,10 @@ Here are a list of goals that scope out the Jink project and repository, not in 
 - [ ] Parse recursive indexing (arrays)
 - [x] Parse indexing (object properties and methods)
 - [x] Parse recursive indexing (object properties and methods)
-- [ ] Parse del statements
+- [x] Parse del statements
+- [x] Parse while loops
+- [x] Parse for loops
+- [x] Parse break and continue for loops
 - [x] Parse public statements
 - [ ] Parse external statements
 

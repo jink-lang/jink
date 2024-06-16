@@ -132,6 +132,9 @@ pub enum Expr {
   /// expr
   Public(Box<Expression>),
 
+  /// expr
+  Delete(Box<Expression>),
+
   /// parent; child
   /// 
   /// hello.there()
