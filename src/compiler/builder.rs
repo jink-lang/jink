@@ -40,6 +40,11 @@ pub struct CodeGen<'ctx> {
   >,
   /// Stack of variables known to be structs and their corresponding struct type names
   struct_stack: IndexMap<String, String>,
+  /// We reuse the struct table for enums, but map variables to their enum type names with this
+  enum_table: IndexMap<
+    String,                // Enum type name
+    String                 // Enum variants
+  >,
   _type_tags: IndexMap<String, u64>,
   execution_engine: ExecutionEngine<'ctx>
 }
@@ -63,6 +68,7 @@ impl<'ctx> CodeGen<'ctx> {
       symbol_table_stack: Vec::new(),
       struct_table: IndexMap::new(),
       struct_stack: IndexMap::new(),
+      enum_table: IndexMap::new(),
       _type_tags: Self::map_types(),
       execution_engine
     };
@@ -280,6 +286,9 @@ impl<'ctx> CodeGen<'ctx> {
       Expr::TypeDef(name, value) => {
         self.build_struct(Some(name), value)?;
       },
+      Expr::Enum(Name(name), variants) => {
+        self.build_enum(name, variants)?;
+      },
       Expr::Conditional(typ, expr, body, else_body) => {
         let merge_block = self.context.append_basic_block(main_fn, "merge");
         (_, _, block) = self.build_if(true, typ, expr, body, else_body, main_fn, block, merge_block, None, None)?;
@@ -362,9 +371,9 @@ impl<'ctx> CodeGen<'ctx> {
     // Get struct type name from parent
     let (parent_val, parent_name) = if getting_inner_parent && !passing_type_name {
       let parent_val = self.visit(&parent, block)?;
-      // Visiting a struct always returns a pointer
-      // TODO: Do further analysis to ensure that we have a struct
-      if !parent_val.is_pointer_value() {
+      // Ensure we are visiting a struct
+      // TODO: Do further analysis to ensure that we have a struct when it's a pointer?
+      if !parent_val.is_pointer_value() && !parent_val.is_struct_value() {
         return Err(Error::new(
           Error::CompilerError,
           None,
@@ -374,7 +383,14 @@ impl<'ctx> CodeGen<'ctx> {
           "Indexed must be of struct type".to_string()
         ));
       }
-      (Some(parent_val), parent_val.get_name().to_str().unwrap().to_owned())
+
+      // Hack to make sure the parent name is correct
+      // LLVM type name can get loaded with a number for multiple enum references
+      if let Expr::Literal(Literals::Identifier(Name(ref name))) = parent.expr {
+        (Some(parent_val), name.to_owned())
+      } else {
+        (Some(parent_val), parent_val.get_name().to_str().unwrap().to_owned())
+      }
     } else {
       match parent.expr {
         Expr::Literal(Literals::Identifier(Name(ref name))) => (
@@ -421,8 +437,13 @@ impl<'ctx> CodeGen<'ctx> {
       // Try to find the index field on the struct
       for (i, (field_name, _, struct_type_if_any)) in struct_ref.unwrap().iter().enumerate() {
         if field_name == &name {
-          let struct_val = self.builder.build_load(struct_type, parent_val.unwrap().into_pointer_value(), "struct_val").unwrap();
-          let value = self.builder.build_extract_value(struct_val.into_struct_value(), i as u32, "indexed_value").unwrap();
+          // If we already have a struct value we can extract the field directly - currently only enums are passed this way
+          let struct_val = if parent_val.unwrap().is_struct_value() {
+            parent_val.unwrap().into_struct_value()
+          } else {
+            self.builder.build_load(struct_type, parent_val.unwrap().into_pointer_value(), "struct_val").unwrap().into_struct_value()
+          };
+          let value = self.builder.build_extract_value(struct_val, i as u32, "indexed_value").unwrap();
           return Ok((value, struct_type_if_any.clone()));
         }
       }
@@ -633,6 +654,46 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(end_block);
   }
 
+  fn build_enum(&mut self, name: String, variants: Vec<Literals>) -> Result<(), Error> {
+    let mut fields: Vec<(String, BasicTypeEnum<'ctx>, Option<String>)> = vec![];
+    let mut field_types: Vec<BasicTypeEnum> = vec![];
+    let mut field_values: Vec<BasicValueEnum> = vec![];
+    for (i, variant) in variants.iter().enumerate() {
+      let variant_type = self.context.i64_type();
+      // Get the int value of the variant
+      let val = variant_type.const_int(i as u64, false);
+      field_values.push(val.as_basic_value_enum());
+      field_types.push(variant_type.as_basic_type_enum());
+
+      match variant {
+        Literals::Identifier(Name(variant_name)) => {
+          fields.push((variant_name.clone(), variant_type.as_basic_type_enum(), None));
+        },
+        _ => unreachable!()
+      }
+    }
+
+    // Create the enum struct
+    let opaque = self.context.opaque_struct_type(&format!("{}_enum", name));
+    opaque.set_body(&field_types, false);
+
+    // Allocate space for the enum struct
+    let enum_struct_type = self.context.struct_type(&field_types, false);
+    let enum_ptr = self.builder.build_alloca(enum_struct_type, &format!("{}_enum", name)).unwrap();
+
+    // Store the enum fields
+    for (i, (field_name, _, _)) in fields.iter().enumerate() {
+      let field_ptr = self.builder.build_struct_gep(enum_struct_type, enum_ptr, i as u32, &format!("{}_{}", &name, field_name)).unwrap();
+      self.builder.build_store(field_ptr, field_values[i]).unwrap();
+    }
+
+    self.set_symbol(name.clone(), Some(enum_ptr), enum_struct_type.as_basic_type_enum(), enum_ptr.as_basic_value_enum());
+    self.struct_stack.insert(name.clone(), format!("{}_enum", name));
+    self.struct_table.insert(format!("{}_enum", name), fields);
+    self.enum_table.insert(name.clone(), format!("{}_enum", name));
+    return Ok(());
+  }
+
   fn build_struct(&mut self, name: Option<Literals>, value: Box<Literals>) -> Result<StructType<'ctx>, Error> {
     // Extract struct name if it's an identifier
     let mut struct_lit_name: Option<String> = None;
@@ -743,7 +804,13 @@ impl<'ctx> CodeGen<'ctx> {
           "float" => return Ok((self.context.f64_type().as_basic_type_enum(), None)),
           "bool" => return Ok((self.context.bool_type().as_basic_type_enum(), None)),
           _ => {
-            // Check for existing type alias
+            // Check for enum
+            let enum_type = self.enum_table.get(&name);
+            if enum_type.is_some() {
+              return Ok((self.context.i64_type().as_basic_type_enum(), Some(enum_type.unwrap().to_string())));
+            }
+
+            // Check for type alias
             let struct_type = self.struct_table.get(&name);
             if struct_type.is_none() {
               return Err(Error::new(
@@ -1127,7 +1194,7 @@ impl<'ctx> CodeGen<'ctx> {
       }
     };
 
-    let set: BasicValueEnum;
+    let mut set: BasicValueEnum;
     if value.is_some() {
       if let Expr::Literal(e) = &value.as_ref().unwrap().expr {
         if let Literals::Object(obj) = e {
@@ -1149,6 +1216,11 @@ impl<'ctx> CodeGen<'ctx> {
     // If no value is provided, set to null
     } else {
       set = self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum();
+    }
+
+    // Convert bool to int when storing (for now)
+    if set.get_type() == self.context.bool_type().as_basic_type_enum() {
+      set = self.builder.build_int_z_extend(set.into_int_value(), self.context.i64_type(), "bool_to_int").unwrap().as_basic_value_enum();
     }
 
     // TODO: Check for constants
@@ -1805,7 +1877,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         // Build args
         for (i, arg) in args.iter().enumerate() {
-          let val: BasicValueEnum<'ctx>;
+          let mut val: BasicValueEnum<'ctx>;
 
           // If arg is an identifier (variable) get the pointer and value if possible
           if let Expr::Literal(Literals::Identifier(Name(name))) = arg.expr.clone() {
@@ -1819,6 +1891,12 @@ impl<'ctx> CodeGen<'ctx> {
           } else {
             val = self.visit(&arg, block)?;
           }
+
+          // Convert bool to int when passing (for now)
+          if val.get_type() == self.context.bool_type().as_basic_type_enum() {
+            val = self.builder.build_int_z_extend(val.into_int_value(), self.context.i64_type(), "bool_to_int").unwrap().as_basic_value_enum();
+          }
+
           match val.into() {
             BasicMetadataValueEnum::IntValue(int_value) => {
               let int_type = int_value.get_type();
@@ -2632,6 +2710,24 @@ mod tests {
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
     let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
     build_and_assert(ir, "1, 2, 3, 4");
+    return Ok(());
+  }
+
+  #[test]
+  fn test_enum_type() -> Result<(), Error> {
+    let context = Context::create();
+    let mut codegen = CodeGen::new(&context);
+    let code = "enum TestEnum = {
+      TestOne,
+      TestTwo,
+      TestThree,
+    }
+    let test_var = TestEnum.TestThree;
+    printf(\"%d\", test_var);".to_string();
+    let mut parser = crate::Parser::new();
+    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    build_and_assert(ir, "2");
     return Ok(());
   }
 }

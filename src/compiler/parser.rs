@@ -92,6 +92,7 @@ impl Parser {
           Expr::Function(_, _, _, _) => {},
           Expr::Call(_, _) => {},
           Expr::TypeDef(_, _) => {},
+          Expr::Enum(_, _) => {},
           Expr::Class(_, _, _) => {},
           Expr::ModuleParsed(_, _, _, _) => {},
           Expr::Assignment(_, _, _) => {},
@@ -169,6 +170,8 @@ impl Parser {
           for expr in ast.clone() {
             if let Expr::Public(exp) = expr.expr {
               if let Expr::TypeDef(Literals::Identifier(Name(name)), _) = exp.expr.clone() {
+                self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
+              } else if let Expr::Enum(Name(name), _) = exp.expr.clone() {
                 self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
               } else if let Expr::Function(Name(name), _, _, _) = exp.expr.clone() {
                 self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
@@ -489,6 +492,10 @@ impl Parser {
       self.iter.next();
       return self.parse_type();
 
+    } else if init.unwrap().value.as_ref().unwrap() == "enum" {
+      self.iter.next();
+      return self.parse_enum();
+
     } else if init.unwrap().value.as_ref().unwrap() == "for" {
       return self.parse_for_loop();
 
@@ -768,7 +775,7 @@ impl Parser {
         let expression = self.parse_top()?;
 
         match expression.expr.clone() {
-          Expr::Class(_, _, _) | Expr::Function(_, _, _, _) | Expr::TypeDef(_, _) => {
+          Expr::Class(_, _, _) | Expr::Function(_, _, _, _) | Expr::TypeDef(_, _) | Expr::Enum(_, _) => {
             return Ok(self.get_expr(Expr::Public(Box::new(expression)),
               Some(token.line), token.start_pos, token.end_pos
             ));
@@ -915,6 +922,62 @@ impl Parser {
       self.iter.current.as_ref().unwrap().start_pos,
       Some(self.iter.current.as_ref().unwrap().line)
     ));
+  }
+
+  fn parse_enum(&mut self) -> Result<Expression, Error> {
+    let init = self.consume(&[TokenTypes::Identifier], false)?;
+
+    // Expect =
+    if self.iter.current.is_none()
+      || self.iter.current.as_ref().unwrap().of_type != TokenTypes::Operator
+      || self.iter.current.as_ref().unwrap().value.as_ref().unwrap() != "=" {
+      return Err(Error::new(
+        Error::UnexpectedToken,
+        Some(self.iter.current.as_ref().unwrap().clone()),
+        self.code.lines().nth((self.iter.current.as_ref().unwrap().line - 1) as usize).unwrap(),
+        self.iter.current.as_ref().unwrap().start_pos,
+        self.iter.current.as_ref().unwrap().end_pos,
+        "Expected \"=\", got".to_string()
+      ));
+    }
+    self.iter.next();
+
+    self.consume(&[TokenTypes::LBrace], false)?;
+    self.skip_newlines(None);
+
+    let mut variants = vec![];
+    while self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type != TokenTypes::RBrace {
+      self.skip_newlines(None);
+      let variant = self.consume(&[TokenTypes::Identifier], false)?;
+      variants.push(Literals::Identifier(Name(variant.clone().value.unwrap())));
+      if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Comma {
+        self.iter.next();
+        self.skip_newlines(None);
+        continue;
+      }
+
+      self.skip_newlines(None);
+    }
+
+    if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RBrace {
+      self.consume(&[TokenTypes::RBrace], false)?;
+      let enum_expr = self.get_expr(Expr::Enum(Name(init.value.clone().unwrap()), variants),
+        Some(init.line),
+        init.start_pos,
+        Some(self.iter.current.as_ref().unwrap().line)
+      );
+      self.add_name(init.value.unwrap(), enum_expr.clone())?;
+      return Ok(enum_expr);
+    } else {
+      return Err(Error::new(
+        Error::UnexpectedToken,
+        Some(init.clone()),
+        self.code.lines().nth((init.line - 1) as usize).unwrap(),
+        init.start_pos,
+        init.end_pos,
+        "Expected \",\" or \"}}\", got".to_string()
+      ));
+    }
   }
 
   fn parse_type(&mut self) -> Result<Expression, Error> {

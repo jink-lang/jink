@@ -44,7 +44,7 @@ Here are a list of goals that scope out the Jink project and repository, not in 
 - [ ] Build break and continue in loops
 - [ ] Build classes
 - [ ] Build class inheritance
-- [ ] Build enums
+- [x] Build enums
 - [ ] Build external statements
 - [ ] Build del statements
 - [x] Build module/import system
@@ -57,7 +57,7 @@ Here are a list of goals that scope out the Jink project and repository, not in 
 ##### Lexer
 - [ ] Lex string interpolation
 ##### Parser
-- [ ] Parse enum definitions
+- [x] Parse enum definitions
 - [x] Parse objects
 - [ ] Parse self keyword in classes
 - [ ] Parse self keyword in class methods

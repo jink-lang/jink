@@ -51,7 +51,7 @@ pub const KEYWORDS: &[&str] = &[
   "while", "for", "in", "break", "continue",
   "return", "del",
   "true", "false", "null",
-  "fun", "let", "const", "type",
+  "fun", "let", "const", "type", "enum",
   "cls", "self", "pub",
   "import", "from", "as"
 ];
@@ -107,6 +107,9 @@ pub enum Expr {
 
   /// name; literal
   TypeDef(Literals, Box<Literals>),
+
+  // name; literals
+  Enum(Name, Vec<Literals>),
 
   /// if/else/elseif; expression; body; else-body
   Conditional(Type, Option<Box<Expression>>, Box<Vec<Expression>>, Option<Box<Vec<Expression>>>),
@@ -278,7 +281,7 @@ impl std::fmt::Display for Error {
       },
       Error::UnexpectedExpression(err) => {
         let underline = "-".repeat(err.line.split("\n").collect::<Vec<&str>>()[0].len());
-        return write!(f, "Unexpected expression at {}:{}\n  {}\n  {}\n  {}", err.token.as_ref().unwrap().line,
+        return write!(f, "{} at {}:{}\n  {}\n  {}\n  {}", err.message, err.token.as_ref().unwrap().line,
           err.start_pos.unwrap() + 1, err.line,
           underline,
           " ".repeat((err.start_pos.unwrap()) as usize) + "^"
