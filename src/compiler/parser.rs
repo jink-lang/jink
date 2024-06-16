@@ -169,7 +169,7 @@ impl Parser {
         if path.last().unwrap().0 == "*" {
           for expr in ast.clone() {
             if let Expr::Public(exp) = expr.expr {
-              if let Expr::TypeDef(Literals::Identifier(Name(name)), _) = exp.expr.clone() {
+              if let Expr::TypeDef(Name(name), _) = exp.expr.clone() {
                 self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
               } else if let Expr::Enum(Name(name), _) = exp.expr.clone() {
                 self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
@@ -1002,7 +1002,7 @@ impl Parser {
     if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Identifier {
       let t = self.iter.next().unwrap();
       let type_alias = self.get_expr(Expr::TypeDef(
-        Literals::Identifier(Name(String::from(ident.value.clone().unwrap()))),
+        Name(String::from(ident.value.clone().unwrap())),
         Box::new(Literals::Identifier(Name(String::from(t.value.unwrap()))))
       ), Some(ident.line), ident.start_pos, Some(t.line));
       self.add_name(ident.value.unwrap(), type_alias.clone())?;
@@ -1069,7 +1069,7 @@ impl Parser {
       // typedef / struct
       } else {
         return Ok(self.get_expr(Expr::TypeDef(
-          Literals::Identifier(Name(String::from(type_tok.as_ref().unwrap().value.as_ref().unwrap()))),
+          Name(String::from(type_tok.as_ref().unwrap().value.as_ref().unwrap())),
           Box::new(Literals::Object(Box::new(obj)))
         ),
         Some(type_tok.as_ref().unwrap().line),
@@ -2019,7 +2019,7 @@ mod tests {
         )
       )), None, None, None),
       parser.get_expr(Expr::TypeDef(
-        Literals::Identifier(Name(String::from("Number"))),
+        Name(String::from("Number")),
         Box::new(Literals::Identifier(Name(String::from("int"))))
       ), None, None, None),
       parser.get_expr(Expr::Literal(Literals::EOF), None, None, None)

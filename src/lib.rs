@@ -106,7 +106,7 @@ pub enum Expr {
   ContinueLoop, BreakLoop,
 
   /// name; literal
-  TypeDef(Literals, Box<Literals>),
+  TypeDef(Name, Box<Literals>),
 
   // name; literals
   Enum(Name, Vec<Literals>),

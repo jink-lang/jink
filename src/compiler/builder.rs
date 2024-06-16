@@ -283,7 +283,7 @@ impl<'ctx> CodeGen<'ctx> {
       Expr::Assignment(_, _, _) => {
         self.build_assignment(expr, block, false)?;
       },
-      Expr::TypeDef(name, value) => {
+      Expr::TypeDef(Name(name), value) => {
         self.build_struct(Some(name), value)?;
       },
       Expr::Enum(Name(name), variants) => {
@@ -694,16 +694,7 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(());
   }
 
-  fn build_struct(&mut self, name: Option<Literals>, value: Box<Literals>) -> Result<StructType<'ctx>, Error> {
-    // Extract struct name if it's an identifier
-    let mut struct_lit_name: Option<String> = None;
-    if name.is_some() {
-      struct_lit_name = match name.unwrap() {
-        Literals::Identifier(name) => Some(name.0),
-        _ => None,
-      };
-    }
-
+  fn build_struct(&mut self, struct_lit_name: Option<String>, value: Box<Literals>) -> Result<StructType<'ctx>, Error> {
     // TODO: If value is an identifier, handle it as a type alias
 
     // Build struct if value is an object
