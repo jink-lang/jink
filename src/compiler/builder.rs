@@ -586,7 +586,7 @@ impl<'ctx> CodeGen<'ctx> {
           return Err(Error::new(
             Error::CompilerError,
             None,
-            self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap(),
+            self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
             expr.first_pos,
             Some(expr.first_pos.unwrap() + n.len() as i32),
             "Invalid iterable type".to_string()
@@ -1463,21 +1463,32 @@ impl<'ctx> CodeGen<'ctx> {
             },
             _ => {
               // Check for defined type (TODO: add aliases)
-              let struct_ref = self.struct_table.get(&typ.0);
-              if struct_ref.is_none() {
-                return Err(Error::new(
-                  Error::NameError,
-                  None,
-                  &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-                  param.first_pos,
-                  Some(typ.0.len() as i32),
-                  format!("Type {} not found", typ.0)
-                ));
-              } else {
-                let struct_type = self.context.get_struct_type(&typ.0).unwrap();
-                let t = struct_type.as_basic_type_enum();
+
+              // Check for enum definition
+              let enum_type = self.enum_table.get(&typ.0);
+              if enum_type.is_some() {
+                let t = self.context.i64_type();
                 parameters.push(t.into());
                 t.into()
+
+              // Check for struct definition
+              } else {
+                let struct_ref = self.struct_table.get(&typ.0);
+                if struct_ref.is_none() {
+                  return Err(Error::new(
+                    Error::NameError,
+                    None,
+                    &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+                    param.first_pos,
+                    Some(typ.0.len() as i32),
+                    format!("Type {} not found", typ.0)
+                  ));
+                } else {
+                  let struct_type = self.context.get_struct_type(&typ.0).unwrap();
+                  let t = struct_type.as_basic_type_enum();
+                  parameters.push(t.into());
+                  t.into()
+                }
               }
             },
           };
