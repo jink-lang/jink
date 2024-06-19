@@ -1259,7 +1259,9 @@ impl Parser {
         init.unwrap().start_pos,
         Some(self.iter.current.as_ref().unwrap().line)
       );
-      self.add_name(identifier.value.as_ref().unwrap().to_owned(), func.clone())?;
+      if !self.is_parsing_class_body {
+        self.add_name(identifier.value.as_ref().unwrap().to_owned(), func.clone())?;
+      }
       return Ok(func);
     } else {
       let func = self.get_expr(
@@ -1273,7 +1275,9 @@ impl Parser {
         init.unwrap().start_pos,
         Some(self.iter.current.as_ref().unwrap().line)
       );
-      self.add_name(identifier.value.as_ref().unwrap().to_owned(), func.clone())?;
+      if !self.is_parsing_class_body {
+        self.add_name(identifier.value.as_ref().unwrap().to_owned(), func.clone())?;
+      }
       return Ok(func);
     }
   }
