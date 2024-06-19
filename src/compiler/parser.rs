@@ -94,6 +94,7 @@ impl Parser {
           Expr::Function(_, _, _, _) => {},
           Expr::Call(_, _) => {},
           Expr::TypeDef(_, _) => {},
+          Expr::Enum(_, _) => {},
           Expr::Class(_, _, _) => {},
           Expr::ModuleParsed(_, _, _, _) => {},
           Expr::Assignment(_, _, _) => {},
@@ -103,6 +104,7 @@ impl Parser {
           Expr::ForLoop(_, _, _) => {},
           Expr::WhileLoop(_, _) => {},
           Expr::Public(_) => {},
+          Expr::Delete(_) => {},
           // Expr::Index(_, _) => {}, // Will only be necessary when indexing at top level - module imports and class methods
           _ => {
             return Err(Error::new(
@@ -170,7 +172,9 @@ impl Parser {
         if path.last().unwrap().0 == "*" {
           for expr in ast.clone() {
             if let Expr::Public(exp) = expr.expr {
-              if let Expr::TypeDef(Literals::Identifier(Name(name)), _) = exp.expr.clone() {
+              if let Expr::TypeDef(Name(name), _) = exp.expr.clone() {
+                self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
+              } else if let Expr::Enum(Name(name), _) = exp.expr.clone() {
                 self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
               } else if let Expr::Function(Name(name), _, _, _) = exp.expr.clone() {
                 self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
@@ -490,9 +494,16 @@ impl Parser {
     } else if init.unwrap().value.as_ref().unwrap() == "pub" {
       return self.parse_public();
 
+    } else if init.unwrap().value.as_ref().unwrap() == "del" {
+      return self.parse_delete();
+
     } else if init.unwrap().value.as_ref().unwrap() == "type" {
       self.iter.next();
       return self.parse_type();
+
+    } else if init.unwrap().value.as_ref().unwrap() == "enum" {
+      self.iter.next();
+      return self.parse_enum();
 
     } else if init.unwrap().value.as_ref().unwrap() == "for" {
       return self.parse_for_loop();
@@ -525,6 +536,9 @@ impl Parser {
     while self.iter.current.is_some()
       && self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator
       && self.get_precedence(self.iter.current.as_ref().unwrap().clone()) >= precedence {
+
+      // If we are indexing and we encounter an operator, we are done indexing
+      if self.is_indexing { break; };
 
       let operator = self.iter.next().unwrap();
       if ["++", "--"].contains(&&operator.value.as_ref().unwrap().as_str()) {
@@ -770,37 +784,18 @@ impl Parser {
     let init = self.iter.current.as_ref().unwrap().clone();
 
     if let Some(token) = &self.iter.current.clone() {
-      if token.of_type == TokenTypes::Keyword && token.value.as_ref().unwrap() == "pub" {
-        self.iter.next();
+      self.iter.next();
 
-        let expression = self.parse_top()?;
+      let expression = self.parse_top()?;
 
-        match expression.expr.clone() {
-          Expr::Class(_, _, _) | Expr::Function(_, _, _, _) | Expr::TypeDef(_, _) => {
-            return Ok(self.get_expr(Expr::Public(Box::new(expression)),
-              Some(token.line), token.start_pos, token.end_pos
-            ));
-          },
-          Expr::Assignment(typ, name_expr, _) => {
-            if typ.is_none() {
-              return Err(Error::new(
-                Error::UnexpectedToken,
-                Some(token.clone()),
-                self.code.lines().nth((token.line - 1) as usize).unwrap(),
-                token.start_pos,
-                token.end_pos,
-                "Expected named expression after \"pub\"".to_string()
-              ));
-            }
-
-            if let Expr::Literal(Literals::Identifier(Name(name))) = name_expr.expr {
-              self.add_name(name.to_string(), expression.clone())?;
-              return Ok(self.get_expr(Expr::Public(Box::new(expression)),
-                Some(token.line), token.start_pos, token.end_pos
-              ));
-            }
-          },
-          _ => {
+      match expression.expr.clone() {
+        Expr::Class(_, _, _) | Expr::Function(_, _, _, _) | Expr::TypeDef(_, _) | Expr::Enum(_, _) => {
+          return Ok(self.get_expr(Expr::Public(Box::new(expression)),
+            Some(token.line), token.start_pos, token.end_pos
+          ));
+        },
+        Expr::Assignment(typ, name_expr, _) => {
+          if typ.is_none() {
             return Err(Error::new(
               Error::UnexpectedToken,
               Some(token.clone()),
@@ -809,8 +804,25 @@ impl Parser {
               token.end_pos,
               "Expected named expression after \"pub\"".to_string()
             ));
-          },
-        }
+          }
+
+          if let Expr::Literal(Literals::Identifier(Name(name))) = name_expr.expr {
+            self.add_name(name.to_string(), expression.clone())?;
+            return Ok(self.get_expr(Expr::Public(Box::new(expression)),
+              Some(token.line), token.start_pos, token.end_pos
+            ));
+          }
+        },
+        _ => {
+          return Err(Error::new(
+            Error::UnexpectedToken,
+            Some(token.clone()),
+            self.code.lines().nth((token.line - 1) as usize).unwrap(),
+            token.start_pos,
+            token.end_pos,
+            "Expected named expression after \"pub\"".to_string()
+          ));
+        },
       }
     }
 
@@ -822,6 +834,46 @@ impl Parser {
       init.end_pos,
       "Missing expression after \"pub\"".to_string()
     ));
+  }
+
+  fn parse_delete(&mut self) -> Result<Expression, Error> {
+    let init = self.iter.current.as_ref().unwrap();
+
+    if let Some(token) = &self.iter.current.clone() {
+      self.iter.next();
+
+      let expression = self.parse_top()?;
+
+      match &expression.expr {
+        Expr::Array(_) | Expr::ArrayIndex(_, _) | Expr::Index(_, _) | Expr::Literal(Literals::Identifier(Name(_))) | Expr::Literal(Literals::Object(_)) => {
+          return Ok(self.get_expr(
+            Expr::Delete(Box::new(expression)),
+            Some(token.line),
+            token.start_pos,
+            token.end_pos,
+          ));
+        }
+        _ => {
+          return Err(Error::new(
+            Error::UnexpectedToken,
+            Some(token.clone()),
+            self.code.lines().nth((token.line - 1) as usize).unwrap(),
+            token.start_pos,
+            token.end_pos,
+            "Unsupported expression after \"del\"".to_string(),
+          ));
+        }
+      }
+    }
+
+    return Err(Error::new(
+      Error::UnexpectedToken,
+      Some(init.clone()),
+      self.code.lines().nth((init.line - 1) as usize).unwrap(),
+      init.start_pos,
+      init.end_pos,
+      "Missing expression after \"del\"".to_string(),
+    ))
   }
 
   fn parse_assignment(&mut self, typ: Option<&Token>, identifier: Token, indexed: Option<Expression>) -> Result<Expression, Error> {
@@ -925,6 +977,62 @@ impl Parser {
     ));
   }
 
+  fn parse_enum(&mut self) -> Result<Expression, Error> {
+    let init = self.consume(&[TokenTypes::Identifier], false)?;
+
+    // Expect =
+    if self.iter.current.is_none()
+      || self.iter.current.as_ref().unwrap().of_type != TokenTypes::Operator
+      || self.iter.current.as_ref().unwrap().value.as_ref().unwrap() != "=" {
+      return Err(Error::new(
+        Error::UnexpectedToken,
+        Some(self.iter.current.as_ref().unwrap().clone()),
+        self.code.lines().nth((self.iter.current.as_ref().unwrap().line - 1) as usize).unwrap(),
+        self.iter.current.as_ref().unwrap().start_pos,
+        self.iter.current.as_ref().unwrap().end_pos,
+        "Expected \"=\", got".to_string()
+      ));
+    }
+    self.iter.next();
+
+    self.consume(&[TokenTypes::LBrace], false)?;
+    self.skip_newlines(None);
+
+    let mut variants = vec![];
+    while self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type != TokenTypes::RBrace {
+      self.skip_newlines(None);
+      let variant = self.consume(&[TokenTypes::Identifier], false)?;
+      variants.push(Literals::Identifier(Name(variant.clone().value.unwrap())));
+      if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Comma {
+        self.iter.next();
+        self.skip_newlines(None);
+        continue;
+      }
+
+      self.skip_newlines(None);
+    }
+
+    if self.iter.current.as_ref().unwrap().of_type == TokenTypes::RBrace {
+      self.consume(&[TokenTypes::RBrace], false)?;
+      let enum_expr = self.get_expr(Expr::Enum(Name(init.value.clone().unwrap()), variants),
+        Some(init.line),
+        init.start_pos,
+        Some(self.iter.current.as_ref().unwrap().line)
+      );
+      self.add_name(init.value.unwrap(), enum_expr.clone())?;
+      return Ok(enum_expr);
+    } else {
+      return Err(Error::new(
+        Error::UnexpectedToken,
+        Some(init.clone()),
+        self.code.lines().nth((init.line - 1) as usize).unwrap(),
+        init.start_pos,
+        init.end_pos,
+        "Expected \",\" or \"}}\", got".to_string()
+      ));
+    }
+  }
+
   fn parse_type(&mut self) -> Result<Expression, Error> {
     let ident = self.consume(&[TokenTypes::Identifier], false)?.clone();
 
@@ -947,7 +1055,7 @@ impl Parser {
     if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Identifier {
       let t = self.iter.next().unwrap();
       let type_alias = self.get_expr(Expr::TypeDef(
-        Literals::Identifier(Name(String::from(ident.value.clone().unwrap()))),
+        Name(String::from(ident.value.clone().unwrap())),
         Box::new(Literals::Identifier(Name(String::from(t.value.unwrap()))))
       ), Some(ident.line), ident.start_pos, Some(t.line));
       self.add_name(ident.value.unwrap(), type_alias.clone())?;
@@ -1014,7 +1122,7 @@ impl Parser {
       // typedef / struct
       } else {
         return Ok(self.get_expr(Expr::TypeDef(
-          Literals::Identifier(Name(String::from(type_tok.as_ref().unwrap().value.as_ref().unwrap()))),
+          Name(String::from(type_tok.as_ref().unwrap().value.as_ref().unwrap())),
           Box::new(Literals::Object(Box::new(obj)))
         ),
         Some(type_tok.as_ref().unwrap().line),
@@ -2006,7 +2114,7 @@ mod tests {
         )
       )), None, None, None),
       parser.get_expr(Expr::TypeDef(
-        Literals::Identifier(Name(String::from("Number"))),
+        Name(String::from("Number")),
         Box::new(Literals::Identifier(Name(String::from("int"))))
       ), None, None, None),
       parser.get_expr(Expr::Literal(Literals::EOF), None, None, None)

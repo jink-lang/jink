@@ -29,13 +29,26 @@ pub struct CodeGen<'ctx> {
   builder: Builder<'ctx>,
   /// Stack of symbol tables
   symbol_table_stack: Vec<Scope<'ctx>>,
-  /// Table of struct types and their fields
-  struct_table: IndexMap<String, (StructType<'ctx>, Vec<(String, BasicTypeEnum<'ctx>)>)>,
-  /// Stack of struct names and their corresponding type struct names
+  /// Table of struct types
+  struct_table: IndexMap<
+    String,                // Struct type name
+    Vec<(                  // Struct fields
+      String,              // Field name
+      BasicTypeEnum<'ctx>, // Field type
+      Option<String>       // Struct type name if field is a struct
+    )>
+  >,
+  /// Stack of variables known to be structs and their corresponding struct type names
   struct_stack: IndexMap<String, String>,
+  /// We reuse the struct table for enums, but map variables to their enum type names with this
+  enum_table: IndexMap<
+    String, // Enum type name
+    String  // Enum variants
+  >,
+  /// Table of class types, similar to struct table but with references to parents and methods
   class_table: IndexMap<String, (              // name
     Option<Vec<String>>,                       // parents
-    Vec<(String, BasicTypeEnum<'ctx>)>,        // props
+    Vec<(String, BasicTypeEnum<'ctx>)>,        // props (field name, field type) - TODO: We don't support struct types for class fields yet
     Option<Vec<(String, FunctionValue<'ctx>)>> // methods
   )>,
   _type_tags: IndexMap<String, u64>,
@@ -61,6 +74,7 @@ impl<'ctx> CodeGen<'ctx> {
       symbol_table_stack: Vec::new(),
       struct_table: IndexMap::new(),
       struct_stack: IndexMap::new(),
+      enum_table: IndexMap::new(),
       class_table: IndexMap::new(),
       _type_tags: Self::map_types(),
       execution_engine
@@ -276,8 +290,11 @@ impl<'ctx> CodeGen<'ctx> {
       Expr::Assignment(_, _, _) => {
         self.build_assignment(expr, block, false)?;
       },
-      Expr::TypeDef(name, value) => {
+      Expr::TypeDef(Name(name), value) => {
         self.build_struct(Some(name), value)?;
+      },
+      Expr::Enum(Name(name), variants) => {
+        self.build_enum(name, variants)?;
       },
       Expr::Conditional(typ, expr, body, else_body) => {
         let merge_block = self.context.append_basic_block(main_fn, "merge");
@@ -303,6 +320,9 @@ impl<'ctx> CodeGen<'ctx> {
       },
       Expr::Public(expr) => {
         block = self.process_top(*expr, main_fn, block)?;
+      },
+      Expr::Delete(expr) => {
+        println!("Delete: {:?}", expr);
       }
       // When we add top level index expressions
       // i.e. hello[0].bye() or hello.bye() or module.property and module.method()
@@ -357,80 +377,133 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(());
   }
 
-  fn build_index_extract(&mut self, parent: Box<Expression>, child: Box<Expression>, block: BasicBlock<'ctx>) -> Result<BasicValueEnum<'ctx>, Error> {
-    let parent_val = self.visit(&parent, block)?;
-
-    // If parent is struct
-    // Visiting a struct always returns a pointer
-    if parent_val.is_pointer_value() {
-
-      // Get struct type from name
-      let struct_type = self.struct_stack.get(parent_val.get_name().to_str().unwrap());
-      if struct_type.is_none() {
+  fn build_index_extract(&mut self, getting_inner_parent: bool, passing_type_name: bool, parent_struct_ptr_if_recursing: Option<PointerValue<'ctx>>, parent: Box<Expression>, child: Box<Expression>, block: BasicBlock<'ctx>) -> Result<(BasicValueEnum<'ctx>, Option<String>), Error> {
+    // Get struct type name from parent
+    let (parent_val, parent_name) = if getting_inner_parent && !passing_type_name {
+      let parent_val = self.visit(&parent, block)?;
+      // Ensure we are visiting a struct
+      // TODO: Do further analysis to ensure that we have a struct when it's a pointer?
+      if !parent_val.is_pointer_value() && !parent_val.is_struct_value() {
         return Err(Error::new(
           Error::CompilerError,
           None,
-          self.code.lines().nth(parent.first_line.unwrap() as usize).unwrap(),
+          self.code.lines().nth((parent.first_line.unwrap() - 1) as usize).unwrap(),
           parent.first_pos,
           parent.first_pos,
-          format!("Unknown symbol: {}", parent_val.get_name().to_str().unwrap())
+          "Indexed must be of struct type".to_string()
         ));
       }
 
-      // Get type information with name
-      let struct_ref = self.struct_table.get(struct_type.unwrap());
+      // Hack to make sure the parent name is correct
+      // LLVM type name can get loaded with a number for multiple enum references
+      if let Expr::Literal(Literals::Identifier(Name(ref name))) = parent.expr {
+        (Some(parent_val), name.to_owned())
+      } else {
+        (Some(parent_val), parent_val.get_name().to_str().unwrap().to_owned())
+      }
+    } else {
+      match parent.expr {
+        Expr::Literal(Literals::Identifier(Name(ref name))) => (
+          Some(parent_struct_ptr_if_recursing.unwrap().as_basic_value_enum()),
+          name.to_owned()
+        ),
+        _ => unreachable!(),
+      }
+    };
+
+    // Get struct information by type
+    let struct_type_name = if getting_inner_parent && !passing_type_name {
+      self.struct_stack.get(&parent_name)
+    } else {
+      Some(&parent_name)
+    };
+    if struct_type_name.is_none() {
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        self.code.lines().nth((parent.first_line.unwrap() - 1) as usize).unwrap(),
+        parent.first_pos,
+        parent.first_pos,
+        format!("Unknown symbol: {}", &parent_name)
+      ));
+    }
+
+    // Get value of child
+    // Used at final index as well as passing indexes back through recursively
+    if let Expr::Literal(Literals::Identifier(Name(name))) = child.expr {
+      let struct_ref = self.struct_table.get(struct_type_name.unwrap());
       if struct_ref.is_none() {
         return Err(Error::new(
           Error::CompilerError,
           None,
-          &"",
-          Some(0),
-          Some(0),
-          format!("Unknown type: {}", struct_type.unwrap())
+          self.code.lines().nth((parent.first_line.unwrap() - 1) as usize).unwrap(),
+          parent.first_pos,
+          parent.first_pos,
+          format!("Unknown type: {}", struct_type_name.unwrap())
         ));
       }
+      let struct_type = self.context.get_struct_type(struct_type_name.unwrap()).unwrap();
 
-      if let Expr::Literal(Literals::Identifier(name)) = child.expr {
-
-        for (i, (field_name, _field_type)) in struct_ref.unwrap().1.iter().enumerate() {
-          if field_name == &name.0 {
-            let struct_val = self.builder.build_load(struct_ref.unwrap().0, parent_val.into_pointer_value(), "struct_val").unwrap();
-            let value = self.builder.build_extract_value(struct_val.into_struct_value(), i as u32, "indexed_value").unwrap();
-            return Ok(value);
-          }
+      // Try to find the index field on the struct
+      for (i, (field_name, _, struct_type_if_any)) in struct_ref.unwrap().iter().enumerate() {
+        if field_name == &name {
+          // If we already have a struct value we can extract the field directly - currently only enums are passed this way
+          let struct_val = if parent_val.unwrap().is_struct_value() {
+            parent_val.unwrap().into_struct_value()
+          } else {
+            self.builder.build_load(struct_type, parent_val.unwrap().into_pointer_value(), "struct_val").unwrap().into_struct_value()
+          };
+          let value = self.builder.build_extract_value(struct_val, i as u32, "indexed_value").unwrap();
+          return Ok((value, struct_type_if_any.clone()));
         }
-
-        // Invalid index at child
-        return Err(Error::new(
-          Error::CompilerError,
-          None,
-          self.code.lines().nth((child.first_line.unwrap() - 1) as usize).unwrap(),
-          child.first_pos,
-          child.first_pos,
-          format!("Field {} not found on index {}", name.0, parent_val.get_name().to_str().unwrap())
-        ));
-
-      } else {
-        // Invalid index at child
-        return Err(Error::new(
-          Error::CompilerError,
-          None,
-          self.code.lines().nth(child.first_line.unwrap() as usize).unwrap(),
-          child.first_pos,
-          child.first_pos,
-          "Struct index must be an identifier".to_string()
-        ));
       }
-    }
 
-    return Err(Error::new(
-      Error::CompilerError,
-      None,
-      self.code.lines().nth(parent.first_line.unwrap() as usize).unwrap(),
-      parent.first_pos,
-      parent.first_pos,
-      "Indexed must be of struct type".to_string()
-    ));
+      // Invalid index at child
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        self.code.lines().nth((child.first_line.unwrap() - 1) as usize).unwrap(),
+        child.first_pos,
+        child.first_pos,
+        format!("Field `{}` not found on index type `{}`", name, struct_type_name.unwrap())
+      ));
+
+    // Nested field access
+    } else if let Expr::Index(inner_parent, inner_child) = child.expr {
+      // If we are already getting an inner parent, we can't pass the type name
+      let (parent_value, field_struct_type_name) = if getting_inner_parent {
+        self.build_index_extract(true, false, Some(parent_val.unwrap().into_pointer_value()), parent.clone(), inner_parent, block)?
+      } else {
+        self.build_index_extract(true, true, Some(parent_val.unwrap().into_pointer_value()), parent.clone(), inner_parent, block)?
+      };
+
+      // Wrap the extracted field type in an expression to use as the new parent expr
+      // Hacky but it works
+      let parent_expr = Expression {
+        expr: Expr::Literal(Literals::Identifier(Name(field_struct_type_name.unwrap()))),
+        first_line: parent.first_line,
+        first_pos: parent.first_pos,
+        last_line: parent.last_line
+      };
+
+      // Recurse to get the inner child
+      if parent_value.is_pointer_value() {
+        return self.build_index_extract(false, true, Some(parent_value.into_pointer_value()), Box::new(parent_expr), inner_child, block);
+      // We are getting the value next
+      } else {
+        return self.build_index_extract(false, true, None, Box::new(parent_expr), inner_child, block);
+      }
+    } else {
+      // Invalid index at child
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        self.code.lines().nth((child.first_line.unwrap() - 1) as usize).unwrap(),
+        child.first_pos,
+        child.first_pos,
+        "Struct index must be an identifier".to_string()
+      ));
+    }
   }
 
   fn build_loop_body(&mut self, typ: &str, body: Option<Vec<Expression>>, var: Option<PointerValue<'ctx>>, current_value: Option<IntValue>, body_block: BasicBlock<'ctx>, cond_block: BasicBlock<'ctx>, end_block: BasicBlock<'ctx>) -> Result<(), Error> {
@@ -520,7 +593,7 @@ impl<'ctx> CodeGen<'ctx> {
           return Err(Error::new(
             Error::CompilerError,
             None,
-            self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap(),
+            self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
             expr.first_pos,
             Some(expr.first_pos.unwrap() + n.len() as i32),
             "Invalid iterable type".to_string()
@@ -591,26 +664,57 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(end_block);
   }
 
-  fn build_struct(&mut self, name: Option<Literals>, value: Box<Literals>) -> Result<StructType<'ctx>, Error> {
-    // Extract struct name if it's an identifier
-    let mut struct_lit_name: Option<String> = None;
-    if name.is_some() {
-      struct_lit_name = match name.unwrap() {
-        Literals::Identifier(name) => Some(name.0),
-        _ => None,
-      };
+  fn build_enum(&mut self, name: String, variants: Vec<Literals>) -> Result<(), Error> {
+    let mut fields: Vec<(String, BasicTypeEnum<'ctx>, Option<String>)> = vec![];
+    let mut field_types: Vec<BasicTypeEnum> = vec![];
+    let mut field_values: Vec<BasicValueEnum> = vec![];
+    for (i, variant) in variants.iter().enumerate() {
+      let variant_type = self.context.i64_type();
+      // Get the int value of the variant
+      let val = variant_type.const_int(i as u64, false);
+      field_values.push(val.as_basic_value_enum());
+      field_types.push(variant_type.as_basic_type_enum());
+
+      match variant {
+        Literals::Identifier(Name(variant_name)) => {
+          fields.push((variant_name.clone(), variant_type.as_basic_type_enum(), None));
+        },
+        _ => unreachable!()
+      }
     }
 
+    // Create the enum struct
+    let opaque = self.context.opaque_struct_type(&format!("{}_enum", name));
+    opaque.set_body(&field_types, false);
+
+    // Allocate space for the enum struct
+    let enum_struct_type = self.context.struct_type(&field_types, false);
+    let enum_ptr = self.builder.build_alloca(enum_struct_type, &format!("{}_enum", name)).unwrap();
+
+    // Store the enum fields
+    for (i, (field_name, _, _)) in fields.iter().enumerate() {
+      let field_ptr = self.builder.build_struct_gep(enum_struct_type, enum_ptr, i as u32, &format!("{}_{}", &name, field_name)).unwrap();
+      self.builder.build_store(field_ptr, field_values[i]).unwrap();
+    }
+
+    self.set_symbol(name.clone(), Some(enum_ptr), enum_struct_type.as_basic_type_enum(), enum_ptr.as_basic_value_enum());
+    self.struct_stack.insert(name.clone(), format!("{}_enum", name));
+    self.struct_table.insert(format!("{}_enum", name), fields);
+    self.enum_table.insert(name.clone(), format!("{}_enum", name));
+    return Ok(());
+  }
+
+  fn build_struct(&mut self, struct_lit_name: Option<String>, value: Box<Literals>) -> Result<StructType<'ctx>, Error> {
     // TODO: If value is an identifier, handle it as a type alias
 
     // Build struct if value is an object
     if let Literals::Object(obj) = value.as_ref().to_owned() {
-      let mut fields: Vec<(String, BasicTypeEnum<'ctx>)> = vec![];
+      let mut fields: Vec<(String, BasicTypeEnum<'ctx>, Option<String>)> = vec![];
       for literal in obj.iter() {
         if let Literals::ObjectProperty(n, val) = literal.to_owned() {
 
           // Ensure name doesn't already exist in fields
-          if fields.iter().any(|(name, _)| name == &n.as_ref().unwrap().0) {
+          if fields.iter().any(|(name, _, _)| name == &n.as_ref().unwrap().0) {
             return Err(Error::new(
               Error::CompilerError,
               None,
@@ -622,7 +726,8 @@ impl<'ctx> CodeGen<'ctx> {
           }
 
           // Build the field
-          let field: (String, BasicTypeEnum<'ctx>) = (n.unwrap().0, self.build_struct_field(val.expr)?);
+          let (typ, struct_name_if_any) = self.build_struct_field(val.expr)?;
+          let field: (String, BasicTypeEnum<'ctx>, Option<String>) = (n.unwrap().0, typ, struct_name_if_any);
           fields.push(field);
 
         // Field was not an object property, parsing error
@@ -640,7 +745,7 @@ impl<'ctx> CodeGen<'ctx> {
 
       // Create the struct type
       let mut field_types: Vec<BasicTypeEnum> = vec![];
-      for (_, t) in fields.clone() {
+      for (_, t, _) in fields.clone() {
 
         // Change child struct types to pointers for mapping
         if t.is_struct_type() {
@@ -650,7 +755,13 @@ impl<'ctx> CodeGen<'ctx> {
         }
       }
 
-      let struct_type = self.context.struct_type(&field_types, false);
+      let struct_type = if struct_lit_name.is_none() {
+        self.context.struct_type(&field_types, false)
+      } else {
+        let struct_type = self.context.opaque_struct_type(&struct_lit_name.clone().unwrap());
+        struct_type.set_body(&field_types, false);
+        struct_type
+      };
 
       // Save a reference to the struct
       if let Some(n) = struct_lit_name {
@@ -665,7 +776,7 @@ impl<'ctx> CodeGen<'ctx> {
             format!("Name {} already defined", n)
           ));
         } else {
-          self.struct_table.insert(n, (struct_type, fields));
+          self.struct_table.insert(n, fields);
         }
       }
 
@@ -682,20 +793,26 @@ impl<'ctx> CodeGen<'ctx> {
     }
   }
 
-  fn build_struct_field(&mut self, val: Expr) -> Result<BasicTypeEnum<'ctx>, Error> {
+  fn build_struct_field(&mut self, val: Expr) -> Result<(BasicTypeEnum<'ctx>, Option<String>), Error> {
     match val {
       Expr::TypeDef(_, v) => {
         let s = self.build_struct(None, v)?;
-        return Ok(s.as_basic_type_enum());
+        return Ok((s.as_basic_type_enum(), Some(s.get_name().unwrap().to_str().unwrap().to_string())));
       },
-      Expr::Literal(Literals::Identifier(n)) => {
-        match n.0.as_str() {
-          "int" => return Ok(self.context.i64_type().as_basic_type_enum()),
-          "float" => return Ok(self.context.f64_type().as_basic_type_enum()),
-          "bool" => return Ok(self.context.bool_type().as_basic_type_enum()),
+      Expr::Literal(Literals::Identifier(Name(name))) => {
+        match name.as_str() {
+          "int" => return Ok((self.context.i64_type().as_basic_type_enum(), None)),
+          "float" => return Ok((self.context.f64_type().as_basic_type_enum(), None)),
+          "bool" => return Ok((self.context.bool_type().as_basic_type_enum(), None)),
           _ => {
-            // Check for existing type alias
-            let struct_type = self.struct_table.get(&n.0);
+            // Check for enum
+            let enum_type = self.enum_table.get(&name);
+            if enum_type.is_some() {
+              return Ok((self.context.i64_type().as_basic_type_enum(), Some(enum_type.unwrap().to_string())));
+            }
+
+            // Check for type alias
+            let struct_type = self.struct_table.get(&name);
             if struct_type.is_none() {
               return Err(Error::new(
                 Error::CompilerError,
@@ -703,10 +820,11 @@ impl<'ctx> CodeGen<'ctx> {
                 &"",
                 Some(0),
                 Some(0),
-                format!("Invalid struct field type {}", n.0)
+                format!("Invalid struct field type {}", name)
               ));
             } else {
-              return Ok(struct_type.unwrap().0.as_basic_type_enum());
+              let struct_type = self.context.get_struct_type(&name);
+              return Ok((struct_type.unwrap().as_basic_type_enum(), Some(name)));
             }
           }
         }
@@ -724,7 +842,8 @@ impl<'ctx> CodeGen<'ctx> {
 
   // Name of type struct; name of variable; fields
   fn build_initialize_struct(&mut self, struct_name: String, var_name: String, fields: Vec<Literals>, block: BasicBlock<'ctx>) -> Result<PointerValue<'ctx>, Error> {
-    let (struct_type, field_types) = self.struct_table.get(&struct_name)
+    let struct_type = self.context.get_struct_type(&struct_name).unwrap();
+    let field_types = self.struct_table.get(&struct_name)
       .ok_or_else(|| Error::new(
         Error::CompilerError,
         None,
@@ -760,9 +879,9 @@ impl<'ctx> CodeGen<'ctx> {
         // Ensure type consistency
         if field_val_type.is_pointer_type() {
           // Check struct table for ptr name
-          let struct_type = self.struct_table.get(&struct_name);
-          if struct_type.is_some() {
-            field_val_type = struct_type.unwrap().0.as_basic_type_enum();
+          let struct_ref = self.struct_table.get(&struct_name);
+          if struct_ref.is_some() {
+            field_val_type = self.context.get_struct_type(&struct_name).unwrap().as_basic_type_enum();
 
           // Check symbol table
           } else {
@@ -1076,7 +1195,7 @@ impl<'ctx> CodeGen<'ctx> {
       }
     };
 
-    let set: BasicValueEnum;
+    let mut set: BasicValueEnum;
     if value.is_some() {
       if let Expr::Literal(e) = &value.as_ref().unwrap().expr {
         if let Literals::Object(obj) = e {
@@ -1098,6 +1217,11 @@ impl<'ctx> CodeGen<'ctx> {
     // If no value is provided, set to null
     } else {
       set = self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum();
+    }
+
+    // Convert bool to int when storing (for now)
+    if set.get_type() == self.context.bool_type().as_basic_type_enum() {
+      set = self.builder.build_int_z_extend(set.into_int_value(), self.context.i64_type(), "bool_to_int").unwrap().as_basic_value_enum();
     }
 
     // TODO: Check for constants
@@ -1346,21 +1470,32 @@ impl<'ctx> CodeGen<'ctx> {
             },
             _ => {
               // Check for defined type (TODO: add aliases)
-              let struct_type = self.struct_table.get(&typ.0);
-              if struct_type.is_none() {
-                return Err(Error::new(
-                  Error::NameError,
-                  None,
-                  &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-                  param.first_pos,
-                  Some(typ.0.len() as i32),
-                  format!("Type {} not found", typ.0)
-                ));
-              } else {
-                let (struct_type, _) = struct_type.unwrap();
-                let t = struct_type.as_basic_type_enum();
+
+              // Check for enum definition
+              let enum_type = self.enum_table.get(&typ.0);
+              if enum_type.is_some() {
+                let t = self.context.i64_type();
                 parameters.push(t.into());
                 t.into()
+
+              // Check for struct definition
+              } else {
+                let struct_ref = self.struct_table.get(&typ.0);
+                if struct_ref.is_none() {
+                  return Err(Error::new(
+                    Error::NameError,
+                    None,
+                    &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+                    param.first_pos,
+                    Some(typ.0.len() as i32),
+                    format!("Type {} not found", typ.0)
+                  ));
+                } else {
+                  let struct_type = self.context.get_struct_type(&typ.0).unwrap();
+                  let t = struct_type.as_basic_type_enum();
+                  parameters.push(t.into());
+                  t.into()
+                }
               }
             },
           };
@@ -1392,8 +1527,7 @@ impl<'ctx> CodeGen<'ctx> {
       "bool" => self.context.bool_type().fn_type(&parameters, variadic),
       _ => {
         if self.struct_table.contains_key(&returns) {
-          let (struct_type, _) = self.struct_table.get(&returns).unwrap();
-          struct_type.fn_type(&parameters, variadic)
+          self.context.get_struct_type(&returns).unwrap().fn_type(&parameters, variadic)
         } else {
           return Err(Error::new(
             Error::NameError,
@@ -1985,7 +2119,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         // Build args
         for (i, arg) in args.iter().enumerate() {
-          let val: BasicValueEnum<'ctx>;
+          let mut val: BasicValueEnum<'ctx>;
 
           // If arg is an identifier (variable) get the pointer and value if possible
           if let Expr::Literal(Literals::Identifier(Name(name))) = arg.expr.clone() {
@@ -1999,6 +2133,12 @@ impl<'ctx> CodeGen<'ctx> {
           } else {
             val = self.visit(&arg, block)?;
           }
+
+          // Convert bool to int when passing (for now)
+          if val.get_type() == self.context.bool_type().as_basic_type_enum() {
+            val = self.builder.build_int_z_extend(val.into_int_value(), self.context.i64_type(), "bool_to_int").unwrap().as_basic_value_enum();
+          }
+
           match val.into() {
             BasicMetadataValueEnum::IntValue(int_value) => {
               let int_type = int_value.get_type();
@@ -2082,7 +2222,7 @@ impl<'ctx> CodeGen<'ctx> {
         return Ok(val);
       },
       Expr::Index(parent, child) => {
-        return self.build_index_extract(parent, child, block);
+        return Ok(self.build_index_extract(true, false, None, parent, child, block)?.0);
       }
       Expr::Assignment(_, _, _) => panic!("Assignment not allowed here"),
       _ => panic!("Invalid expression"),
@@ -2674,7 +2814,7 @@ mod tests {
     printf(\"%d\", c);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "5");
     return Ok(());
   }
@@ -2688,7 +2828,7 @@ mod tests {
     printf(\"%d\", a / b);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "3");
     return Ok(());
   }
@@ -2702,7 +2842,7 @@ mod tests {
     printf(\"%d\", b);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "3");
     return Ok(());
   }
@@ -2717,7 +2857,7 @@ mod tests {
     printf(\"%d\", b);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "4");
     return Ok(());
   }
@@ -2732,7 +2872,7 @@ mod tests {
     }".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "12345");
     return Ok(());
   }
@@ -2748,7 +2888,7 @@ mod tests {
     }".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "01234");
     return Ok(());
   }
@@ -2766,7 +2906,7 @@ mod tests {
     printf(\"%d\", a);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "5");
     return Ok(());
   }
@@ -2783,7 +2923,52 @@ mod tests {
     printf(\"%d\", test.b);".to_string();
     let mut parser = crate::Parser::new();
     let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, true)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
+    build_and_assert(ir, "2");
+    return Ok(());
+  }
+
+  #[test]
+  fn test_deep_type_struct_index() -> Result<(), Error> {
+    let context = Context::create();
+    let mut codegen = CodeGen::new(&context);
+    let code = "// types
+    type TestType = { a: int, b: int, c: int, d: int, };
+    type TestTypeTwo = { test_one: TestType, };
+    type TestTypeThree = { test_two: TestTypeTwo, };
+    type TestTypeFour = { test_three: TestTypeThree, };
+    // vars
+    TestType test_var = { a: 1, b: 2, c: 3, d: 4 };
+    TestTypeTwo test_var_two = { test_one: test_var };
+    TestTypeThree test_var_three = { test_two: test_var_two };
+    TestTypeFour test_var_four = { test_three: test_var_three };
+    printf(\"%d, %d, %d, %d\",
+      test_var_four.test_three.test_two.test_one.a,
+      test_var_three.test_two.test_one.b,
+      test_var_two.test_one.c,
+      test_var.d
+    );".to_string();
+    let mut parser = crate::Parser::new();
+    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
+    build_and_assert(ir, "1, 2, 3, 4");
+    return Ok(());
+  }
+
+  #[test]
+  fn test_enum_type() -> Result<(), Error> {
+    let context = Context::create();
+    let mut codegen = CodeGen::new(&context);
+    let code = "enum TestEnum = {
+      TestOne,
+      TestTwo,
+      TestThree,
+    }
+    let test_var = TestEnum.TestThree;
+    printf(\"%d\", test_var);".to_string();
+    let mut parser = crate::Parser::new();
+    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "2");
     return Ok(());
   }

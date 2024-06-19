@@ -40,24 +40,24 @@ Here are a list of goals that scope out the Jink project and repository, not in 
 - [x] Build structs/types
 - [x] Build nested structs
 - [x] Build struct indexing
-- [ ] Build nested struct indexing
+- [x] Build nested struct indexing
 - [ ] Build break and continue in loops
 - [ ] Build classes
 - [ ] Build class inheritance
-- [ ] Build enums
+- [x] Build enums
 - [ ] Build external statements
 - [ ] Build del statements
 - [x] Build module/import system
 - [ ] Validate module imports
 - [ ] Handle named module indexing
 - [ ] Build string interpolation
-- [ ] Write struct tests
+- [x] Write struct tests
 - [ ] Write function tests
 - [ ] Write module tests
 ##### Lexer
 - [ ] Lex string interpolation
 ##### Parser
-- [ ] Parse enum definitions
+- [x] Parse enum definitions
 - [x] Parse objects
 - [x] Parse self keyword in classes
 - [x] Parse self keyword in class methods
@@ -68,7 +68,10 @@ Here are a list of goals that scope out the Jink project and repository, not in 
 - [ ] Parse recursive indexing (arrays)
 - [x] Parse indexing (object properties and methods)
 - [x] Parse recursive indexing (object properties and methods)
-- [ ] Parse del statements
+- [x] Parse del statements
+- [x] Parse while loops
+- [x] Parse for loops
+- [x] Parse break and continue for loops
 - [x] Parse public statements
 - [ ] Parse external statements
 
