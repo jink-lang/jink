@@ -1519,7 +1519,11 @@ impl<'ctx> CodeGen<'ctx> {
       "void" => self.context.void_type().fn_type(&parameters, variadic),
       "bool" => self.context.bool_type().fn_type(&parameters, variadic),
       _ => {
-        if self.struct_table.contains_key(&returns) {
+        // Check for enum
+        let enum_type = self.enum_table.get(&returns);
+        if enum_type.is_some() {
+          self.context.i64_type().fn_type(&parameters, variadic)
+        } else if self.struct_table.contains_key(&returns) {
           self.context.get_struct_type(&returns).unwrap().fn_type(&parameters, variadic)
         } else {
           return Err(Error::new(
@@ -1528,7 +1532,7 @@ impl<'ctx> CodeGen<'ctx> {
             &"",
             Some(0),
             Some(0),
-            format!("Type {} not found", returns)
+            format!("Type '{}' not found", returns)
           ));
         }
       },
