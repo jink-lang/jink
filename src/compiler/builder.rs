@@ -46,11 +46,13 @@ pub struct CodeGen<'ctx> {
     String  // Enum variants
   >,
   /// Table of class types, similar to struct table but with references to parents and methods
-  class_table: IndexMap<String, (              // name
-    Option<Vec<String>>,                       // parents
-    Vec<(String, BasicTypeEnum<'ctx>)>,        // props (field name, field type) - TODO: We don't support struct types for class fields yet
-    Option<Vec<(String, FunctionValue<'ctx>)>> // methods
+  class_table: IndexMap<String, (       // name
+    Option<Vec<String>>,                // parents
+    Vec<(String, BasicTypeEnum<'ctx>)>, // props (field name, field type) - TODO: We don't support struct types for class fields yet
+    Vec<(String, FunctionValue<'ctx>)>  // methods
   )>,
+  /// Current class being built if any
+  current_class: Option<PointerValue<'ctx>>,
   _type_tags: IndexMap<String, u64>,
   execution_engine: ExecutionEngine<'ctx>
 }
@@ -76,6 +78,7 @@ impl<'ctx> CodeGen<'ctx> {
       struct_stack: IndexMap::new(),
       enum_table: IndexMap::new(),
       class_table: IndexMap::new(),
+      current_class: None,
       _type_tags: Self::map_types(),
       execution_engine
     };
@@ -1686,8 +1689,7 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(());
   }
 
-  fn build_class(&mut self, expr: Expression, Name(name): Name, parents: Option<Vec<Name>>, body: Option<Box<Vec<Expression>>>, block: BasicBlock<'ctx>) -> Result<(), Error> {
-
+  fn build_class(&mut self, exp: Expression, Name(name): Name, parents: Option<Vec<Name>>, body: Option<Box<Vec<Expression>>>, block: BasicBlock<'ctx>) -> Result<(), Error> {
     // Get parents if any
     let mut parent_classes = vec![];
     if let Some(parents) = parents {
@@ -1697,9 +1699,9 @@ impl<'ctx> CodeGen<'ctx> {
           return Err(Error::new(
             Error::NameError,
             None,
-            &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-            expr.first_pos,
-            expr.first_pos,
+            &self.code.lines().nth((exp.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+            exp.first_pos,
+            exp.first_pos,
             format!("Parent class '{}' not found", parent)
           ));
         }
@@ -1708,13 +1710,40 @@ impl<'ctx> CodeGen<'ctx> {
       }
     }
 
-    // Collect method signatures
+    // Set up the class struct information
+    let mut types: Vec<BasicTypeEnum<'ctx>> = vec![];
+    let mut types_as_fields: Vec<(String, BasicTypeEnum<'ctx>)> = vec![];
+    // i32 index in types
+    let mut defaults: Vec<(String, BasicValueEnum<'ctx>)> = vec![];
+    // Set up method signature information
     let mut methods: IndexMap<String, FunctionValue<'ctx>> = IndexMap::new();
+    let mut method_params: IndexMap<String, IndexMap<String, BasicTypeEnum>> = IndexMap::new();
     let mut method_bodies: IndexMap<String, Option<Box<Vec<Expression>>>> = IndexMap::new();
+
+    // Add parent class props and methods to class
+    for parent in &parent_classes {
+      let (_, parent_fields, parent_methods) = self.class_table.get(parent).unwrap();
+
+      // Add parent fields to the class struct
+      for (field_name, field_type) in parent_fields {
+        types.push(field_type.clone());
+        types_as_fields.push((field_name.clone(), field_type.clone()));
+      }
+
+      // Add parent methods to the class
+      for (method_name, method) in parent_methods.into_iter() {
+        if method_name != "new" {
+          methods.insert(method_name.clone(), method.clone());
+        }
+      }
+    }
+
     if let Some(body) = body.as_ref() {
       for expr in body.iter() {
+
+        // Check for class methods
         if let Expr::Function(Name(func_name), ret_typ, params, body) = expr.expr.clone() {
-          let signature = self.build_class_method_signature(expr.clone(), name.clone(), func_name.clone(), ret_typ, params, body.clone())?;
+          let (signature, mparams) = self.build_class_method_signature(expr.clone(), func_name.clone(), ret_typ, params)?;
           let method_name = if func_name == "new" {
             if body.is_none() {
               return Err(Error::new(
@@ -1733,6 +1762,7 @@ impl<'ctx> CodeGen<'ctx> {
           };
           let value = self.module.add_function(&method_name, signature, None);
           methods.insert(func_name.clone(), value);
+          method_params.insert(func_name.clone(), mparams);
           method_bodies.insert(func_name, body);
         }
       }
@@ -1743,103 +1773,249 @@ impl<'ctx> CodeGen<'ctx> {
       return Err(Error::new(
         Error::CompilerError,
         None,
-        &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-        expr.first_pos,
+        &self.code.lines().nth((exp.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+        exp.first_pos,
         // + 4 for `cls `
-        Some(expr.first_pos.unwrap() + 4 + name.len() as i32),
+        Some(exp.first_pos.unwrap() + 4 + name.len() as i32),
         format!("Class '{}' is missing constructor", name)
       ));
     }
 
-    // Create the class struct
-    let class_struct = self.context.opaque_struct_type(&name);
-    let mut types = vec![];
-    let mut fields: Vec<(String, BasicTypeEnum)> = vec![];
+    // Add class to the known class information
+    self.struct_table.insert(name.clone(), vec![]);
+    self.struct_stack.insert(format!("{}_ptr", name), name.clone());
+    self.class_table.insert(name.clone(), (Some(parent_classes), types_as_fields.clone(), vec![]));
 
-    // Add parent class props and methods to class
-    for parent in &parent_classes {
-      let (_, parent_fields, parent_methods) = self.class_table.get(parent).unwrap();
+    // Set up the constructor
+    let constructor = self.module.get_function(&format!("{}_constructor", name)).unwrap();
+    let constructor_entry_block = self.context.append_basic_block(constructor, "entry");
+    self.builder.position_at_end(constructor_entry_block);
+    self.enter_scope(true);
 
-      // Add parent fields to the class struct
-      for (field_name, field_type) in parent_fields {
-        types.push(field_type.clone());
-        fields.push((field_name.clone(), field_type.clone()));
-      }
-
-      // Add parent methods to the class
-      if parent_methods.is_some() {
-        for (method_name, method) in parent_methods.as_ref().unwrap().into_iter() {
-          if method_name != "new" {
-            methods.insert(method_name.clone(), method.clone());
+    // Set up the class fields
+    for expr in body.unwrap().into_iter() {
+      if let Expr::Assignment(typ, idx_or_ident, opt_var) = expr.expr.clone() {
+        if let Expr::Index(parent, child) = expr.expr.clone() {
+          if let Expr::Index(_, _) = child.expr {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth((exp.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+              child.first_pos,
+              child.first_pos,
+              "Nested indexing is not supported in constructor definition.".to_string()
+            ));
+          } else if let Expr::SelfRef = parent.expr {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth((parent.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+              parent.first_pos,
+              parent.first_pos,
+              "Cannot assign to self in class definition, use a constructor.".to_string()
+            ));
+          } else {
+            todo!()
           }
+        }
+
+        if typ.is_none() || typ.as_ref().unwrap().0 == "let" || typ.as_ref().unwrap().0 == "const" {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+            expr.first_pos,
+            expr.first_pos,
+            "Fields must be typed".to_string()
+          ));
+        }
+
+        let field_type = match typ.as_ref().unwrap().0.as_str() {
+          "int" => self.context.i64_type().as_basic_type_enum(),
+          "float" => self.context.f64_type().as_basic_type_enum(),
+          "bool" => self.context.bool_type().as_basic_type_enum(),
+          _ => {
+
+            // Check for enum definition
+            let enum_type = self.enum_table.get(&typ.as_ref().unwrap().0);
+            if enum_type.is_some() {
+              self.context.i64_type().as_basic_type_enum()
+            // Check for struct definition
+            } else {
+              let struct_ref = self.struct_table.get(&typ.as_ref().unwrap().0);
+              if struct_ref.is_none() {
+                return Err(Error::new(
+                  Error::NameError,
+                  None,
+                  &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+                  expr.first_pos,
+                  Some(typ.as_ref().unwrap().0.len() as i32),
+                  format!("Type '{}' not found", typ.as_ref().unwrap().0)
+                ));
+              } else {
+                self.context.get_struct_type(&typ.unwrap().0).unwrap().as_basic_type_enum()
+              }
+            }
+          },
+        };
+
+        // Field with default
+        if opt_var.is_some() {
+          let set = self.visit(&opt_var.unwrap(), constructor_entry_block)?;
+
+          if set.get_type().as_basic_type_enum() != field_type {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+              expr.first_pos,
+              Some(self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string().len() as i32),
+              format!("Invalid assignment type for field, expected {:?} but got {:?}", field_type.print_to_string(), set.get_type().print_to_string())
+            ));
+          }
+
+          types.push(set.get_type());
+          let (_, field_name) = match idx_or_ident.expr {
+            Expr::Literal(Literals::Identifier(Name(name))) => (idx_or_ident.first_pos.unwrap(), name),
+            _ => unreachable!(),
+          };
+          types_as_fields.push((field_name.clone(), field_type));
+          defaults.push((field_name.clone(), set));
+
+          // Update the struct and class tables with the new fields
+          let (_, class_fields, _) = self.class_table.get_mut(&name).unwrap();
+          class_fields.push((field_name.clone(), set.get_type()));
+          self.struct_table.get_mut(&name).unwrap().push((field_name, set.get_type(), None));
+
+        // Field without default
+        } else {
+          let (_, field_name) = match idx_or_ident.expr {
+            Expr::Literal(Literals::Identifier(Name(name))) => (idx_or_ident.first_pos.unwrap(), name),
+            _ => unreachable!(),
+          };
+          types.push(field_type);
+          types_as_fields.push((field_name.clone(), field_type));
+
+          // Update the struct and class tables with the new fields
+          let (_, class_fields, _) = self.class_table.get_mut(&name).unwrap();
+          class_fields.push((field_name.clone(), field_type));
+          self.struct_table.get_mut(&name).unwrap().push((field_name, field_type, None));
         }
       }
     }
 
-    // Use the constructor body to determine the rest of the struct type
+    // Create the class struct
+    let class_struct = self.context.opaque_struct_type(&name);
+    class_struct.set_body(&types, false);
 
-    // Set up the constructor
-    let constructor = self.module.get_function(&format!("{}_constructor", name)).unwrap();
-    let constructor_entry = self.context.append_basic_block(constructor, "entry");
-    self.builder.position_at_end(constructor_entry);
+    // Build the class struct pointer to operate on in the constructor
+    let class_ptr = self.builder.build_alloca(class_struct, &format!("{}_ptr", name)).unwrap();
+    self.current_class = Some(class_ptr);
+
+    // TODO: Build the class functions
+
+    // Build the constructor parameters
+    for (i, param) in constructor.get_params().iter().enumerate() {
+      // Get the nth parameter name
+      let field_name = method_params.get("new").unwrap().into_iter().nth(i).unwrap().0.clone();
+      // Store parameter
+      let var = self.builder.build_alloca(param.get_type(), &field_name).unwrap();
+      self.builder.build_store(var, *param).unwrap();
+      // Ensure the constructor block is aware of the parameter
+      self.set_symbol(field_name.clone(), Some(var), param.get_type(), *param);
+    }
 
     // Build the constructor body
-    let mut constructor_fields: Vec<(String, BasicTypeEnum<'ctx>)> = vec![];
-    let mut values: Vec<BasicValueEnum<'ctx>> = vec![];
+    let mut initialized_values: Vec<(String, BasicValueEnum<'ctx>)> = vec![];
     // We know constructor exists
     for ex in method_bodies.get("new").unwrap().to_owned().unwrap().into_iter() {
-      if let Expr::Assignment(_, lhs, rhs) = ex.expr.clone() {
-        if let Expr::Index(parent, child) = lhs.expr.clone() {
-          if let Expr::SelfRef = parent.expr {
-            let (ptr, val) = self.build_index(&parent)?;
-            let set = self.visit(&rhs.unwrap(), constructor_entry)?;
-            if set.get_type() != val.get_type() {
-              return Err(Error::new(
-                Error::CompilerError,
-                None,
-                &self.code.lines().nth(ex.first_line.unwrap() as usize).unwrap().to_string(),
-                ex.first_pos,
-                ex.last_line,
-                format!("Invalid assignment type for array index, expected {:?} but got {:?}", val.get_type().print_to_string(), set.get_type().print_to_string())
-              ));
-            }
-            values.push(set);
-            // self.builder.build_store(ptr, set).unwrap();
+      if let Expr::Index(parent, child) = ex.expr.clone() {
+        if let Expr::Index(_, _) = child.expr {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth((ex.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+            ex.first_pos,
+            ex.first_pos,
+            "Nested indexing is not supported in constructor definition.".to_string()
+          ));
+        } else if let Expr::SelfRef = parent.expr {
+          if let Expr::Assignment(_, lhs_expr, val) = child.expr {
+            if let Expr::Literal(Literals::Identifier(Name(field_name))) = lhs_expr.expr {
+              let set = self.visit(&val.unwrap(), constructor_entry_block)?;
+
+              if set.get_type().as_basic_type_enum() != types_as_fields.iter().filter(|(name, _)| name == &field_name).nth(0).unwrap().1 {
+                return Err(Error::new(
+                  Error::CompilerError,
+                  None,
+                  &self.code.lines().nth((ex.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+                  ex.first_pos,
+                  ex.first_pos,
+                  format!(
+                    "Invalid assignment type for field '{}', expected {:?} but got {:?}",
+                    field_name,
+                    types_as_fields.iter().filter(|(name, _)| name == &field_name).nth(0).unwrap().1.print_to_string(),
+                    set.get_type().print_to_string()
+                  )
+                ));
+              }
+
+              initialized_values.push((field_name, set));
+            } else { unreachable!(); }
+          } else if let Expr::Literal(Literals::Identifier(Name(field_name))) = child.expr {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth((ex.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+              ex.first_pos,
+              ex.first_pos,
+              format!("Field '{}' must be assigned a value", field_name)
+            ));
           } else {
-            self.visit(&ex, constructor_entry)?;
+            self.visit(&child, constructor_entry_block)?;
           }
         } else {
-          self.visit(&ex, constructor_entry)?;
+          self.visit(&ex, constructor_entry_block)?;
         }
       } else if let Expr::Function(_, _, _, _) = ex.expr.clone() {
         continue;
       } else {
-        self.visit(&ex, constructor_entry)?;
+        self.visit(&ex, constructor_entry_block)?;
       }
     }
 
-    self.builder.position_at_end(constructor_entry);
-    self.builder.build_return(None).unwrap();
+    // self.builder.position_at_end(constructor_entry_block);
 
-    // Set the body of the class struct
-    class_struct.set_body(&types, false);
+    // Set the initialized values
+    for (i, (n, _)) in types_as_fields.iter().enumerate() {
+      if initialized_values.iter().filter(|(name, _)| name == n).count() > 0 {
+        let field_ptr = self.builder.build_struct_gep(class_struct, class_ptr, i as u32, &format!("{}_field{}", name, i)).unwrap();
+        let field_val = initialized_values.iter().filter(|(name, _)| name == n).nth(0).unwrap().1;
+        self.builder.build_store(field_ptr, field_val).unwrap();
+      } else if defaults.iter().filter(|(name, _)| name == n).count() > 0 {
+        let field_ptr = self.builder.build_struct_gep(class_struct, class_ptr, i as u32, &format!("{}_field{}", name, i)).unwrap();
+        let field_val = defaults.iter().filter(|(name, _)| name == n).nth(0).unwrap().1;
+        self.builder.build_store(field_ptr, field_val).unwrap();
+      }
+    }
 
-    println!("{:?}", class_struct);
+    // Return from the constructor
+    self.builder.build_return(Some(&class_ptr)).unwrap();
 
-    // Add the class struct to the struct table
-    self.struct_table.insert(name.clone(), (class_struct, vec![]));
-    self.class_table.insert(name.clone(), (Some(parent_classes), fields, None));
+    self.exit_scope();
 
+    self.current_class = None;
     return Ok(());
   }
 
-  fn build_class_method_signature(&mut self, expr: Expression, class_name: String, method_name: String, ret_typ: Option<Literals>, params: Option<Box<Vec<Expression>>>, body: Option<Box<Vec<Expression>>>) -> Result<FunctionType<'ctx>, Error> {
+  fn build_class_method_signature(&mut self, expr: Expression, method_name: String, ret_typ: Option<Literals>, params: Option<Box<Vec<Expression>>>) -> Result<(FunctionType<'ctx>, IndexMap<String, BasicTypeEnum<'ctx>>), Error> {
     // Collect the parameter types
+    let mut fields: IndexMap<String, BasicTypeEnum<'ctx>> = IndexMap::new();
     let mut types: Vec<BasicMetadataTypeEnum<'ctx>> = vec![];
     if params.is_some() {
       for param in params.unwrap().into_iter() {
-        let Type(typ) = match param.clone().expr {
-          Expr::FunctionParam(ty, _, _, _, _) => {
+        let (param_name, Type(typ)) = match param.clone().expr {
+          Expr::FunctionParam(ty, _, Literals::Identifier(Name(ident)), _, _) => {
             if ty.is_none() || ty.as_ref().unwrap().0 == "let" {
               return Err(Error::new(
                 Error::CompilerError,
@@ -1850,7 +2026,7 @@ impl<'ctx> CodeGen<'ctx> {
                 "Method parameters must be typed".to_string()
               ));
             } else {
-              ty.unwrap()
+              (ident, ty.unwrap())
             }
           },
           _ => panic!("Invalid function parameter"),
@@ -1862,8 +2038,7 @@ impl<'ctx> CodeGen<'ctx> {
           "bool" => self.context.bool_type().into(),
           _ => {
             if self.struct_table.contains_key(&typ) {
-              let (struct_type, _) = self.struct_table.get(&typ).unwrap();
-              struct_type.as_basic_type_enum()
+              self.context.get_struct_type(&typ).unwrap().into()
             } else {
               return Err(Error::new(
                 Error::NameError,
@@ -1871,18 +2046,22 @@ impl<'ctx> CodeGen<'ctx> {
                 &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
                 param.first_pos,
                 Some(typ.len() as i32),
-                format!("Type {} not found", typ)
+                format!("Type '{}' not found", typ)
               ));
             }
           },
         };
 
+        fields.insert(param_name.clone(), t);
         types.push(t.into());
       }
     }
 
     // Collect the function type
-    let function_type = if ret_typ.is_some() {
+    let function_type = if method_name == "new" {
+      // Constructor returns pointer to class struct
+      self.context.ptr_type(AddressSpace::default()).fn_type(&types, false)
+    } else if ret_typ.is_some() {
       match ret_typ.unwrap() {
         Literals::Identifier(Name(name)) => {
           match name.as_str() {
@@ -1892,8 +2071,7 @@ impl<'ctx> CodeGen<'ctx> {
             "void" => self.context.void_type().fn_type(&types, false),
             _ => {
               if self.struct_table.contains_key(&name) {
-                let (struct_type, _) = self.struct_table.get(&name).unwrap();
-                struct_type.as_basic_type_enum().fn_type(&types, false)
+                self.context.get_struct_type(&name).unwrap().fn_type(&types, false)
               } else {
                 return Err(Error::new(
                   Error::NameError,
@@ -1913,7 +2091,7 @@ impl<'ctx> CodeGen<'ctx> {
       self.context.void_type().fn_type(&types, false)
     };
 
-    return Ok(function_type);
+    return Ok((function_type, fields));
   }
 
   fn build_index(&mut self, expr: &Expression) -> Result<(PointerValue<'ctx>, BasicValueEnum<'ctx>), Error> {
@@ -1924,9 +2102,9 @@ impl<'ctx> CodeGen<'ctx> {
         return Err(Error::new(
           Error::ParserError,
           None,
-          &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
+          &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
           expr.first_pos,
-          expr.last_line,
+          expr.first_pos,
           "Invalid index".to_string()
         ));
       }
@@ -2021,9 +2199,9 @@ impl<'ctx> CodeGen<'ctx> {
     return Err(Error::new(
       Error::ParserError,
       None,
-      &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
+      &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
       expr.first_pos,
-      expr.last_line,
+      expr.first_pos,
       "Invalid index".to_string()
     ));
   }
@@ -2220,6 +2398,21 @@ impl<'ctx> CodeGen<'ctx> {
         }
 
         return Ok(val);
+      },
+      Expr::SelfRef => {
+        if self.current_class == None {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+            expr.first_pos,
+            expr.last_line,
+            "Self reference outside of class".to_string()
+          ));
+        }
+
+        let class = self.current_class.as_ref().unwrap();
+        return Ok(class.as_basic_value_enum());
       },
       Expr::Index(parent, child) => {
         return Ok(self.build_index_extract(true, false, None, parent, child, block)?.0);
