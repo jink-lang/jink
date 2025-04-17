@@ -44,8 +44,8 @@ fn main() {
     .expect("Failed to read file.");
 
   let mut parser = Parser::new();
+  parser.set_source(code.clone());
   let parsed = parser.parse(
-    code.clone(),
     fs::canonicalize(args[1].clone()).unwrap().to_str().unwrap().to_string(),
     verbose,
     false
@@ -79,6 +79,8 @@ fn main() {
     return;
   }
 
+  let ast = parsed.unwrap();
+
   // if verbose {
   //   println!("AST:");
   //   println!("{:?}", parsed.as_ref().unwrap());
@@ -86,7 +88,7 @@ fn main() {
 
   if interpret {
     let mut simulator = Simulator::new();
-    let simulated = simulator.simulate(code.clone(), parsed.unwrap(), verbose);
+    let simulated = simulator.simulate(code.clone(), ast, verbose);
     if let Err(err) = simulated {
       println!("{}", err);
       return;
@@ -100,7 +102,7 @@ fn main() {
 
     let ir = builder.build(
       code.clone(),
-      parsed.unwrap(),
+      ast,
       parser.namespaces,
       verbose,
       do_execute

@@ -2580,7 +2580,8 @@ mod tests {
     let c = a + b;
     printf(\"%d\", c);".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    parser.set_source(code.clone());
+    let ast = parser.parse(String::new(), false, false)?;
     let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "5");
     return Ok(());
@@ -2594,7 +2595,8 @@ mod tests {
     let b = 3;
     printf(\"%d\", a / b);".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    parser.set_source(code.clone());
+    let ast = parser.parse(String::new(), false, false)?;
     let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "3");
     return Ok(());
@@ -2608,7 +2610,8 @@ mod tests {
     let b = a[2];
     printf(\"%d\", b);".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    parser.set_source(code.clone());
+    let ast = parser.parse(String::new(), false, false)?;
     let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "3");
     return Ok(());
@@ -2623,7 +2626,8 @@ mod tests {
     let b = a[0];
     printf(\"%d\", b);".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    parser.set_source(code.clone());
+    let ast = parser.parse(String::new(), false, false)?;
     let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "4");
     return Ok(());
@@ -2638,7 +2642,8 @@ mod tests {
       printf(\"%d\", array[i]);
     }".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    parser.set_source(code.clone());
+    let ast = parser.parse(String::new(), false, false)?;
     let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "12345");
     return Ok(());
@@ -2654,7 +2659,8 @@ mod tests {
       i = i + 1;
     }".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    parser.set_source(code.clone());
+    let ast = parser.parse(String::new(), false, false)?;
     let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "01234");
     return Ok(());
@@ -2672,7 +2678,8 @@ mod tests {
     }
     printf(\"%d\", a);".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    parser.set_source(code.clone());
+    let ast = parser.parse(String::new(), false, false)?;
     let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "5");
     return Ok(());
@@ -2689,7 +2696,8 @@ mod tests {
     Test test = { a: 1, b: 2 };
     printf(\"%d\", test.b);".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    parser.set_source(code.clone());
+    let ast = parser.parse(String::new(), false, false)?;
     let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "2");
     return Ok(());
@@ -2716,7 +2724,8 @@ mod tests {
       test_var.d
     );".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    parser.set_source(code.clone());
+    let ast = parser.parse(String::new(), false, false)?;
     let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "1, 2, 3, 4");
     return Ok(());
@@ -2734,7 +2743,8 @@ mod tests {
     let test_var = TestEnum.TestThree;
     printf(\"%d\", test_var);".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
+    parser.set_source(code.clone());
+    let ast = parser.parse(String::new(), false, false)?;
     let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
     build_and_assert(ir, "2");
     return Ok(());
