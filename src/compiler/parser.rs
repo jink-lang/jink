@@ -1137,6 +1137,8 @@ impl Parser {
     }
   }
 
+  // TODO: Handle different assignment cases
+  // for (let|const|<type> a in ...)
   fn parse_for_loop(&mut self) -> Result<Expression, Error> {
     let init = self.iter.next(); // Consume "for"
     
