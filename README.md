@@ -24,6 +24,8 @@ We have begun implementing the first stage compiler in Rust. There are a number 
 
 Here are a list of goals that scope out the Jink project and repository, not in or by any particular order or specification.
 
+If you are interested in and new to contributing to the project, TODOs here marked with an `N` are good newcomer starting points that would not be as difficult to implement and would help you get acquainted with the codebase.
+
 ##### General
 - [ ] Design standard for modules
 - [ ] Start writing standard library
@@ -33,7 +35,7 @@ Here are a list of goals that scope out the Jink project and repository, not in 
 - [ ] Add issue templates
 - [ ] Add pull request templates
 ##### Compiler
-- [ ] Standardize type inference
+- [x] Standardize type inference (see [Type checker](#type-checker))
 - [ ] Build dynamic array type
 - [ ] Build heterogenous array type
 - [ ] Build nested arrays
@@ -52,10 +54,15 @@ Here are a list of goals that scope out the Jink project and repository, not in 
 - [ ] Handle named module indexing
 - [ ] Build string interpolation
 - [x] Write struct tests
-- [ ] Write function tests
+- [ ] Write function tests (`N`)
 - [ ] Write module tests
+##### Type checker
+- [ ] Add object type handling
+- [ ] Add heterogeneous array type handling
+- [ ] Add nested array type handling
+- [ ] Refactor to add handling for constants
 ##### Lexer
-- [ ] Lex string interpolation
+- [ ] Lex string interpolation (Dart/Haxe/Kotlin/Scala style "\$apples apples of ${apples + bananas} fruits") (`N`)
 ##### Parser
 - [x] Parse enum definitions
 - [x] Parse objects
@@ -63,7 +70,7 @@ Here are a list of goals that scope out the Jink project and repository, not in 
 - [ ] Parse self keyword in class methods
 - [x] Parse module imports
 - [ ] Validate against circularly imported modules
-- [ ] Parse string interpolation
+- [ ] Parse string interpolation (see [Lexer](#lexer)) (`N`)
 - [x] Parse indexing (arrays)
 - [ ] Parse recursive indexing (arrays)
 - [x] Parse indexing (object properties and methods)
@@ -73,7 +80,8 @@ Here are a list of goals that scope out the Jink project and repository, not in 
 - [x] Parse for loops
 - [x] Parse break and continue for loops
 - [x] Parse public statements
-- [ ] Parse external statements
+- [ ] Parse external statements (`N`)
+- [ ] Parse for loops with different assignment types (`N`)
 
 ## Examples
 
