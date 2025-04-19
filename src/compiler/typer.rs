@@ -111,7 +111,7 @@ impl TypeChecker {
 
   // Check an expression and return its type
   fn check_expression(&mut self, expr: &mut Expression) -> Result<JType, String> {
-    match &mut expr.expr {
+    let typ = match &mut expr.expr {
       Expr::Literal(literal) => match literal {
         Literals::Integer(_) => Ok(JType::Integer),
         Literals::UnsignedInteger(_) => Ok(JType::UnsignedInteger),
@@ -562,7 +562,14 @@ impl TypeChecker {
 
       // TODO: Module, Delete, Index, ArrayIndex, Class
       _ => Ok(JType::Unknown),
+    }?;
+
+    // Add type
+    if expr.inferred_type.is_none() {
+      expr.inferred_type = Some(typ.clone());
     }
+
+    Ok(typ)
   }
 
   pub fn check(&mut self, ast: &mut [Expression]) -> Result<(), Error> {
