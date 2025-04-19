@@ -110,8 +110,8 @@ impl TypeChecker {
 
 
   // Check an expression and return its type
-  fn check_expression(&mut self, expr: &Expression) -> Result<JType, String> {
-    match &expr.expr {
+  fn check_expression(&mut self, expr: &mut Expression) -> Result<JType, String> {
+    match &mut expr.expr {
       Expr::Literal(literal) => match literal {
         Literals::Integer(_) => Ok(JType::Integer),
         Literals::UnsignedInteger(_) => Ok(JType::UnsignedInteger),
@@ -124,11 +124,11 @@ impl TypeChecker {
             .ok_or_else(|| format!("Variable '{}' not found.", name))
         },
         _ => Ok(JType::Unknown),
-      },
+      }
 
       Expr::Array(arr_exprs) => {
         let mut element_types = Vec::new();
-        for elem in arr_exprs.iter() {
+        for elem in arr_exprs.iter_mut() {
           let elem_type = self.check_expression(elem)?;
           element_types.push(elem_type);
         }
@@ -149,7 +149,7 @@ impl TypeChecker {
         };
 
         // Determine what kind of lhs assignment target we have
-        match &ident_or_index.expr {
+        match &mut ident_or_index.expr {
           // Case: Assignment to identifier (variable)
           Expr::Literal(Literals::Identifier(Name(name))) => {
             let name = name.as_str();
@@ -306,11 +306,11 @@ impl TypeChecker {
         let func_type = self.lookup_variable(func_name)
           .ok_or_else(|| format!("Function '{}' not found.", func_name))?;
 
-        if let JType::Function(param_types, return_type) = func_type {
+        if let JType::Function(mut param_types, return_type) = func_type {
 
           // Check argument types against parameter types
-          let provided_arg_types: Vec<JType> = args_expr
-            .iter()
+          let mut provided_arg_types: Vec<JType> = args_expr
+            .iter_mut()
             .map(|arg| self.check_expression(arg))
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -322,7 +322,7 @@ impl TypeChecker {
             ));
           }
 
-          for (i, (expected, actual)) in param_types.iter().zip(provided_arg_types.iter()).enumerate() {
+          for (i, (expected, actual)) in param_types.iter_mut().zip(provided_arg_types.iter_mut()).enumerate() {
             if !self.check_type_compatibility(expected, actual) {
               return Err(format!(
                 "Type mismatch for argument {} in call to '{}'. Expected {}, got {}.",
@@ -343,36 +343,39 @@ impl TypeChecker {
         let mut expected_param_types = Vec::new();
         let mut param_names = Vec::new(); // To add to inner scope
 
-        for param in params.clone().unwrap().iter() {
+        if let Some(param_items) = params {
 
-          // TODO: Validate const (will definitely require overall refactoring)
-          // TODO: Validate spread / variadic parameters
-          if let Expr::FunctionParam(Some(Type(ptype)), _is_const, ident_literal, default_value, _is_spread) = &param.expr {
-            if let Literals::Identifier(Name(pname)) = ident_literal {
-              let param_type = if ptype == "let" {
-                JType::Unknown
-              } else {
-                self.string_to_jtype(ptype)?
-              };
+          for param in param_items.iter_mut() {
 
-              // Check default type against param type if it exists
-              if let Some(default_value) = default_value {
-                let default_type = self.check_expression(default_value)?;
-                if !self.check_type_compatibility(&param_type, &default_type) {
-                  return Err(format!(
-                    "Default value type mismatch for parameter '{}'. Expected {}, got {}.",
-                    pname, param_type, default_type
-                  ));
+            // TODO: Validate const (will definitely require overall refactoring)
+            // TODO: Validate spread / variadic parameters
+            if let Expr::FunctionParam(Some(Type(ptype)), _is_const, ident_literal, default_value, _is_spread) = &mut param.expr {
+              if let Literals::Identifier(Name(pname)) = ident_literal {
+                let param_type = if ptype == "let" {
+                  JType::Unknown
+                } else {
+                  self.string_to_jtype(&ptype)?
+                };
+
+                // Check default type against param type if it exists
+                if let Some(default_value) = default_value {
+                  let default_type = self.check_expression(&mut **default_value)?;
+                  if !self.check_type_compatibility(&param_type, &default_type) {
+                    return Err(format!(
+                      "Default value type mismatch for parameter '{}'. Expected {}, got {}.",
+                      pname, param_type, default_type
+                    ));
+                  }
                 }
-              }
 
-              expected_param_types.push(param_type.clone());
-              param_names.push((pname.clone(), param_type));
+                expected_param_types.push(param_type.clone());
+                param_names.push((pname.clone(), param_type));
+              } else {
+                return Err("Invalid function parameter: expected identifier on left-hand side (TODO: Type check function parameters).".to_string());
+              }
             } else {
-              return Err("Invalid function parameter: expected identifier on left-hand side (TODO: Type check function parameters).".to_string());
+              return Err("Invalid function parameter format.".to_string());
             }
-          } else {
-            return Err("Invalid function parameter format.".to_string());
           }
         }
 
@@ -392,8 +395,11 @@ impl TypeChecker {
           self.add_variable(&pname, ptype)?;
         }
 
-        for stmt in body.clone().unwrap().iter() {
-          self.check_expression(stmt)?;
+        if let Some(body) = body {
+          // Check the function body
+          for stmt in body.iter_mut() {
+            self.check_expression(stmt)?;
+          }
         }
 
         self.exit_function();
@@ -440,14 +446,14 @@ impl TypeChecker {
 
         // Check body
         self.enter_scope();
-        for stmt in body.iter() {
+        for stmt in body.iter_mut() {
           self.check_expression(stmt)?; // Check statements, ignore type for now
         }
         self.exit_scope();
 
         // Check else/elseif body if it exists
         if let Some(else_body) = else_body_opt {
-          for else_stmt in else_body.iter() {
+          for else_stmt in else_body.iter_mut() {
             // Note: Each element in else_body should be another Conditional expr
             self.check_expression(else_stmt)?;
           }
@@ -464,8 +470,10 @@ impl TypeChecker {
         }
 
         self.enter_loop();
-        for stmt in body.clone().unwrap().iter() {
-          self.check_expression(stmt)?;
+        if let Some(body_exprs) = body {
+          for stmt in body_exprs.iter_mut() {
+            self.check_expression(stmt)?;
+          }
         }
         self.exit_loop();
 
@@ -524,7 +532,7 @@ impl TypeChecker {
         self.enter_loop();
         self.add_variable(&var_name, var_type)?; // Add loop variable to scope
         if let Some(body_vec) = body {
-          for stmt in body_vec.iter() {
+          for stmt in body_vec.iter_mut() {
             self.check_expression(stmt)?;
           }
         }
@@ -557,7 +565,7 @@ impl TypeChecker {
     }
   }
 
-  pub fn check(&mut self, ast: &[Expression]) -> Result<(), Error> {
+  pub fn check(&mut self, ast: &mut [Expression]) -> Result<(), Error> {
     for expr in ast {
       match self.check_expression(expr) {
         Ok(_) => {},

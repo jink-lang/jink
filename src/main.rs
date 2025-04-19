@@ -82,13 +82,13 @@ fn main() {
     return;
   }
 
-  let ast = parsed.unwrap();
+  let mut ast = parsed.unwrap();
 
   // Type checking phase
   if !interpret && (!interpret && !skip_type_check) {
     let mut type_checker = TypeChecker::new();
     type_checker.set_source(code.clone());
-    let type_check_result = type_checker.check(&ast);
+    let type_check_result = type_checker.check(&mut ast);
 
     if let Err(err) = type_check_result {
       println!("Type error: {}", err);
