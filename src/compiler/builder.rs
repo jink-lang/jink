@@ -476,7 +476,8 @@ impl<'ctx> CodeGen<'ctx> {
         expr: Expr::Literal(Literals::Identifier(Name(field_struct_type_name.unwrap()))),
         first_line: parent.first_line,
         first_pos: parent.first_pos,
-        last_line: parent.last_line
+        last_line: parent.last_line,
+        inferred_type: parent.inferred_type,
       };
 
       // Recurse to get the inner child

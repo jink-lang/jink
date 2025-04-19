@@ -1,4 +1,5 @@
 use std::fmt::{ Display, Formatter, Result };
+use std::collections::HashMap;
 
 #[derive(strum_macros::Display, Debug, Eq, PartialEq, Clone, Default)]
 pub enum TokenTypes {
@@ -164,12 +165,62 @@ pub enum Expr {
   ModuleParsed(Vec<Name>, bool, Option<Vec<(Name, Option<Name>)>>, Vec<Expression>)
 }
 
+// Type checker types
+#[derive(Debug, PartialEq, Clone)]
+pub enum JType {
+  Integer,
+  UnsignedInteger,
+  FloatingPoint,
+  String,
+  Boolean,
+  Object(HashMap<String, JType>),
+  Array(Box<JType>),
+  /// parameters; return type
+  Function(Vec<JType>, Box<JType>),
+  /// Absence of a value or type, e.g., for statements
+  Null,
+  Void,
+  /// Type that cannot be determined yet
+  Unknown,
+  /// Named types such as classes or type aliases
+  TypeName(String),
+}
+
+impl std::fmt::Display for JType {
+  fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    match self {
+      JType::Integer => write!(f, "int"),
+      JType::UnsignedInteger => write!(f, "uint"),
+      JType::FloatingPoint => write!(f, "float"),
+      JType::String => write!(f, "string"),
+      JType::Boolean => write!(f, "bool"),
+      JType::Object(_) => write!(f, "object"), // TODO: Improve display
+      JType::Array(t) => write!(f, "array<{}>", t),
+      JType::Function(params, ret) => {
+        write!(f, "fun(")?;
+        for (i, param) in params.iter().enumerate() {
+          if i > 0 {
+            write!(f, ", ")?;
+          }
+          write!(f, "{}", param)?;
+        }
+        write!(f, ") -> {}", ret)
+      },
+      JType::Null => write!(f, "null"),
+      JType::Void => write!(f, "void"),
+      JType::Unknown => write!(f, "unknown"),
+      JType::TypeName(name) => write!(f, "{}", name),
+    }
+  }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct Expression {
   pub expr: Expr,
   pub first_line: Option<i32>,
   pub first_pos: Option<i32>,
   pub last_line: Option<i32>,
+  pub inferred_type: Option<JType>,
 }
 
 pub struct FutureIter {

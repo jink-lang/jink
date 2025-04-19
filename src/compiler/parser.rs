@@ -399,9 +399,9 @@ impl Parser {
 
   fn get_expr(&self, expr: Expr, first_line: Option<i32>, first_pos: Option<i32>, last_line: Option<i32>) -> Expression {
     if self.testing {
-      return Expression { expr, first_line: None, first_pos: None, last_line: None };
+      return Expression { expr, first_line: None, first_pos: None, last_line: None, inferred_type: None };
     } else {
-      return Expression { expr, first_line, first_pos, last_line };
+      return Expression { expr, first_line, first_pos, last_line, inferred_type: None };
     }
   }
 
@@ -1150,12 +1150,12 @@ impl Parser {
     let loop_variable = if let Some(token) = self.iter.current.clone() {
       if token.of_type == TokenTypes::Identifier {
         let identifier_token = self.iter.next().unwrap();
-        Ok(Expression {
-          expr: Expr::Literal(Literals::Identifier(Name(identifier_token.value.unwrap()))),
-          first_line: Some(identifier_token.line),
-          first_pos: identifier_token.start_pos,
-          last_line: identifier_token.end_pos,
-        })
+        Ok(self.get_expr(
+          Expr::Literal(Literals::Identifier(Name(identifier_token.value.unwrap()))),
+          Some(identifier_token.line),
+          identifier_token.start_pos,
+          identifier_token.end_pos,
+        ))
       } else {
         Err(Error::new(
           Error::UnexpectedToken,
@@ -1188,16 +1188,16 @@ impl Parser {
     let body = self.parse_loop_block()?;
     self.in_loop = false;
 
-    return Ok(Expression {
-      expr: Expr::ForLoop(
+    return Ok(self.get_expr(
+      Expr::ForLoop(
         Box::new(loop_variable),
         Box::new(iterable),
         Some(body),
       ),
-      first_line: Some(init.as_ref().unwrap().line),
-      first_pos: Some(init.as_ref().unwrap().start_pos.unwrap()),
-      last_line: Some(init.unwrap().line),
-    });
+      Some(init.as_ref().unwrap().line),
+      Some(init.as_ref().unwrap().start_pos.unwrap()),
+      Some(init.unwrap().line),
+    ));
   }
 
   fn parse_while_loop(&mut self) -> Result<Expression, Error> {
@@ -1211,15 +1211,15 @@ impl Parser {
     let body = self.parse_loop_block()?;
     self.in_loop = false;
 
-    return Ok(Expression {
-      expr: Expr::WhileLoop(
+    return Ok(self.get_expr(
+      Expr::WhileLoop(
         Box::new(expression),
         Some(body),
       ),
-      first_line: Some(init.as_ref().unwrap().line),
-      first_pos: Some(init.as_ref().unwrap().start_pos.unwrap()),
-      last_line: Some(init.unwrap().line),
-    });
+      Some(init.as_ref().unwrap().line),
+      Some(init.as_ref().unwrap().start_pos.unwrap()),
+      Some(init.unwrap().line)
+    ));
   }
 
   fn parse_break_continue(&mut self, typ: &str) -> Result<Expression, Error> {
