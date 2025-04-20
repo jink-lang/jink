@@ -84,6 +84,16 @@ impl TypeChecker {
     None
   }
 
+  // TEMP: Check if a function is a built-in function
+  fn is_builtin_function(&self, name: &str) -> bool {
+    let builtins = [
+      "printf", "puts", "scanf", "strlen",
+      "malloc", "free",
+      "fopen", "fwrite", "fread", "fclose", "fputs"
+    ];
+    builtins.contains(&name)
+  }
+
   fn string_to_jtype(&self, type_name: &str) -> Result<JType, String> {
     match type_name {
       "int" => Ok(JType::Integer),
@@ -303,6 +313,10 @@ impl TypeChecker {
       }
 
       Expr::Call(Name(func_name), args_expr) => {
+        if self.is_builtin_function(func_name) {
+          return Ok(JType::Unknown);
+        }
+
         let func_type = self.lookup_variable(func_name)
           .ok_or_else(|| format!("Function '{}' not found.", func_name))?;
 
