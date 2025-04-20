@@ -277,7 +277,14 @@ impl TypeChecker {
             } else {
               Err(format!("Logical operator '{}' requires boolean operands, got {} and {}.", s, left_type, right_type))
             }
-          }
+          },
+          Operator(s) if ["<<", ">>", "&", "|", "^"].contains(&s.as_str()) => {
+            if left_type == JType::Integer && right_type == JType::Integer {
+              Ok(JType::Integer)
+            } else {
+              Err(format!("Bitwise operator '{}' requires integer operands, got {} and {}.", s, left_type, right_type))
+            }
+          },
           _ => Ok(JType::Unknown),
         }
       }
@@ -574,7 +581,25 @@ impl TypeChecker {
         Ok(self.check_expression(expr)?)
       }
 
-      // TODO: Module, Delete, Index, ArrayIndex, Class
+      // TODO: Array bounds check in type checker?
+      Expr::ArrayIndex(arr, idx) => {
+        let arr_type = self.check_expression(arr)?;
+        let idx_type = self.check_expression(idx)?;
+
+        // Check array is valid and index is an integer
+        if let JType::Array(elem_type) = arr_type {
+          if idx_type != JType::Integer {
+            return Err(format!("Array index must be an integer, got {}.", idx_type));
+          }
+
+          // Return element type of array
+          Ok(*elem_type)
+        } else {
+          Err(format!("Cannot index into non-array type {}.", arr_type))
+        }
+      }
+
+      // TODO: Module, Delete, Index, Class
       _ => Ok(JType::Unknown),
     }?;
 
