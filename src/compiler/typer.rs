@@ -327,7 +327,11 @@ impl TypeChecker {
       }
 
       Expr::Call(Name(func_name), args_expr) => {
+        // TODO: Remove builtin definitions from the compiler..
         if self.is_builtin_function(func_name) {
+          for arg in args_expr.iter_mut() {
+            self.check_expression(arg)?;
+          }
           return Ok(JType::Unknown);
         }
 
