@@ -21,7 +21,6 @@ fn main() {
     println!("  -i: Interpret code");
     println!("  -o: Output to an executable");
     println!("  -r: Run the executable after compilation");
-    println!("  -s: Skip type checking step (unsafe)");
     println!("  -l: Compile just to LLVM IR");
     println!("  -h: Display this help message");
     return;
@@ -37,7 +36,6 @@ fn main() {
   let interpret = args.contains(&"-i".to_string());
   let out = args.contains(&"-o".to_string());
   let run_after_out = args.contains(&"-r".to_string());
-  let skip_type_check = args.contains(&"-s".to_string());
   let out_llvm = args.contains(&"-l".to_string());
 
   // Remove flags
@@ -85,7 +83,7 @@ fn main() {
   let mut ast = parsed.unwrap();
 
   // Type checking phase
-  if !interpret && (!interpret && !skip_type_check) {
+  if !interpret {
     let mut type_checker = TypeChecker::new();
     type_checker.set_source(code.clone());
     let type_check_result = type_checker.check(&mut ast);
