@@ -978,14 +978,20 @@ impl<'ctx> CodeGen<'ctx> {
     let then_out = self.build_conditional_block(then_block, Some(body.clone()), function, top_level_merge_block, loop_cond_block, exit_loop_block)?;
     let then_vals = self.get_all_cur_symbols();
     self.exit_scope();
-    self.builder.build_unconditional_branch(merge_block).unwrap();
+    // Merge back if the block wasn't already terminated
+    if then_block.get_terminator().is_none() {
+      self.builder.build_unconditional_branch(merge_block).unwrap();
+    }
 
     // Build the "else" block and collect the resulting values
     self.enter_scope(false);
     let else_out = self.build_conditional_block(else_block, else_body, function, top_level_merge_block, loop_cond_block, exit_loop_block)?;
     let else_vals = self.get_all_cur_symbols();
     self.exit_scope();
-    self.builder.build_unconditional_branch(merge_block).unwrap();
+    // Merge back if the block wasn't already terminated
+    if else_block.get_terminator().is_none() {
+      self.builder.build_unconditional_branch(merge_block).unwrap();
+    }
 
     // Position the builder at the merge block
     self.builder.position_at_end(merge_block);
