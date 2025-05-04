@@ -558,13 +558,9 @@ impl TypeChecker {
 
       Expr::ForLoop(loop_var_expr, iterable, body) => {
         let iterable_type = self.check_expression(iterable)?;
-
-        // Determine the type of the loop variable based on the iterable
-        let var_type = match iterable_type {
-          JType::Array(element_type) => *element_type,
-          JType::String => JType::String, // Characters not yet supported
-          _ => return Err(format!("Cannot iterate over type {}.", iterable_type)),
-        };
+        if !matches!(iterable_type, JType::Array(_)) {
+          return Err(format!("For loop given non iterable, got {}.", iterable_type));
+        }
 
         // Check and extract the loop variable
         let var_name = match loop_var_expr.expr.clone() {
@@ -577,8 +573,8 @@ impl TypeChecker {
                 let expected_var_type = self.string_to_jtype(&type_name)?;
 
                 // Check if the variable type matches the iterable type
-                if expected_var_type != var_type {
-                  return Err(format!("Type mismatch in for loop variable. Expected {}, got {}.", type_name, var_type));
+                if expected_var_type != JType::Integer {
+                  return Err(format!("Type mismatch in for loop variable. Expected {}, got {}.", type_name, JType::Integer));
                 }
 
                 name.clone()
@@ -606,7 +602,7 @@ impl TypeChecker {
 
         // Check body in a loop scope with the loop variable defined
         self.enter_loop();
-        self.add_variable(&var_name, var_type)?; // Add loop variable to scope
+        self.add_variable(&var_name, JType::Integer)?; // Add loop variable to scope
         if let Some(body_vec) = body {
           for stmt in body_vec.iter_mut() {
             self.check_expression(stmt)?;
