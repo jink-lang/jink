@@ -175,6 +175,8 @@ pub enum JType {
   Boolean,
   Object(HashMap<String, JType>),
   Array(Box<JType>),
+  // variadic function parameter, typed or not
+  VariadicFunParam(Option<Box<JType>>),
   /// parameters; return type
   Function(Vec<JType>, Box<JType>),
   /// Absence of a value or type, e.g., for statements
@@ -196,6 +198,13 @@ impl std::fmt::Display for JType {
       JType::Boolean => write!(f, "bool"),
       JType::Object(_) => write!(f, "object"), // TODO: Improve display
       JType::Array(t) => write!(f, "array<{}>", t),
+      JType::VariadicFunParam(t) => {
+        if let Some(t) = t {
+          write!(f, "...{}", t)
+        } else {
+          write!(f, "...")
+        }
+      },
       JType::Function(params, ret) => {
         write!(f, "fun(")?;
         for (i, param) in params.iter().enumerate() {

@@ -334,28 +334,69 @@ impl TypeChecker {
         let func_type = self.lookup_variable(func_name)
           .ok_or_else(|| format!("Function '{}' not found.", func_name))?;
 
-        if let JType::Function(mut param_types, return_type) = func_type {
+        if let JType::Function(param_types, return_type) = func_type {
 
-          // Check argument types against parameter types
-          let mut provided_arg_types: Vec<JType> = args_expr
-            .iter_mut()
-            .map(|arg| self.check_expression(arg))
-            .collect::<Result<Vec<_>, _>>()?;
+          // Check for variadic function
+          let mut is_variadic = false;
+          let mut variadic_type: Option<&Box<JType>> = None;
+          let num_expected_params = param_types.len();
 
-          // TODO: Check for parameter defaults
-          if provided_arg_types.len() != param_types.len() {
-            return Err(format!(
-              "Function '{}' expected {} arguments, but got {}.",
-              func_name, param_types.len(), provided_arg_types.len()
-            ));
+          if let Some(JType::VariadicFunParam(typ)) = param_types.last() {
+            is_variadic = true;
+            variadic_type = typ.as_ref();
           }
 
-          for (i, (expected, actual)) in param_types.iter_mut().zip(provided_arg_types.iter_mut()).enumerate() {
-            if !self.check_type_compatibility(expected, actual) {
+          let num_fixed_params = if is_variadic { num_expected_params - 1 } else { num_expected_params};
+          let num_provided_args = args_expr.len();
+
+          // TODO: Check for parameter defaults
+
+          // Check numbers of arguments
+          if is_variadic {
+            if num_expected_params < num_fixed_params {
+              return Err(format!(
+                "Function '{}' expected at least {} arguments, but got {}.",
+                func_name, num_fixed_params, num_provided_args
+              ));
+            }
+
+          } else {
+            if num_provided_args != num_expected_params {
+              return Err(format!(
+                "Function '{}' expected {} arguments, but got {}.",
+                func_name, num_expected_params, num_provided_args
+              ));
+            }
+          }
+
+          // Check argument types against parameter types
+          let mut provided_arg_types = Vec::with_capacity(num_provided_args);
+          for arg in args_expr.iter_mut() {
+            provided_arg_types.push(self.check_expression(arg)?);
+          }
+
+          // Check fixed args
+          for i in 0..num_fixed_params {
+            if !self.check_type_compatibility(&param_types[i], &provided_arg_types[i]) {
               return Err(format!(
                 "Type mismatch for argument {} in call to '{}'. Expected {}, got {}.",
-                i + 1, func_name, expected, actual
+                i + 1, func_name, param_types[i], provided_arg_types[i]
               ));
+            }
+          }
+
+          // Check variadic args if applicable
+          if is_variadic {
+            // TODO: Determine type of variadic parameter
+            if let Some(var_type) = variadic_type {
+              for i in num_fixed_params..num_provided_args {
+                if !self.check_type_compatibility(&var_type, &provided_arg_types[i]) {
+                  return Err(format!(
+                    "Type mismatch for variadic argument {} in call to '{}'. Expected {}, got {}.",
+                    i + 1, func_name, var_type, provided_arg_types[i]
+                  ));
+                }
+              }
             }
           }
 
@@ -377,7 +418,7 @@ impl TypeChecker {
 
             // TODO: Validate const (will definitely require overall refactoring)
             // TODO: Validate spread / variadic parameters
-            if let Expr::FunctionParam(Some(Type(ptype)), _is_const, ident_literal, default_value, _is_spread) = &mut param.expr {
+            if let Expr::FunctionParam(Some(Type(ptype)), _is_const, ident_literal, default_value, is_spread) = &mut param.expr {
               if let Literals::Identifier(Name(pname)) = ident_literal {
                 let param_type = if ptype == "let" {
                   JType::Unknown
@@ -385,19 +426,26 @@ impl TypeChecker {
                   self.string_to_jtype(&ptype)?
                 };
 
-                // Check default type against param type if it exists
-                if let Some(default_value) = default_value {
-                  let default_type = self.check_expression(&mut **default_value)?;
-                  if !self.check_type_compatibility(&param_type, &default_type) {
-                    return Err(format!(
-                      "Default value type mismatch for parameter '{}'. Expected {}, got {}.",
-                      pname, param_type, default_type
-                    ));
+                // Check default type against param type if it exists (not variadic)
+                if !*is_spread {
+                  if let Some(default_value) = default_value {
+                    let default_type = self.check_expression(&mut **default_value)?;
+                    if !self.check_type_compatibility(&param_type, &default_type) {
+                      return Err(format!(
+                        "Default value type mismatch for parameter '{}'. Expected {}, got {}.",
+                        pname, param_type, default_type
+                      ));
+                    }
                   }
-                }
 
-                expected_param_types.push(param_type.clone());
-                param_names.push((pname.clone(), param_type));
+                  expected_param_types.push(param_type.clone());
+                  param_names.push((pname.clone(), param_type));
+
+                // Variadic (parser already confirms this is the last param)
+                } else {
+                  expected_param_types.push(JType::VariadicFunParam(Some(Box::new(param_type.clone()))));
+                  param_names.push((pname.clone(), JType::Array(Box::new(param_type))));
+                }
               } else {
                 return Err("Invalid function parameter: expected identifier on left-hand side (TODO: Type check function parameters).".to_string());
               }
