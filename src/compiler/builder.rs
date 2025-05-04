@@ -12,7 +12,7 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, Functi
 use inkwell::AddressSpace;
 use inkwell::support::LLVMString;
 
-use jink::{Error, Expr, Expression, Name, Type, Operator, Literals};
+use jink::{Error, Expr, Expression, JType, Literals, Name, Operator, Type};
 
 use super::parser::Namespace;
 
@@ -198,6 +198,30 @@ impl<'ctx> CodeGen<'ctx> {
 
     let fputs_type = self.context.i32_type().fn_type(&[ptr_type.into(), ptr_type.into()], true);
     self.module.add_function("fputs", fputs_type, Some(Linkage::External));
+  }
+
+  pub fn _jtype_to_basic_type(&self, jtype: JType) -> Result<BasicTypeEnum<'ctx>, Error> {
+    match jtype {
+      JType::Integer => Ok(self.context.i64_type().as_basic_type_enum()),
+      JType::UnsignedInteger => Ok(self.context.i64_type().as_basic_type_enum()),
+      JType::FloatingPoint => Ok(self.context.f64_type().as_basic_type_enum()),
+      JType::String => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
+      JType::Boolean => Ok(self.context.bool_type().as_basic_type_enum()),
+      JType::Object(_) => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
+      JType::Array(_) => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
+      JType::Null => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
+      JType::Unknown => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
+      _ => {
+        return Err(Error::new(
+          Error::CompilerError,
+          None,
+          &"",
+          Some(0),
+          Some(0),
+          format!("Invalid type: {:?}", jtype)
+        ));
+      }
+    }
   }
 
   pub fn build(&mut self, code: String, ast: Vec<Expression>, namespaces: IndexMap<String, Namespace>, verbose: bool, do_execute: bool) -> Result<LLVMString, Error> {
@@ -1142,6 +1166,7 @@ impl<'ctx> CodeGen<'ctx> {
     self.builder.position_at_end(block);
 
     // Extract assignment values
+    // (type or let/const; ident or index; value)
     let (ty, ident_or_idx, value) = match expr.clone().expr {
       Expr::Assignment(ty, ident_or_idx, value) => (ty, ident_or_idx, value),
       _ => {
@@ -1156,20 +1181,10 @@ impl<'ctx> CodeGen<'ctx> {
       }
     };
 
-    // Array index isn't typed so we need to extract the type
-    if let Expr::ArrayIndex(_, _) = ident_or_idx.expr.clone() {
-      let (ptr, val) = self.build_index(&ident_or_idx)?;
+    // Case: Array/struct index lhs
+    if let Expr::ArrayIndex(_, _) | Expr::Index(_, _) = ident_or_idx.expr.clone() {
+      let (ptr, _) = self.build_index(&ident_or_idx)?;
       let set = self.visit(&value.clone().unwrap(), block)?;
-      if set.get_type() != val.get_type() {
-        return Err(Error::new(
-          Error::CompilerError,
-          None,
-          &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
-          expr.first_pos,
-          Some(self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string().len() as i32),
-          format!("Invalid assignment type for array index, expected {:?} but got {:?}", val.get_type().print_to_string(), set.get_type().print_to_string())
-        ));
-      }
       self.builder.build_store(ptr, set).unwrap();
       return Ok(());
     }
@@ -1189,34 +1204,25 @@ impl<'ctx> CodeGen<'ctx> {
       }
     };
 
-    let mut set: BasicValueEnum;
-    if value.is_some() {
-      if let Expr::Literal(e) = &value.as_ref().unwrap().expr {
-        if let Literals::Object(obj) = e {
+    let set = match &value {
+      // Case: No rhs / value, set to null
+      None => self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum(),
+      Some(v) => match &v.expr {
+        // Case: Object rhs
+        Expr::Literal(Literals::Object(obj)) => {
           let alloca = self.build_initialize_struct(ty.clone().unwrap().0, name.clone(), obj.to_vec(), block)?;
-          set = alloca.as_basic_value_enum();
-        } else {
-          set = self.visit(&value.unwrap(), block)?;
-        }
-
-      // If assignment value is an array, we need to extract the type
-      } else if let Expr::Array(_) = value.as_ref().unwrap().expr.clone() {
-        let (ptr, arr_type, val) = self.visit_array(*value.unwrap(), block)?;
-        self.set_symbol(name, Some(ptr), arr_type.as_basic_type_enum(), val);
-        return Ok(());
-
-      } else {
-        set = self.visit(&value.unwrap(), block)?;
+          alloca.as_basic_value_enum()
+        },
+        // Case: Array rhs
+        // TODO: Handle heterogeneous arrays
+        Expr::Array(_) => {
+          let (ptr, typ, val) = self.visit_array(*value.clone().unwrap(), block)?;
+          self.set_symbol(name, Some(ptr), typ.as_basic_type_enum(), val);
+          return Ok(());
+        },
+        _ => self.visit(&value.unwrap(), block)?,
       }
-    // If no value is provided, set to null
-    } else {
-      set = self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum();
-    }
-
-    // Convert bool to int when storing (for now)
-    if set.get_type() == self.context.bool_type().as_basic_type_enum() {
-      set = self.builder.build_int_z_extend(set.into_int_value(), self.context.i64_type(), "bool_to_int").unwrap().as_basic_value_enum();
-    }
+    };
 
     // TODO: Check for constants
 
@@ -1237,74 +1243,15 @@ impl<'ctx> CodeGen<'ctx> {
       }
 
       match ty.as_str() {
-        "let" => {
-          match set {
-            BasicValueEnum::IntValue(i) => {
-              // Allocate space and store the value
-              let ptr = self.builder.build_alloca(self.context.i64_type(), &name).unwrap();
-              self.builder.build_store(ptr, i).unwrap();
-
-              // Build tagged pointer
-              // let tagged = self.tag_ptr(ptr, *self.type_tags.get("int").unwrap());
-
-              // Set the symbol
-              self.set_symbol(name, Some(ptr), i.get_type().as_basic_type_enum(), i.into());
-            },
-            BasicValueEnum::FloatValue(f) => {
-              // Allocate space and store the value
-              let ptr = self.builder.build_alloca(self.context.f64_type(), &name).unwrap();
-              self.builder.build_store(ptr, f).unwrap();
-
-              // Build tagged pointer
-              // let tagged = self.tag_ptr(ptr, *self.type_tags.get("float").unwrap());
-
-              // Set the symbol
-              self.set_symbol(name, Some(ptr), f.get_type().as_basic_type_enum(),f.into());
-            },
-            BasicValueEnum::StructValue(s) => {
-              let var = self.builder.build_alloca(s.get_type(), &name).unwrap();
-              self.builder.build_store(var, s).unwrap();
-              self.set_symbol(name, Some(var), s.get_type().as_basic_type_enum(), s.into());
-            },
-            // Strings
-            BasicValueEnum::ArrayValue(a) => {
-              let var = self.builder.build_alloca(a.get_type(), &name).unwrap();
-              self.builder.build_store(var, a).unwrap();
-              self.set_symbol(name, Some(var), a.get_type().as_basic_type_enum(), a.into());
-            },
-            BasicValueEnum::PointerValue(a) => {
-              let var = self.builder.build_alloca(self.context.ptr_type(AddressSpace::default()), &name).unwrap();
-              self.builder.build_store(var, a).unwrap();
-              self.set_symbol(name, Some(var), a.get_type().as_basic_type_enum(), a.into());
-            },
-            _ => panic!("Invalid type for let"),
-          }
+        "let" | "const" | "int" | "bool" | "float" | "string" => {
+          // Allocate space and store the value
+          let ptr = self.builder.build_alloca(set.get_type(), &name).unwrap();
+          self.builder.build_store(ptr, set).unwrap();
+          // Set the symbol
+          self.set_symbol(name, Some(ptr), set.get_type(), set);
         },
-        "const" => {
-          match set {
-            BasicValueEnum::IntValue(i) => {
-              let var = self.builder.build_alloca(self.context.i64_type(), &name).unwrap();
-              self.builder.build_store(var, i).unwrap();
-              self.set_symbol(name, Some(var), i.get_type().as_basic_type_enum(), var.as_basic_value_enum());
-            },
-            BasicValueEnum::FloatValue(f) => {
-              let var = self.builder.build_alloca(self.context.f64_type(), &name).unwrap();
-              self.builder.build_store(var, f).unwrap();
-              self.set_symbol(name, Some(var), f.get_type().as_basic_type_enum(), var.as_basic_value_enum());
-            },
-            _ => panic!("Invalid type for const"),
-          }
-        },
-        _ => {
-          if ["int", "bool", "float", "string"].contains(&ty.as_str()) {
-            let var = self.builder.build_alloca(set.get_type(), &name).unwrap();
-            self.builder.build_store(var, set).unwrap();
-            self.set_symbol(name, Some(var), set.get_type(), set);
-          } else {
-            // Custom type (we know exists from builder)
-            self.set_symbol(name, None, set.get_type(), set);
-          }
-        },
+        // Custom type (we know exists from builder)
+        _ => self.set_symbol(name, None, set.get_type(), set),
       }
     } else {
       // Setting existing variable
@@ -1844,7 +1791,7 @@ impl<'ctx> CodeGen<'ctx> {
 
     match expr.clone().expr {
       Expr::Literal(literal) => self.handle_literal(literal, expr),
-      Expr::BinaryOperator(op, lhs, rhs) => self.handle_binop(op, lhs, rhs, block),
+      Expr::BinaryOperator(op, lhs, rhs) => self.handle_binop(op, lhs, rhs, expr.clone().inferred_type.unwrap(), block),
       Expr::UnaryOperator(op, value) => self.handle_unop(op, value, block),
       Expr::Array(_) => panic!("Array not allowed in visit(), has its own visitor"),
       Expr::ArrayIndex(_, _) => {
@@ -2029,9 +1976,7 @@ impl<'ctx> CodeGen<'ctx> {
       // },
       Literals::Object(_) => panic!("Object literal not allowed here"),
       Literals::ObjectProperty(_, _) => todo!(),
-      Literals::Null => {
-        return Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum());
-      },
+      Literals::Null => Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum()),
       Literals::Identifier(n) => Ok(self.var_from_ident(n.0, expr)?.2),
       Literals::EOF => todo!(),
     }
@@ -2060,453 +2005,417 @@ impl<'ctx> CodeGen<'ctx> {
   }
 
   fn handle_unop(&mut self, op: Operator, value: Box<Expression>, block: BasicBlock<'ctx>) -> Result<BasicValueEnum<'ctx>, Error> {
-    let val: BasicValueEnum<'ctx>;
-    let mut name: Option<String> = None;
-    if let Expr::Literal(Literals::Identifier(n)) = value.clone().expr {
-      val = self.get_symbol(&n.0)?.unwrap().3;
-      name = Some(n.0);
-      // val = self.builder.build_load(val.into_pointer_value(), val.into_pointer_value(), &name.0).unwrap().as_basic_value_enum();
-    } else {
-      val = self.visit(&value, block)?;
-    }
+    let op_type = value.inferred_type.as_ref().ok_or_else(|| Error::new(
+      Error::CompilerError,
+      None,
+      &self.code.lines().nth((value.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+      value.first_pos,
+      value.last_line,
+      "Invalid unary operation".to_string()
+    ))?;
+    let val = self.visit(&value, block)?;
 
-    match op {
-      Operator(op) => {
-        match op.as_str() {
-          "-" => {
-            if name.is_some() {
-              // Reassign the identifier with the new value
-              let a = self.get_symbol(&name.unwrap())?.unwrap().1.unwrap();
-              if a.is_const() {
-                panic!("Cannot assign to a constant");
-              } else {
-                let val = self.builder.build_int_neg(val.into_int_value(), "negtmp").unwrap();
-                self.builder.build_store(a, val).unwrap();
-                return Ok(val.as_basic_value_enum());
-              }
-            } else {
-              return Ok(self.builder.build_int_neg(val.into_int_value(), "negtmp").unwrap().as_basic_value_enum());
-            }
-          },
-          "!" => {
-            if val.is_pointer_value() {
-              let null = self.context.ptr_type(AddressSpace::default()).const_null();
-              let cmp = self.builder.build_int_compare(inkwell::IntPredicate::EQ, val.into_pointer_value(), null, "notcmp").unwrap();
-              return Ok(self.builder.build_int_z_extend(cmp, self.context.i64_type(), "nottmp").unwrap().as_basic_value_enum());
-            }
-            return Ok(self.builder.build_not(val.into_int_value(), "nottmp").unwrap().as_basic_value_enum());
-          },
-          // Pre-increment (return the new value)
-          "++:pre" => {
-            if name.is_some() {
-              // Reassign the identifier with the new value
-              let a = self.get_symbol(&name.as_ref().unwrap())?.unwrap().1.unwrap();
-              if a.is_const() {
-                panic!("Cannot assign to a constant");
-              } else {
-                let v = self.builder.build_int_add(val.into_int_value(), self.context.i64_type().const_int(1, false), "addtmp").unwrap();
-                self.builder.build_store(a, v).unwrap();
-                self.set_symbol(name.unwrap(), Some(a), v.get_type().as_basic_type_enum(), v.as_basic_value_enum());
-                return Ok(v.as_basic_value_enum());
-              }
-            } else {
-              // Return the new value
-              return Ok(self.builder.build_int_add(val.into_int_value(), self.context.i64_type().const_int(1, false), "addtmp").unwrap().as_basic_value_enum());
-            }
-          },
-          // Post-increment (return the original value)
-          "++:post" => {
-            if name.is_some() {
-              // Reassign the identifier with the new value
-              let a = self.get_symbol(&name.as_ref().unwrap())?.unwrap().1.unwrap();
-              if a.is_const() {
-                panic!("Cannot assign to a constant");
-              } else {
-                let v = self.builder.build_int_add(val.into_int_value(), self.context.i64_type().const_int(1, false), "addtmp").unwrap();
-                self.builder.build_store(a, v).unwrap();
-                self.set_symbol(name.unwrap(), Some(a), v.get_type().as_basic_type_enum(), v.as_basic_value_enum());
-                return Ok(val);
-              }
-            } else {
-              // Return the original value
-              return Ok(val);
-            }
-          },
-          // Pre-decrement
-          "--:pre" => {
-            if name.is_some() {
-              // Reassign the identifier with the new value
-              let a = self.get_symbol(&name.as_ref().unwrap())?.unwrap().1.unwrap();
-              if a.is_const() {
-                panic!("Cannot assign to a constant");
-              } else {
-                let v = self.builder.build_int_sub(val.into_int_value(), self.context.i64_type().const_int(1, false), "subtmp").unwrap();
-                self.builder.build_store(a, v).unwrap();
-                self.set_symbol(name.unwrap(), Some(a), v.get_type().as_basic_type_enum(), v.as_basic_value_enum());
-                return Ok(v.as_basic_value_enum());
-              }
-            } else {
-              return Ok(self.builder.build_int_sub(val.into_int_value(), self.context.i64_type().const_int(1, false), "subtmp").unwrap().as_basic_value_enum());
-            }
-          },
-          // Post-decrement
-          "--:post" => {
-            if name.is_some() {
-              // Reassign the identifier with the new value
-              let a = self.get_symbol(&name.as_ref().unwrap())?.unwrap().1.unwrap();
-              if a.is_const() {
-                panic!("Cannot assign to a constant");
-              } else {
-                let v = self.builder.build_int_sub(val.into_int_value(), self.context.i64_type().const_int(1, false), "subtmp").unwrap();
-                self.builder.build_store(a, v).unwrap();
-                self.set_symbol(name.unwrap(), Some(a), v.get_type().as_basic_type_enum(), v.as_basic_value_enum());
-                return Ok(val);
-              }
-            } else {
-              return Ok(val);
-            }
-          },
-          _ => panic!("Unknown operator: {}", op),
+    match op.0.as_str() {
+      "-" => {
+        match op_type {
+          JType::Integer => Ok(self.builder.build_int_neg(val.into_int_value(), "negtmp").unwrap().as_basic_value_enum()),
+          JType::FloatingPoint => Ok(self.builder.build_float_neg(val.into_float_value(), "negtmp").unwrap().as_basic_value_enum()),
+          _ => unreachable!()
         }
       },
+      "!" => {
+        if val.is_pointer_value() {
+          let null = self.context.ptr_type(AddressSpace::default()).const_null();
+          let cmp = self.builder.build_int_compare(inkwell::IntPredicate::EQ, val.into_pointer_value(), null, "notcmp").unwrap();
+          return Ok(self.builder.build_int_z_extend(cmp, self.context.i64_type(), "nottmp").unwrap().as_basic_value_enum());
+        }
+        return Ok(self.builder.build_not(val.into_int_value(), "nottmp").unwrap().as_basic_value_enum());
+      },
+      "++:pre" | "++:post" | "--:pre" | "--:post" => {
+        // Get the identifier
+        let name = if let Expr::Literal(Literals::Identifier(ref n)) = value.expr {
+          n.0.clone()
+        } else {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth((value.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+            value.first_pos,
+            value.last_line,
+            "Invalid unary operation".to_string()
+          ));
+        };
+
+        // Get previous value info
+        let (ptr, typ, val) = self.var_from_ident(name.clone(), value.as_ref())?;
+        if ptr.is_none() {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth((value.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+            value.first_pos,
+            value.last_line,
+            "Invalid use of value in unary operation".to_string()
+          ));
+        }
+        let ptr = ptr.unwrap();
+
+        // Build new value
+        let new_val = match op_type {
+          JType::Integer => {
+            let one = self.context.i64_type().const_int(1, false);
+            if op.0.starts_with("++") {
+              self.builder.build_int_add(val.into_int_value(), one, "inc").unwrap().as_basic_value_enum()
+            } else {
+              self.builder.build_int_sub(val.into_int_value(), one, "dec").unwrap().as_basic_value_enum()
+            }
+          },
+          JType::FloatingPoint => {
+            let one = self.context.f64_type().const_float(1.0);
+            if op.0.starts_with("++") {
+              self.builder.build_float_add(val.into_float_value(), one, "inc").unwrap().as_basic_value_enum()
+            } else {
+              self.builder.build_float_sub(val.into_float_value(), one, "dec").unwrap().as_basic_value_enum()
+            }
+          },
+          _ => return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth((value.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+            value.first_pos,
+            value.last_line,
+            "Invalid unary operation".to_string()
+          )),
+        };
+
+        // Store the new value
+        self.builder.build_store(ptr, new_val).unwrap();
+        // Update the symbol table
+        self.set_symbol(name, Some(ptr), typ, new_val);
+
+        // Return one of the values
+        if op.0.ends_with(":pre") {
+          return Ok(new_val);
+        } else {
+          return Ok(val);
+        }
+      }
+      _ => panic!("Unknown operator: {}", op.0.as_str()),
     }
   }
 
   // Handle binary operators
-  // TODO: Improve / rewrite entirely
-  // Will either need more comprehensive type inference or an entire type analysis / check step before IR building
-  // Consider this entire function a temporary solution or broken
-  fn handle_binop(&mut self, op: Operator, lhs: Box<Expression>, rhs: Box<Expression>, block: BasicBlock<'ctx>) -> Result<BasicValueEnum<'ctx>, Error> {
+  fn handle_binop(&mut self, op: Operator, lhs: Box<Expression>, rhs: Box<Expression>, expected_type: JType, block: BasicBlock<'ctx>) -> Result<BasicValueEnum<'ctx>, Error> {
     let mut left = self.visit(&lhs, block)?;
     let mut right = self.visit(&rhs, block)?;
+    let lhs_type = lhs.inferred_type.as_ref().expect("Type checker should set this");
+    let rhs_type = rhs.inferred_type.as_ref().expect("Type checker should set this");
 
-    // Based on the left and right types, determine the correct operation to perform
-    let typ = match (left, right) {
-      // One of the values is a float
-      (BasicValueEnum::FloatValue(_), _) => "float".to_string(),
-      (_, BasicValueEnum::FloatValue(_)) => "float".to_string(),
-      // Both values are integers
-      (BasicValueEnum::IntValue(a), BasicValueEnum::IntValue(b)) => {
+    match op.0.as_str() {
+      "+" => {
+        match expected_type {
+          JType::FloatingPoint => {
+            if left.is_int_value() {
+              left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
+            }
+            if right.is_int_value() {
+              right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
+            }
 
-        // If only one of the values is a bool, convert it to an int
-        if a.get_type().get_bit_width() == 1 && b.get_type().get_bit_width() == 64 {
-          left = self.builder.build_int_z_extend(a, self.context.i64_type(), "left_int").unwrap().as_basic_value_enum();
-        } else if a.get_type().get_bit_width() == 64 && b.get_type().get_bit_width() == 1 {
-          right = self.builder.build_int_z_extend(b, self.context.i64_type(), "right_int").unwrap().as_basic_value_enum();
-        }
-
-        "int".to_string()
-      },
-      (BasicValueEnum::PointerValue(a), BasicValueEnum::PointerValue(b)) => {
-        // Get symbols from pointer names
-        println!("a: {:?}\nb: {:?}", a, b);
-        let (_, a_inst, a_type, _a_val, _) = self.get_symbol(&a.get_name().to_string_lossy())?.unwrap();
-        let (_, b_inst, b_type, _b_val, _) = self.get_symbol(&b.get_name().to_string_lossy())?.unwrap();
-
-        // panic!("Pointer arithmetic not yet implemented");
-        let a_value = self.builder.build_load(a_type, a_inst.unwrap(), "lhs_val").unwrap();
-        let b_value = self.builder.build_load(b_type, b_inst.unwrap(), "rhs_val").unwrap();
-
-        left = a_value.as_basic_value_enum();
-        right = b_value.as_basic_value_enum();
-
-        if a_value.is_int_value() && b_value.is_int_value() {
-          "int".to_string()
-        } else if a_value.is_float_value() && b_value.is_float_value() {
-          "float".to_string()
-        } else if a_value.is_int_value() && b_value.is_float_value() {
-          "float".to_string()
-        } else if a_value.is_float_value() && b_value.is_int_value() {
-          "float".to_string()
-        } else {
-          panic!("Invalid types for operation");
+            Ok(self.builder.build_float_add(
+              left.into_float_value(),
+              right.into_float_value(),
+              "addtmp"
+            ).unwrap().as_basic_value_enum())
+          },
+          JType::Integer => Ok(self.builder.build_int_add(
+            left.into_int_value(),
+            right.into_int_value(),
+            "addtmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for addition"), // TODO: pretty up errors
         }
       },
-      (BasicValueEnum::PointerValue(a), BasicValueEnum::IntValue(_)) => {
-        let (_, a_inst, _, _a_val, _) = self.get_symbol(&a.get_name().to_string_lossy())?.unwrap();
-        let a_value = self.builder.build_load(self.context.i64_type(), a_inst.unwrap(), "lhs_val").unwrap();
-        left = a_value.as_basic_value_enum();
-        "int".to_string()
-      },
-      (BasicValueEnum::IntValue(_), BasicValueEnum::PointerValue(b)) => {
-        let (_, b_inst, _, _b_val, _) = self.get_symbol(&b.get_name().to_string_lossy())?.unwrap();
-        let b_value = self.builder.build_load(self.context.i64_type(), b_inst.unwrap(), "rhs_val").unwrap();
-        left = b_value.as_basic_value_enum();
-        "int".to_string()
-      },
-      (BasicValueEnum::StructValue(a), BasicValueEnum::StructValue(b)) => {
-        // Get fields from struct values
-        let a_value = self.builder.build_extract_value(a, 0, "lhs_val").unwrap();
-        let b_value = self.builder.build_extract_value(b, 0, "rhs_val").unwrap();
+      "-" => {
+        match expected_type {
+          JType::FloatingPoint => {
+            if left.is_int_value() {
+              left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
+            }
+            if right.is_int_value() {
+              right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
+            }
 
-        left = a_value.as_basic_value_enum();
-        right = b_value.as_basic_value_enum();
-
-        if a_value.is_int_value() && b_value.is_int_value() {
-          "int".to_string()
-        } else if a_value.is_float_value() && b_value.is_float_value() {
-          "float".to_string()
-        } else if a_value.is_int_value() && b_value.is_float_value() {
-          "float".to_string()
-        } else if a_value.is_float_value() && b_value.is_int_value() {
-          "float".to_string()
-        } else if a_value.is_struct_value() && b_value.is_struct_value() {
-          // println!("{:?} {:?}", a_value, b_value);
-          todo!()
-        } else if a_value.is_pointer_value() && b_value.is_pointer_value() {
-          "int".to_string()
-        } else {
-          // println!("{:?} {:?}", a_value, b_value);
-          panic!("Invalid types for operation");
+            Ok(self.builder.build_float_sub(
+              left.into_float_value(),
+              right.into_float_value(),
+              "subtmp"
+            ).unwrap().as_basic_value_enum())
+          },
+          JType::Integer => Ok(self.builder.build_int_sub(
+            left.into_int_value(),
+            right.into_int_value(),
+            "subtmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for subtraction"), // TODO: pretty up errors
         }
       },
-      (BasicValueEnum::StructValue(a), b) => {
-        // Get fields from struct values
-        let a_value = self.builder.build_extract_value(a, 0, "lhs_val").unwrap();
+      "*" => {
+        match expected_type {
+          JType::FloatingPoint => {
+            if left.is_int_value() {
+              left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
+            }
+            if right.is_int_value() {
+              right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
+            }
 
-        left = a_value.as_basic_value_enum();
-
-        if a_value.is_int_value() && b.is_int_value() {
-          "int".to_string()
-        } else if a_value.is_float_value() && b.is_float_value() {
-          "float".to_string()
-        } else {
-          panic!("Invalid types for operation");
+            Ok(self.builder.build_float_mul(
+              left.into_float_value(),
+              right.into_float_value(),
+              "multmp"
+            ).unwrap().as_basic_value_enum())
+          },
+          JType::Integer =>  Ok(self.builder.build_int_mul(
+            left.into_int_value(),
+            right.into_int_value(),
+            "multmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for multiplication"),
         }
       },
-      (a, BasicValueEnum::StructValue(b)) => {
-        // Get fields from struct values
-        let b_value = self.builder.build_extract_value(b, 0, "rhs_val").unwrap();
+      "/" => {
+        match expected_type {
+          JType::FloatingPoint => {
+            if left.is_int_value() {
+              left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
+            }
+            if right.is_int_value() {
+              right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
+            }
 
-        right = b_value.as_basic_value_enum();
-
-        if a.is_int_value() && b_value.is_int_value() {
-          "int".to_string()
-        } else if a.is_float_value() && b_value.is_float_value() {
-          "float".to_string()
-        } else {
-          panic!("Invalid types for operation");
+            Ok(self.builder.build_float_div(
+              left.into_float_value(),
+              right.into_float_value(),
+              "divtmp"
+            ).unwrap().as_basic_value_enum())
+          },
+          JType::Integer => Ok(self.builder.build_int_unsigned_div(
+            left.into_int_value(),
+            right.into_int_value(),
+            "divtmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for division"),
         }
       },
-      // Default to bool
-      _ => "bool".to_string(),
-    };
+      "//" => {
+        todo!();
+      },
+      "%" => {
+        match expected_type {
+          JType::FloatingPoint => {
+            if left.is_int_value() {
+              left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
+            }
+            if right.is_int_value() {
+              right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
+            }
 
-    match op {
-      Operator(op) => {
-        match op.as_str() {
-          "+" => {
-            match typ.as_str() {
-              "float" => {
-                if left.is_int_value() {
-                  left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
-                }
-                if right.is_int_value() {
-                  right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
-                }
-                return Ok(self.builder.build_float_add(left.into_float_value(), right.into_float_value(), "addtmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_add(left.into_int_value(), right.into_int_value(), "addtmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for addition: {}", typ), // TODO: pretty up errors
-            }
+            Ok(self.builder.build_float_rem(
+              left.into_float_value(),
+              right.into_float_value(),
+              "remtmp"
+            ).unwrap().as_basic_value_enum())
           },
-          "-" => {
-            match typ.as_str() {
-              "float" => {
-                if left.is_int_value() {
-                  left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
-                }
-                if right.is_int_value() {
-                  right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
-                }
-                return Ok(self.builder.build_float_sub(left.into_float_value(), right.into_float_value(), "subtmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_sub(left.into_int_value(), right.into_int_value(), "subtmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for subtraction"), // TODO: pretty up errors
-            }
-          },
-          "*" => {
-            match typ.as_str() {
-              "float" => {
-                if left.is_int_value() {
-                  left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
-                }
-                if right.is_int_value() {
-                  right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
-                }
-                return Ok(self.builder.build_float_mul(left.into_float_value(), right.into_float_value(), "multmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_mul(left.into_int_value(), right.into_int_value(), "multmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for multiplication"),
-            }
-          },
-          "/" => {
-            match typ.as_str() {
-              "float" => {
-                if left.is_int_value() {
-                  left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
-                }
-                if right.is_int_value() {
-                  right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
-                }
-                return Ok(self.builder.build_float_div(left.into_float_value(), right.into_float_value(), "divtmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_unsigned_div(left.into_int_value(), right.into_int_value(), "divtmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for division"),
-            }
-          },
-          "//" => {
-            todo!();
-          },
-          "%" => {
-            match typ.as_str() {
-              "float" => {
-                if left.is_int_value() {
-                  left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
-                }
-                if right.is_int_value() {
-                  right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
-                }
-                return Ok(self.builder.build_float_rem(left.into_float_value(), right.into_float_value(), "remtmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_unsigned_rem(left.into_int_value(), right.into_int_value(), "remtmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for modulus"),
-            }
-          },
-          "^" => {
-            todo!();
-          },
-          "<<" => {
-            return Ok(self.builder.build_left_shift(left.into_int_value(), right.into_int_value(), "shltmp").unwrap().as_basic_value_enum());
-          },
-          ">>" => {
-            return Ok(self.builder.build_right_shift(left.into_int_value(), right.into_int_value(), false, "shrtmp").unwrap().as_basic_value_enum());
-          },
-          "&&" => {
-            return Ok(self.builder.build_and(left.into_int_value(), right.into_int_value(), "andtmp").unwrap().as_basic_value_enum());
-          },
-          "||" => {
-            return Ok(self.builder.build_or(left.into_int_value(), right.into_int_value(), "ortmp").unwrap().as_basic_value_enum());
-          },
-          "==" => {
-            match typ.as_str() {
-              "float" => {
-                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OEQ, left.into_float_value(), right.into_float_value(), "eqtmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::EQ, left.into_int_value(), right.into_int_value(), "eqtmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for equality"), // TODO: pretty up errors
-            }
-          },
-          "!=" => {
-            match typ.as_str() {
-              "float" => {
-                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::ONE, left.into_float_value(), right.into_float_value(), "netmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::NE, left.into_int_value(), right.into_int_value(), "netmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for inequality"), // TODO: pretty up errors
-            }
-          },
-          ">" => {
-            match typ.as_str() {
-              "float" => {
-                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OGT, left.into_float_value(), right.into_float_value(), "gttmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::SGT, left.into_int_value(), right.into_int_value(), "gttmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for greater than"), // TODO: pretty up errors
-            }
-          },
-          "<" => {
-            match typ.as_str() {
-              "float" => {
-                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OLT, left.into_float_value(), right.into_float_value(), "lttmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::SLT, left.into_int_value(), right.into_int_value(), "lttmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for less than"), // TODO: pretty up errors
-            }
-          },
-          ">=" => {
-            match typ.as_str() {
-              "float" => {
-                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OGE, left.into_float_value(), right.into_float_value(), "getmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::SGE, left.into_int_value(), right.into_int_value(), "getmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for greater than or equal"), // TODO: pretty up errors
-            }
-          },
-          "<=" => {
-            match typ.as_str() {
-              "float" => {
-                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OLE, left.into_float_value(), right.into_float_value(), "letmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::SLE, left.into_int_value(), right.into_int_value(), "letmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for less than or equal"), // TODO: pretty up errors
-            }
-          },
-          "+=" => {
-            match typ.as_str() {
-              "float" => {
-                if let Expr::Literal(Literals::Identifier(n)) = lhs.clone().expr {
-                  let a = self.get_symbol(&n.0)?.unwrap().1.unwrap();
-                  if a.is_const() {
-                    panic!("Cannot assign to a constant");
-                  } else {
-                    let val = self.builder.build_float_add(left.into_float_value(), right.into_float_value(), "addtmp").unwrap();
-                    self.builder.build_store(a, val).unwrap();
-                    self.set_symbol(n.0, Some(a), val.get_type().as_basic_type_enum(), val.as_basic_value_enum());
-                    return Ok(val.as_basic_value_enum());
-                  }
-                } else {
-                  return Ok(self.builder.build_float_add(left.into_float_value(), right.into_float_value(), "addtmp").unwrap().as_basic_value_enum());
-                }
-              },
-              "int" => {
-                if let Expr::Literal(Literals::Identifier(n)) = lhs.clone().expr {
-                  let a = self.get_symbol(&n.0)?.unwrap().1.unwrap();
-                  if a.is_const() {
-                    panic!("Cannot assign to a constant");
-                  } else {
-                    let val = self.builder.build_int_add(left.into_int_value(), right.into_int_value(), "addtmp").unwrap();
-                    self.builder.build_store(a, val).unwrap();
-                    self.set_symbol(n.0, Some(a), val.get_type().as_basic_type_enum(), val.as_basic_value_enum());
-                    return Ok(val.as_basic_value_enum());
-                  }
-                } else {
-                  return Ok(self.builder.build_int_add(left.into_int_value(), right.into_int_value(), "addtmp").unwrap().as_basic_value_enum());
-                }
-              },
-              _ => panic!("Invalid types for addition"), // TODO: pretty up errors
-            }
-          },
-          "-=" => todo!(),
-          "*=" => todo!(),
-          "/=" => todo!(),
-          "//=" => todo!(),
-          "%=" => todo!(),
-          _ => panic!("Unknown operator: {}", op),
+          JType::Integer => Ok(self.builder.build_int_unsigned_rem(
+            left.into_int_value(),
+            right.into_int_value(),
+            "remtmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for modulus"),
         }
       },
+      "^" => {
+        todo!();
+      },
+      "<<" => Ok(self.builder.build_left_shift(
+        left.into_int_value(),
+        right.into_int_value(),
+        "shltmp"
+      ).unwrap().as_basic_value_enum()),
+      ">>" => Ok(self.builder.build_right_shift(
+        left.into_int_value(),
+        right.into_int_value(),
+        false,
+        "shrtmp"
+      ).unwrap().as_basic_value_enum()),
+      "&&" | "&" => Ok(self.builder.build_and(
+        left.into_int_value(),
+        right.into_int_value(),
+        "andtmp"
+      ).unwrap().as_basic_value_enum()),
+      "||" | "|" => Ok(self.builder.build_or(
+        left.into_int_value(),
+        right.into_int_value(),
+        "ortmp"
+      ).unwrap().as_basic_value_enum()),
+      "==" => {
+        match (lhs_type, rhs_type) {
+          (JType::FloatingPoint, JType::FloatingPoint) => Ok(self.builder.build_float_compare(
+            inkwell::FloatPredicate::OEQ,
+            left.into_float_value(),
+            right.into_float_value(),
+            "eqtmp"
+          ).unwrap().as_basic_value_enum()),
+          (JType::Integer, JType::Integer) => Ok(self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ,
+            left.into_int_value(),
+            right.into_int_value(),
+            "eqtmp"
+          ).unwrap().as_basic_value_enum()),
+          (JType::FloatingPoint, JType::Integer) | (JType::Integer, JType::FloatingPoint) => {
+            if left.is_int_value() {
+              left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
+            }
+            if right.is_int_value() {
+              right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
+            }
+            Ok(self.builder.build_float_compare(
+              inkwell::FloatPredicate::OEQ,
+              left.into_float_value(),
+              right.into_float_value(),
+              "eqtmp"
+            ).unwrap().as_basic_value_enum())
+          },
+          _ => panic!("Invalid types for equality"), // TODO: pretty up errors
+        }
+      },
+      "!=" => {
+        match (lhs_type, rhs_type) {
+          (JType::FloatingPoint, JType::FloatingPoint) => Ok(self.builder.build_float_compare(
+            inkwell::FloatPredicate::ONE,
+            left.into_float_value(),
+            right.into_float_value(),
+            "netmp"
+          ).unwrap().as_basic_value_enum()),
+          (JType::Integer, JType::Integer) => Ok(self.builder.build_int_compare(
+            inkwell::IntPredicate::NE,
+            left.into_int_value(),
+            right.into_int_value(),
+            "netmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for inequality"), // TODO: pretty up errors
+        }
+      },
+      ">" => {
+        match (lhs_type, rhs_type) {
+          (JType::FloatingPoint, JType::FloatingPoint) => Ok(self.builder.build_float_compare(
+            inkwell::FloatPredicate::OGT,
+            left.into_float_value(),
+            right.into_float_value(),
+            "gttmp"
+          ).unwrap().as_basic_value_enum()),
+          (JType::Integer, JType::Integer) => Ok(self.builder.build_int_compare(
+            inkwell::IntPredicate::SGT,
+            left.into_int_value(),
+            right.into_int_value(),
+            "gttmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for greater than"), // TODO: pretty up errors
+        }
+      },
+      "<" => {
+        match (lhs_type, rhs_type) {
+          (JType::FloatingPoint, JType::FloatingPoint) => Ok(self.builder.build_float_compare(
+            inkwell::FloatPredicate::OLT,
+            left.into_float_value(),
+            right.into_float_value(),
+            "lttmp"
+          ).unwrap().as_basic_value_enum()),
+          (JType::Integer, JType::Integer) => Ok(self.builder.build_int_compare(
+            inkwell::IntPredicate::SLT,
+            left.into_int_value(),
+            right.into_int_value(),
+            "lttmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for less than"), // TODO: pretty up errors
+        }
+      },
+      ">=" => {
+        match (lhs_type, rhs_type) {
+          (JType::FloatingPoint, JType::FloatingPoint) => Ok(self.builder.build_float_compare(
+            inkwell::FloatPredicate::OGE,
+            left.into_float_value(),
+            right.into_float_value(),
+            "getmp"
+          ).unwrap().as_basic_value_enum()),
+          (JType::Integer, JType::Integer) => Ok(self.builder.build_int_compare(
+            inkwell::IntPredicate::SGE,
+            left.into_int_value(),
+            right.into_int_value(),
+            "getmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for greater than or equal"), // TODO: pretty up errors
+        }
+      },
+      "<=" => {
+        match (lhs_type, rhs_type) {
+          (JType::FloatingPoint, JType::FloatingPoint) => Ok(self.builder.build_float_compare(
+            inkwell::FloatPredicate::OLE,
+            left.into_float_value(),
+            right.into_float_value(),
+            "letmp"
+          ).unwrap().as_basic_value_enum()),
+          (JType::Integer, JType::Integer) => Ok(self.builder.build_int_compare(
+            inkwell::IntPredicate::SLE,
+            left.into_int_value(),
+            right.into_int_value(),
+            "letmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for less than or equal"), // TODO: pretty up errors
+        }
+      },
+      "+=" => {
+        match lhs_type {
+          JType::FloatingPoint => {
+            if let Expr::Literal(Literals::Identifier(n)) = lhs.clone().expr {
+              let a = self.get_symbol(&n.0)?.unwrap().1.unwrap();
+              if a.is_const() {
+                panic!("Cannot assign to a constant");
+              } else {
+                let val = self.builder.build_float_add(left.into_float_value(), right.into_float_value(), "addtmp").unwrap();
+                self.builder.build_store(a, val).unwrap();
+                self.set_symbol(n.0, Some(a), val.get_type().as_basic_type_enum(), val.as_basic_value_enum());
+                return Ok(val.as_basic_value_enum());
+              }
+            } else {
+              return Ok(self.builder.build_float_add(left.into_float_value(), right.into_float_value(), "addtmp").unwrap().as_basic_value_enum());
+            }
+          },
+          JType::Integer => {
+            if let Expr::Literal(Literals::Identifier(n)) = lhs.clone().expr {
+              let a = self.get_symbol(&n.0)?.unwrap().1.unwrap();
+              if a.is_const() {
+                panic!("Cannot assign to a constant");
+              } else {
+                let val = self.builder.build_int_add(left.into_int_value(), right.into_int_value(), "addtmp").unwrap();
+                self.builder.build_store(a, val).unwrap();
+                self.set_symbol(n.0, Some(a), val.get_type().as_basic_type_enum(), val.as_basic_value_enum());
+                return Ok(val.as_basic_value_enum());
+              }
+            } else {
+              return Ok(self.builder.build_int_add(left.into_int_value(), right.into_int_value(), "addtmp").unwrap().as_basic_value_enum());
+            }
+          },
+          _ => panic!("Invalid types for addition"), // TODO: pretty up errors
+        }
+      },
+      "-=" => todo!(),
+      "*=" => todo!(),
+      "/=" => todo!(),
+      "//=" => todo!(),
+      "%=" => todo!(),
+      _ => panic!("Unknown operator: {}", op.0.as_str()),
     }
   }
 }

@@ -259,13 +259,20 @@ impl TypeChecker {
             }
           },
           Operator(s) if ["==", "!=", "<", ">", "<=", ">="].contains(&s.as_str()) => {
+            let are_both_sides_numeric = (
+              left_type == JType::Integer || left_type == JType::FloatingPoint
+            ) && (
+              right_type == JType::Integer || right_type == JType::FloatingPoint
+            );
+
             // Basic comparison for primitives for now
-            if self.check_type_compatibility(&left_type, &right_type) &&
+            if are_both_sides_numeric || (
+              self.check_type_compatibility(&left_type, &right_type) &&
               // No placeholder types
               left_type != JType::Object(HashMap::new()) &&
               left_type != JType::Array(Box::new(JType::Unknown)) &&
               left_type != JType::Function(vec![], Box::new(JType::Unknown))
-            {
+            ) {
               Ok(JType::Boolean)
             } else {
               Err(format!("Operator '{}' cannot compare types {} and {}.", s, left_type, right_type))
