@@ -16,9 +16,24 @@ use jink::{Error, Expr, Expression, JType, Literals, Name, Operator, Type};
 
 use super::parser::Namespace;
 
-pub struct Scope<'ctx> {
+struct Scope<'ctx> {
   symbols: IndexMap<String, (Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>)>,
   is_function: bool,
+}
+
+struct FunctionCtx<'ctx> {
+  llvm_fun: FunctionValue<'ctx>,
+  parameters: Vec<FunctionParamCtx<'ctx>>,
+  _ret_type: String,
+  variadic: bool,
+}
+
+struct FunctionParamCtx<'ctx> {
+  name: String,
+  _jtype: JType,
+  _llvm_type: BasicMetadataTypeEnum<'ctx>,
+  default_value_expr: Option<Box<Expression>>,
+  is_spread: bool,
 }
 
 pub struct CodeGen<'ctx> {
@@ -27,6 +42,8 @@ pub struct CodeGen<'ctx> {
   context: &'ctx Context,
   pub module: Module<'ctx>,
   builder: Builder<'ctx>,
+  /// Functions defined in the module
+  functions: IndexMap<String, FunctionCtx<'ctx>>,
   /// Stack of symbol tables
   symbol_table_stack: Vec<Scope<'ctx>>,
   /// Table of struct types
@@ -65,6 +82,7 @@ impl<'ctx> CodeGen<'ctx> {
       context: &context,
       module,
       builder: context.create_builder(),
+      functions: IndexMap::new(),
       symbol_table_stack: Vec::new(),
       struct_table: IndexMap::new(),
       struct_stack: IndexMap::new(),
@@ -153,6 +171,10 @@ impl<'ctx> CodeGen<'ctx> {
       symbols.insert(name.clone(), (inst.clone(), typ.clone(), value.clone(), false));
     }
     return symbols;
+  }
+
+  fn get_required_function_param_count(&self, params: &[FunctionParamCtx]) -> usize {
+    params.iter().filter(|p| p.default_value_expr.is_none() && !p.is_spread).count()
   }
 
   fn create_main_function(&self) -> FunctionValue<'ctx> {
@@ -1325,139 +1347,147 @@ impl<'ctx> CodeGen<'ctx> {
   fn build_function(&mut self, name: Name, ret_typ: Option<Literals>, params: Option<Box<Vec<Expression>>>, body: Option<Box<Vec<Expression>>>, block: BasicBlock<'ctx>) -> Result<(), Error> {
     // Get function parameters
     let mut parameters: Vec<BasicMetadataTypeEnum> = vec![];
+    let mut parameter_stack: Vec<FunctionParamCtx<'ctx>> = vec![];
     // let mut placeholders: Vec<(usize, String, BasicTypeEnum)> = vec![];
     let mut defaults: Vec<(usize, String, Box<Expression>)> = vec![];
     let mut variadic = false;
-    if params.is_some() {
-      for (i, param) in params.clone().unwrap().iter().enumerate() {
-        let (typ, _is_const, name, val, spread) = match param.clone().expr {
-          Expr::FunctionParam(ty, is_const, name, default_val, spread) => {
-            (
-              ty.unwrap(),
-              is_const,
-              match name {
-                Literals::Identifier(Name(name)) => name,
-                _ => panic!("Invalid function parameter"),
-              },
-              default_val,
-              spread
-            )
-          },
-          _ => panic!("Invalid function parameter"),
-        };
 
-        // If spread
-        if spread {
-          // If not last parameter
-          if i < params.clone().unwrap().len() - 1 {
-            return Err(Error::new(
-              Error::CompilerError,
-              None,
-              &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-              param.first_pos,
-              param.last_line,
-              "Invalid use of spread operator in function parameters, must be last parameter".to_string()
-            ));
-          }
-
-          // If not the inferred/dynamic type or the array type
-          // TODO: Unwrap to array type for spread operator
-          if !["let", "const"].contains(&typ.0.as_str()) {
-            return Err(Error::new(
-              Error::CompilerError,
-              None,
-              &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-              param.first_pos,
-              param.last_line,
-              "Invalid use of spread operator in function parameters, must be array type".to_string()
-            ));
-          }
-
-          // TODO: Spread operator default
-          if val.is_some() {
-            // defaults.push
-
-          // TODO: Spread operator unpack?
-          // We know whether function is variadic so builder might have tool for unpacking variadic args
-          // Would need to be pushed into some sort of array/struct construction eventually
-          } else {
-            // placeholders.push
-          }
-
-          variadic = true;
-
-        // Not a spread op parameter
-        } else {
-          let _t: BasicTypeEnum = match typ.0.as_str() {
-            "let" => {
-              // let t = self.context.struct_type(&self.get_types_as_list(), false);
-              let t = self.context.ptr_type(AddressSpace::default());
-              parameters.push(t.into());
-              t.into()
+    for (i, param) in params.clone().unwrap().iter().enumerate() {
+      let (typ, _is_const, name, val, spread) = match param.clone().expr {
+        Expr::FunctionParam(ty, is_const, name, default_val, spread) => {
+          (
+            ty.unwrap(),
+            is_const,
+            match name {
+              Literals::Identifier(Name(name)) => name,
+              _ => panic!("Invalid function parameter"),
             },
-            "int" => {
+            default_val,
+            spread
+          )
+        },
+        _ => panic!("Invalid function parameter"),
+      };
+
+      // If spread
+      if spread {
+        // If not last parameter
+        if i < params.clone().unwrap().len() - 1 {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+            param.first_pos,
+            param.last_line,
+            "Invalid use of spread operator in function parameters, must be last parameter".to_string()
+          ));
+        }
+
+        // If not the inferred/dynamic type or the array type
+        // TODO: Unwrap to array type for spread operator
+        if !["let", "const"].contains(&typ.0.as_str()) {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+            param.first_pos,
+            param.last_line,
+            "Invalid use of spread operator in function parameters, must be array type".to_string()
+          ));
+        }
+
+        // TODO: Spread operator default
+        if val.is_some() {
+          // defaults.push
+
+        // TODO: Spread operator unpack?
+        // We know whether function is variadic so builder might have tool for unpacking variadic args
+        // Would need to be pushed into some sort of array/struct construction eventually
+        } else {
+          // placeholders.push
+        }
+
+        variadic = true;
+
+      // Not a spread op parameter
+      } else {
+        let _t: BasicTypeEnum = match typ.0.as_str() {
+          "let" => {
+            // let t = self.context.struct_type(&self.get_types_as_list(), false);
+            let t = self.context.ptr_type(AddressSpace::default());
+            parameters.push(t.into());
+            t.into()
+          },
+          "int" => {
+            let t = self.context.i64_type();
+            parameters.push(t.into());
+            t.into()
+          },
+          "float" => {
+            let t = self.context.f64_type();
+            parameters.push(t.into());
+            t.into()
+          },
+          "bool" => {
+            let t = self.context.bool_type();
+            parameters.push(t.into());
+            t.into()
+          },
+          "string" => {
+            let t = self.context.ptr_type(AddressSpace::default());
+            parameters.push(t.into());
+            t.into()
+          },
+          _ => {
+            // Check for defined type (TODO: add aliases)
+
+            // Check for enum definition
+            let enum_type = self.enum_table.get(&typ.0);
+            if enum_type.is_some() {
               let t = self.context.i64_type();
               parameters.push(t.into());
               t.into()
-            },
-            "float" => {
-              let t = self.context.f64_type();
-              parameters.push(t.into());
-              t.into()
-            },
-            "bool" => {
-              let t = self.context.bool_type();
-              parameters.push(t.into());
-              t.into()
-            },
-            "string" => {
-              let t = self.context.ptr_type(AddressSpace::default());
-              parameters.push(t.into());
-              t.into()
-            },
-            _ => {
-              // Check for defined type (TODO: add aliases)
 
-              // Check for enum definition
-              let enum_type = self.enum_table.get(&typ.0);
-              if enum_type.is_some() {
-                let t = self.context.i64_type();
+            // Check for struct definition
+            } else {
+              let struct_ref = self.struct_table.get(&typ.0);
+              if struct_ref.is_none() {
+                return Err(Error::new(
+                  Error::NameError,
+                  None,
+                  &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+                  param.first_pos,
+                  Some(typ.0.len() as i32),
+                  format!("Type {} not found", typ.0)
+                ));
+              } else {
+                let struct_type = self.context.get_struct_type(&typ.0).unwrap();
+                let t = struct_type.as_basic_type_enum();
                 parameters.push(t.into());
                 t.into()
-
-              // Check for struct definition
-              } else {
-                let struct_ref = self.struct_table.get(&typ.0);
-                if struct_ref.is_none() {
-                  return Err(Error::new(
-                    Error::NameError,
-                    None,
-                    &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-                    param.first_pos,
-                    Some(typ.0.len() as i32),
-                    format!("Type {} not found", typ.0)
-                  ));
-                } else {
-                  let struct_type = self.context.get_struct_type(&typ.0).unwrap();
-                  let t = struct_type.as_basic_type_enum();
-                  parameters.push(t.into());
-                  t.into()
-                }
               }
-            },
-          };
+            }
+          },
+        };
 
-          // If parameter has default
-          if val.is_some() {
-            defaults.push((i, name, val.unwrap()));
+        // If parameter has default
+        if val.is_some() {
+          defaults.push((i, name.clone(), val.clone().unwrap()));
 
-          // If parameter is a placeholder (no default)
-          // TODO: Change this around. I think we can get the parameter pointers instead of re-allocating
-          } else {
-            // placeholders.push((i, name.0, t));
-          }
+        // If parameter is a placeholder (no default)
+        // TODO: Change this around. I think we can get the parameter pointers instead of re-allocating
+        } else {
+          // placeholders.push((i, name.0, t));
         }
       }
+
+      parameter_stack.push(FunctionParamCtx {
+        name: name.clone(),
+        _jtype: param.clone().inferred_type.unwrap(),
+        _llvm_type: parameters.last().unwrap().clone(),
+        default_value_expr: val,
+        is_spread: spread,
+      });
     }
 
     // Get return type
@@ -1472,6 +1502,7 @@ impl<'ctx> CodeGen<'ctx> {
       "float" => self.context.f64_type().fn_type(&parameters, variadic),
       "void" => self.context.void_type().fn_type(&parameters, variadic),
       "bool" => self.context.bool_type().fn_type(&parameters, variadic),
+      "string" => self.context.ptr_type(AddressSpace::default()).fn_type(&parameters, variadic),
       _ => {
         // Check for enum
         let enum_type = self.enum_table.get(&returns);
@@ -1493,12 +1524,24 @@ impl<'ctx> CodeGen<'ctx> {
     };
     let function = self.module.add_function(&name.0, func_type, None);
 
+    // Store function context
+    let fun_ctx = FunctionCtx {
+      llvm_fun: function,
+      parameters: parameter_stack,
+      _ret_type: returns.clone(),
+      variadic,
+    };
+    self.functions.insert(name.0.clone(), fun_ctx);
+
     // Create a new block for function body
     let mut func_block = self.context.append_basic_block(function, format!("{}-entry", name.0).as_str());
     self.builder.position_at_end(func_block);
 
+    // Enter the function scope
+    self.enter_scope(true);
+
     // Set up function parameters
-    for (i, param) in function.get_params().iter().enumerate() {
+    for (i, llvm_param) in function.get_params().iter().enumerate() {
 
       // Get name
       let name: String = match params.clone().unwrap()[i].clone().expr {
@@ -1507,60 +1550,24 @@ impl<'ctx> CodeGen<'ctx> {
       };
 
       // Set parameter name
-      param.set_name(&name);
+      llvm_param.set_name(&name);
 
-      // if in defaults
-      if let Some((_, _, default)) = defaults.iter().find(|(index, _, _)| *index == i) {
-        let val = self.visit(&default, func_block)?;
-        self.builder.build_store(param.into_pointer_value(), val).unwrap();
-        self.set_symbol(name, Some(param.into_pointer_value()), val.get_type(), val);
-
-      // Not in defaults
-      } else {
-        // param.set_name(&params.clone().unwrap()[i].clone().expr.0);
-        // If not typed
-        if param.get_type().is_pointer_type() {
-          // let var = self.builder.build_alloca(param.get_type(), &param.get_name().to_str().unwrap()).unwrap();
-          // self.builder.build_store(var, param.into()).unwrap();
-          // self.set_symbol(name, Some(param.into_pointer_value()), *param);
-
-          // TODO: Load the variable to the correct type
-          // let (_, tag) = self.extract_tag(param.into_pointer_value());
-          // let t = self.get_tag_by_type(param.get_type().as_basic_type_enum());
-          // println!("{:?} {:?}", tag, t);
-        } else {
-          // let var = self.builder.build_alloca(param.get_type(), &param.get_name().to_str().unwrap()).unwrap();
-          // self.builder.build_store(var, param.into()).unwrap();
-
-          // self.builder.build_load(param.into(), param).unwrap();
-          // self.builder.build_store(param.into_pointer_value(), param.into()).unwrap();
-
-          self.set_symbol(name, None, param.get_type(), *param);
-        }
-        // self.set_symbol(param.get_name().to_str().unwrap().to_string(), param.into_pointer_value(), *param);
+      // If this param has a default value
+      let mut val_to_store = *llvm_param;
+      if let Some((_, _, default_value)) = defaults.iter().find(|(index, _, _)| *index == i) {
+        val_to_store = self.visit(&default_value, func_block)?;
       }
+
+      // TODO: Handle when type is unknown at compile time
+      let jtype = params.clone().unwrap()[i].clone().inferred_type.unwrap();
+      if matches!(jtype, JType::Unknown) {
+        todo!();
+      }
+
+      let alloca = self.builder.build_alloca(llvm_param.get_type(), &name).unwrap();
+      self.builder.build_store(alloca, val_to_store).unwrap();
+      self.set_symbol(name.clone(), Some(alloca), llvm_param.get_type(), val_to_store);
     }
-
-    // Add parameter defaults to the function
-    // for (i, n, default) in defaults.iter() {
-    //   let val = self.visit(&default, func_block)?;
-    //   let arg = function.get_nth_param(*i as u32).unwrap();
-    //   arg.set_name(&n);
-    //   self.builder.build_store(arg.into_pointer_value(), val).unwrap();
-    //   self.set_symbol(n.clone(), arg.into_pointer_value(), val);
-    // }
-
-    // Add parameter placeholders to symbol table
-    // for (i, n, t) in placeholders.iter() {
-    //   let arg = function.get_nth_param(*i as u32).unwrap();
-    //   arg.set_name(&n);
-    //   let var = self.builder.build_alloca(t.clone(), &n).unwrap();
-    //   self.builder.build_store(var, arg).unwrap();
-    //   self.set_symbol(n.clone(), var, arg.into());
-    // }
-
-    // Enter the function scope
-    self.enter_scope(true);
 
     // Fill the function body
     for ex in body.as_ref().unwrap().iter() {
@@ -1607,24 +1614,6 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Exit the function scope
     self.exit_scope();
-
-    // Build the function params
-    // let mut items = vec![];
-    // for (i, param) in params.unwrap().iter().enumerate() {
-    //   let name = match param.clone().expr {
-    //     Expr::FunctionParam(_, name, _, _) => {
-    //       match name {
-    //         Literals::Identifier(name, _) => name,
-    //         _ => panic!("Invalid function parameter"),
-    //       }
-    //     },
-    //     _ => panic!("Invalid function parameter"),
-    //   };
-
-    //   let arg = function.get_nth_param(i as u32).unwrap();
-    //   arg.set_name(&name.0);
-    //   items.push(arg);
-    // }
 
     // Ignore if there is already a return
     if function.get_last_basic_block().unwrap().get_last_instruction().is_none() {
@@ -1807,129 +1796,118 @@ impl<'ctx> CodeGen<'ctx> {
       Expr::TypeDef(_, _) => todo!(),
       Expr::Conditional(_, _, _, _) => panic!("Conditional not allowed here"),
       Expr::Call(name, args) => {
-        let function = self.module.get_function(&name.0);
-        if function.is_none() {
-          return Err(Error::new(
-            Error::CompilerError,
-            None,
-            &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-            expr.first_pos,
-            Some(expr.first_pos.unwrap() + name.0.len() as i32),
-            format!("Unknown function: {}", name.0)
-          ));
-        }
 
-        // If args don't match func params and func is not variadic
-        if args.len() != function.unwrap().get_params().len() && !function.unwrap().get_type().is_var_arg() {
-          return Err(Error::new(
-            Error::CompilerError,
-            None,
-            &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-            expr.first_pos,
-            expr.last_line,
-            format!("Function \"{}\" expected {} arguments, got {}", name.0, function.unwrap().get_params().len(), args.len())
-          ));
-        }
+        // Attempt to find function mapping
+        if let Some(fun_ctx) = self.functions.get(&name.0) {
 
-        // Old arg map
-        // let arg_values: Vec<BasicMetadataValueEnum> = args.iter().map(|arg| self.visit(&arg, block).unwrap().into()).collect();
+          // Collect function info
+          let llvm_fun = fun_ctx.llvm_fun;
+          let num_args_provided = args.len();
+          let num_args_required = self.get_required_function_param_count(&fun_ctx.parameters);
+          let num_params_total = fun_ctx.parameters.len();
+          let num_params_fixed = if fun_ctx.variadic { num_params_total - 1 } else { num_params_total };
+          let variadic = fun_ctx.variadic;
+          let param_names: Vec<String> = fun_ctx.parameters.iter().map(|p| p.name.clone()).collect();
+          let param_defaults: Vec<bool> = fun_ctx.parameters.iter().map(|p| p.default_value_expr.is_some()).collect();
 
-        let mut values: Vec<BasicValueEnum> = vec![];
-        let mut meta: Vec<BasicMetadataValueEnum> = vec![];
-        let mut ptrs: IndexMap<usize, Option<PointerValue<'ctx>>> = IndexMap::new();
-
-        // Build args
-        for (i, arg) in args.iter().enumerate() {
-          let mut val: BasicValueEnum<'ctx>;
-
-          // If arg is an identifier (variable) get the pointer and value if possible
-          if let Expr::Literal(Literals::Identifier(Name(name))) = arg.expr.clone() {
-            let (ptr, _, value) = self.var_from_ident(name, arg)?;
-            val = value;
-            if ptr.is_some() {
-              ptrs.insert(i, ptr);
-            }
-
-          // Get the value
-          } else {
-            val = self.visit(&arg, block)?;
+          // Check args count
+          if num_args_provided < num_args_required || (!variadic && num_args_provided > num_params_fixed) {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+              expr.first_pos,
+              expr.last_line,
+              format!("Function \"{}\" expected {} arguments, got {}", name.0, num_args_required, args.len())
+            ));
           }
 
-          // Convert bool to int when passing (for now)
-          if val.get_type() == self.context.bool_type().as_basic_type_enum() {
-            val = self.builder.build_int_z_extend(val.into_int_value(), self.context.i64_type(), "bool_to_int").unwrap().as_basic_value_enum();
+          // Build args list
+          let mut llvm_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(num_params_fixed + (num_args_provided - num_params_fixed).max(0));
+          for i in 0..num_params_fixed {
+
+            // Argument was provided
+            let arg_val = if i < num_args_provided {
+              self.visit(&args[i], block)?
+
+            // Argument missing, confirm the function has a default to replace it
+            } else {
+              if param_defaults[i] {
+                continue;
+              } else {
+                // Should be caught by earlier check
+                return Err(Error::new(
+                  Error::CompilerError,
+                  None,
+                  &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+                  expr.first_pos,
+                  expr.last_line,
+                  format!("Missing argument for parameter \"{}\"", param_names[i])
+                ));
+              }
+            };
+
+            // TODO: Type checking against the LLVM type
+            // Example: if param_info.llvm_type is float and arg_val is int, build conversion
+            // let coerced_val = self.coerce_value(arg_val, param_info.llvm_type)?;
+            llvm_args.push(arg_val.into()); // Push coerced_val eventually
           }
 
-          match val.into() {
-            BasicMetadataValueEnum::IntValue(int_value) => {
-              let int_type = int_value.get_type();
-              if int_type.get_bit_width() == 64 {
-                values.push(int_value.into());
-                meta.push(BasicMetadataValueEnum::IntValue(int_value));
-              } else {
-                values.push(val.into());
-                meta.push(val.into());
-              }
-            },
-            BasicMetadataValueEnum::PointerValue(ptr_value) => {
-              values.push(ptr_value.into());
-              meta.push(BasicMetadataValueEnum::PointerValue(ptr_value));
-            },
-            BasicMetadataValueEnum::ArrayValue(array_value) => {
-              let array_type = array_value.get_type();
-              let element_type = array_type.get_element_type();
-              if let BasicTypeEnum::IntType(int_type) = element_type {
-                // If string
-                if int_type.get_bit_width() == 8 {
-                  let global = self.module.add_global(array_type, None, "global");
-                  global.set_initializer(&array_value);
-                  let ptr = global.as_pointer_value();
-                  values.push(ptr.into());
-                  meta.push(BasicMetadataValueEnum::PointerValue(ptr));
-                } else {
-                  values.push(val.into());
-                  meta.push(val.into());
-                }
-              } else {
-                values.push(val.into());
-                meta.push(val.into());
-              }
-            },
-            _ => {
-              values.push(val.into());
-              meta.push(val.into());
-            },
-          }
-        }
-
-        for (i, param) in function.unwrap().get_params().iter().enumerate() {
-          let param_type = param.get_type();
-          if param_type.is_pointer_type() {
-            if !values[i].is_pointer_value() {
-              // If we can get original pointer of value
-              if ptrs.get(&i).is_some() {
-                meta[i] = ptrs.get(&i).unwrap().unwrap().into();
-              // Build new pointer
-              } else {
-                let ptr = self.builder.build_alloca(param_type, "ptr").unwrap();
-                // self.tag_ptr(ptr, self.get_tag_by_type(values[i].get_type()));
-                self.builder.build_store(ptr, values[i]).unwrap();
-                meta[i] = ptr.into();
-              }
+          if variadic {
+            for i in num_params_fixed..num_args_provided {
+              let arg_val = self.visit(&args[i], block)?;
+              llvm_args.push(arg_val.into());
             }
           }
-        }
 
-        // Build call and extract value
-        let call = self.builder.build_call(function.unwrap(), &meta, &name.0).unwrap();
-        match call.try_as_basic_value().left() {
-          Some(val) => {
-            return Ok(val);
-          },
-          None => {
-            // Return null ptr if no value is returned
-            return Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum());
-          },
+          let call = self.builder.build_call(llvm_fun, &llvm_args, &name.0).unwrap();
+          match call.try_as_basic_value().left() {
+            Some(val) => Ok(val),
+            None => Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum()),
+          }
+
+        // Our mapping was not found, check for built-in functions
+        } else {
+
+          let llvm_function = self.module.get_function(&name.0);
+          if llvm_function.is_none() {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+              expr.first_pos,
+              expr.last_line,
+              format!("Function \"{}\" not found", name.0)
+            ));
+          }
+
+          // Check args
+          let num_expected = llvm_function.unwrap().get_params().len() as usize;
+          let num_provided = args.len();
+          let is_llvm_variadic = llvm_function.unwrap().get_type().is_var_arg();
+          if !is_llvm_variadic && num_provided != num_expected {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+              expr.first_pos,
+              expr.last_line,
+              format!("Function \"{}\" expected {} arguments, got {}", name.0, num_expected, num_provided)
+            ));
+          }
+
+          // Visit provided args
+          let llvm_args: Vec<_> = args.iter().map(|arg| -> Result<_, Error> {
+            let val = self.visit(arg, block)?;
+            // TODO: Conversion (bool to int etc.)
+            Ok(val.into())
+          }).collect::<Result<Vec<_>, _>>()?;
+
+          let call = self.builder.build_call(llvm_function.unwrap(), &llvm_args, &name.0).unwrap();
+          return match call.try_as_basic_value().left() {
+            Some(val) => Ok(val),
+            None => Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum()),
+          };
         }
       },
       Expr::Return(r) => {
@@ -1960,7 +1938,8 @@ impl<'ctx> CodeGen<'ctx> {
         return Ok(self.context.f64_type().const_float(f).as_basic_value_enum());
       },
       Literals::String(s) => {
-        return Ok(self.context.const_string(s.as_bytes(), true).as_basic_value_enum());
+        let ptr = self.builder.build_global_string_ptr(s.as_str(), "str").unwrap();
+        return Ok(ptr.as_basic_value_enum());
       },
       Literals::Boolean(b) => {
         return Ok(self.context.bool_type().const_int(b as u64, false).as_basic_value_enum());
