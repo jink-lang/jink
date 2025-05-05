@@ -425,9 +425,13 @@ impl TypeChecker {
             if let Expr::FunctionParam(Some(Type(ptype)), _is_const, ident_literal, default_value, is_spread) = &mut param.expr {
               if let Literals::Identifier(Name(pname)) = ident_literal {
                 let param_type = if ptype == "let" {
-                  JType::Unknown
+                  let typ = JType::Unknown;
+                  param.inferred_type = Some(typ.clone());
+                  typ
                 } else {
-                  self.string_to_jtype(&ptype)?
+                  let typ = self.string_to_jtype(ptype)?;
+                  param.inferred_type = Some(typ.clone());
+                  typ
                 };
 
                 // Check default type against param type if it exists (not variadic)
@@ -659,7 +663,7 @@ impl TypeChecker {
     }?;
 
     // Add type
-    if expr.inferred_type.is_none() {
+    if expr.inferred_type.is_none() || expr.inferred_type == Some(JType::Unknown) {
       expr.inferred_type = Some(typ.clone());
     }
 
