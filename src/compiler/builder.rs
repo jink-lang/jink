@@ -1,4 +1,5 @@
 use core::{panic, str};
+use std::f32::consts::E;
 use indexmap::IndexMap;
 use std::collections::HashSet;
 
@@ -36,6 +37,7 @@ struct FunctionParamCtx<'ctx> {
   _llvm_type: BasicMetadataTypeEnum<'ctx>,
   default_value_expr: Option<Box<Expression>>,
   is_spread: bool,
+  is_const: bool,
 }
 
 pub struct CodeGen<'ctx> {
@@ -1428,8 +1430,6 @@ impl<'ctx> CodeGen<'ctx> {
     // Get function parameters
     let mut parameters: Vec<BasicMetadataTypeEnum> = vec![];
     let mut parameter_stack: Vec<FunctionParamCtx<'ctx>> = vec![];
-    // let mut placeholders: Vec<(usize, String, BasicTypeEnum)> = vec![];
-    let mut defaults: Vec<(usize, String, Box<Expression>)> = vec![];
     let mut variadic = false;
     let mut variadic_param_name: Option<String> = None;
     let mut variadic_param_type: Option<JType> = None;
@@ -1443,7 +1443,7 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     for (i, param) in params.clone().unwrap().iter().enumerate() {
-      let (typ, _is_const, name, val, spread) = match param.clone().expr {
+      let (typ, is_const, name, default_value_expr, is_spread) = match param.clone().expr {
         Expr::FunctionParam(ty, is_const, name, default_val, spread) => {
           (
             ty.unwrap(),
@@ -1460,7 +1460,7 @@ impl<'ctx> CodeGen<'ctx> {
       };
 
       // If spread
-      if spread {
+      if is_spread {
         // If not last parameter
         if i < params.clone().unwrap().len() - 1 {
           return Err(Error::new(
@@ -1536,28 +1536,17 @@ impl<'ctx> CodeGen<'ctx> {
             }
           },
         };
-
-        // If parameter has default
-        if val.is_some() {
-          defaults.push((i, name.clone(), val.clone().unwrap()));
-
-        // If parameter is a placeholder (no default)
-        // TODO: Change this around. I think we can get the parameter pointers instead of re-allocating
-        } else {
-          // placeholders.push((i, name.0, t));
-        }
       }
 
       parameter_stack.push(FunctionParamCtx {
         name: name.clone(),
         jtype: param.clone().inferred_type.unwrap(),
-        _llvm_type: if spread {
+        _llvm_type: if is_spread {
           self.context.ptr_type(AddressSpace::default()).into()
         } else {
           *parameters.last().unwrap()
         },
-        default_value_expr: val,
-        is_spread: spread,
+        default_value_expr, is_spread, is_const
       });
     }
 
@@ -1694,7 +1683,7 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     // Set up function parameters
-    for (i, llvm_param) in function.get_params().iter().enumerate() {
+    for (i, llvm_param_val) in function.get_params().iter().enumerate() {
       // Skip hidden arg count
       if variadic && i == 0 { continue; }
 
@@ -1703,13 +1692,7 @@ impl<'ctx> CodeGen<'ctx> {
       if param_info.is_spread { continue; }
 
       // Set parameter name
-      llvm_param.set_name(&param_info.name);
-
-      // If this param has a default value and one was not passed, set it to the default value
-      let mut val_to_store = *llvm_param;
-      if let Some((_, _, default_value)) = defaults.iter().find(|(index, _, _)| *index == i) {
-        val_to_store = self.visit(&default_value, func_block)?;
-      }
+      llvm_param_val.set_name(&param_info.name);
 
       // TODO: Handle when type is unknown at compile time
       let jtype = param_info.jtype.clone();
@@ -1717,9 +1700,9 @@ impl<'ctx> CodeGen<'ctx> {
         todo!("Handle unknown JType for parameter {} during code generation", param_info.name);
       }
 
-      let alloca = self.builder.build_alloca(llvm_param.get_type(), &param_info.name).unwrap();
-      self.builder.build_store(alloca, val_to_store).unwrap();
-      self.set_symbol(param_info.name, Some(alloca), llvm_param.get_type(), val_to_store);
+      let alloca = self.builder.build_alloca(llvm_param_val.get_type(), &param_info.name).unwrap();
+      self.builder.build_store(alloca, *llvm_param_val).unwrap();
+      self.set_symbol(param_info.name, Some(alloca), llvm_param_val.get_type(), *llvm_param_val);
     }
 
     // If variadic, set the array pointer in the function context
@@ -1966,7 +1949,7 @@ impl<'ctx> CodeGen<'ctx> {
           let num_params_fixed = if fun_ctx.variadic { num_params_total - 1 } else { num_params_total };
           let variadic = fun_ctx.variadic;
           let param_names: Vec<String> = fun_ctx.parameters.iter().map(|p| p.name.clone()).collect();
-          let param_defaults: Vec<bool> = fun_ctx.parameters.iter().map(|p| p.default_value_expr.is_some()).collect();
+          let param_defaults: Vec<Option<Box<Expression>>> = fun_ctx.parameters.iter().map(|p| p.default_value_expr.clone()).collect();
 
           // Check args count
           if num_args_provided < num_args_required || (!variadic && num_args_provided > num_params_fixed) {
@@ -1981,11 +1964,12 @@ impl<'ctx> CodeGen<'ctx> {
           }
 
           // Build args list
-          let mut llvm_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(num_params_fixed + (num_args_provided - num_params_fixed).max(0));
+          let mut llvm_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(num_params_fixed + num_args_provided.saturating_sub(num_params_fixed));
 
           // Add hidden count for variadic functions
           if variadic {
-            let var_arg_count = num_args_provided as i64 - num_params_fixed as i64;
+            let count = num_args_provided as i64 - num_params_fixed as i64;
+            let var_arg_count = if count > 0 { count } else { 0 }; 
             llvm_args.push(self.context.i64_type().const_int(var_arg_count as u64, false).into());
           }
 
@@ -1997,8 +1981,10 @@ impl<'ctx> CodeGen<'ctx> {
 
             // Argument missing, confirm the function has a default to replace it
             } else {
-              if param_defaults[i] {
-                continue;
+              if param_defaults[i].is_some() {
+                // Get default value from function context
+                self.visit(param_defaults[i].as_ref().unwrap(), block)?
+
               } else {
                 // Should be caught by earlier check
                 return Err(Error::new(

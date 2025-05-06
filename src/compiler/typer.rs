@@ -340,36 +340,40 @@ impl TypeChecker {
         if let JType::Function(param_types, return_type) = func_type {
 
           // Check for variadic function
-          let mut is_variadic = false;
-          let mut variadic_type: Option<&Box<JType>> = None;
+          let (is_variadic, variadic_type): (bool, Option<&Box<JType>>) = match param_types.last() {
+            Some(JType::FunctionParam(typ, _, is_spread)) if *is_spread => {
+              (*is_spread, Some(typ))
+            },
+            _ => (false, None)
+          };
+
           let num_expected_params = param_types.len();
-
-          if let Some(JType::VariadicFunParam(typ)) = param_types.last() {
-            is_variadic = true;
-            variadic_type = typ.as_ref();
-          }
-
           let num_fixed_params = if is_variadic { num_expected_params - 1 } else { num_expected_params};
+          let mut num_fixed_without_defaults = num_fixed_params;
+          for i in 0..num_fixed_without_defaults {
+            match &param_types[i] {
+              JType::FunctionParam(_, Some(_), _) => {
+                num_fixed_without_defaults -= 1;
+              },
+              _ => {},
+            }
+          }
           let num_provided_args = args_expr.len();
 
-          // TODO: Check for parameter defaults
+          // Check if parameters without defaults or the variadic exceed the provided arguments
+          if num_fixed_without_defaults > num_provided_args {
+            return Err(format!(
+              "Function '{}' expected at least {} arguments, but got {}.",
+              func_name, num_fixed_without_defaults, num_provided_args
+            ));
+          }
 
-          // Check numbers of arguments
-          if is_variadic {
-            if num_provided_args < num_fixed_params {
-              return Err(format!(
-                "Function '{}' expected at least {} arguments, but got {}.",
-                func_name, num_fixed_params, num_provided_args
-              ));
-            }
-
-          } else {
-            if num_provided_args != num_expected_params {
-              return Err(format!(
-                "Function '{}' expected {} arguments, but got {}.",
-                func_name, num_expected_params, num_provided_args
-              ));
-            }
+          // Check if arguments exceed the expected number of parameters
+          if !is_variadic && num_provided_args > num_expected_params {
+            return Err(format!(
+              "Function '{}' expected at most {} arguments, but got {}.",
+              func_name, num_expected_params, num_provided_args
+            ));
           }
 
           // Check argument types against parameter types
@@ -378,13 +382,34 @@ impl TypeChecker {
             provided_arg_types.push(self.check_expression(arg)?);
           }
 
-          // Check fixed args
+          // Check args against fixed params (up to variadic)
           for i in 0..num_fixed_params {
-            if !self.check_type_compatibility(&param_types[i], &provided_arg_types[i]) {
-              return Err(format!(
-                "Type mismatch for argument {} in call to '{}'. Expected {}, got {}.",
-                i + 1, func_name, param_types[i], provided_arg_types[i]
-              ));
+            match &param_types[i] {
+              JType::FunctionParam(param_type, default_type, _) => {
+
+                // If argument doesn't exist and no default was provided
+                if provided_arg_types.len() <= i {
+                  if default_type.is_none() {
+                    return Err(format!(
+                      "Missing argument {} in call to '{}'. Expected {}, got nothing.",
+                      i + 1, func_name, param_type
+                    ));
+                  } else {
+                    // Use default type for checking
+                    provided_arg_types.push(*default_type.as_ref().unwrap().clone());
+                    continue;
+                  }
+                }
+
+                // Check type compatibility of argument and parameter
+                if !self.check_type_compatibility(&param_type, &provided_arg_types[i]) {
+                  return Err(format!(
+                    "Type mismatch for argument {} in call to '{}'. Expected {}, got {}.",
+                    i + 1, func_name, param_type, provided_arg_types[i]
+                  ));
+                }
+              },
+              _ => {},
             }
           }
 
@@ -414,6 +439,7 @@ impl TypeChecker {
         // Determine expected parameter types and return type
         let mut expected_param_types = Vec::new();
         let mut param_names = Vec::new(); // To add to inner scope
+        let mut is_variadic = false;
 
         if let Some(param_items) = params {
 
@@ -433,32 +459,49 @@ impl TypeChecker {
                   typ
                 };
 
-                // Check default type against param type if it exists (not variadic)
+                let has_default = default_value.is_some();
+                let mut default_type: Option<Box<JType>> = None;
+
+                // Push parameter type to the expected list
                 if !*is_spread {
-                  if let Some(default_value) = default_value {
-                    let default_type = self.check_expression(&mut **default_value)?;
-                    if !self.check_type_compatibility(&param_type, &default_type) {
-                      return Err(format!(
-                        "Default value type mismatch for parameter '{}'. Expected {}, got {}.",
-                        pname, param_type, default_type
-                      ));
-                    }
-                  }
-
-                  expected_param_types.push(param_type.clone());
-                  param_names.push((pname.clone(), param_type));
-
-                // Variadic (parser already confirms this is the last param)
+                  param_names.push((pname.clone(), param_type.clone()));
+                // Variadic
                 } else {
-                  expected_param_types.push(JType::VariadicFunParam(Some(Box::new(param_type.clone()))));
-                  param_names.push((pname.clone(), JType::Array(Box::new(param_type))));
+                  is_variadic = true;
+                  param_names.push((pname.clone(), JType::Array(Box::new(param_type.clone()))));
                 }
+
+                // Check default value
+                if has_default {
+                  default_type = Some(Box::new(self.check_expression(default_value.as_mut().unwrap())?));
+                  if !self.check_type_compatibility(&param_names.last().unwrap().1, &default_type.as_ref().unwrap()) {
+                    return Err(format!(
+                      "Default value type mismatch for parameter '{}'. Expected {}, got {}.",
+                      pname, param_names.last().unwrap().1, default_type.unwrap()
+                    ));
+                  }
+                }
+
+                expected_param_types.push(JType::FunctionParam(Box::new(param_type), default_type, *is_spread));
               } else {
                 return Err("Invalid function parameter: expected identifier on left-hand side (TODO: Type check function parameters).".to_string());
               }
             } else {
               return Err("Invalid function parameter format.".to_string());
             }
+          }
+        }
+
+        if is_variadic {
+          // Check that the last parameter is the spread parameter
+          if let Some(last_param) = expected_param_types.last() {
+            if !matches!(last_param, JType::FunctionParam(_, _, true)) {
+              return Err("Spread parameter must be the last parameter in the function definition.".to_string());
+            }
+          }
+          // Check for multiple spread parameters
+          if expected_param_types.iter().filter(|p| matches!(p, JType::FunctionParam(_, _, true))).count() > 1 {
+            return Err("Multiple spread parameters are not allowed.".to_string());
           }
         }
 
