@@ -118,7 +118,6 @@ impl TypeChecker {
     expected == actual
   }
 
-
   // Check an expression and return its type
   fn check_expression(&mut self, expr: &mut Expression) -> Result<JType, String> {
     let typ = match &mut expr.expr {
@@ -357,7 +356,7 @@ impl TypeChecker {
 
           // Check numbers of arguments
           if is_variadic {
-            if num_expected_params < num_fixed_params {
+            if num_provided_args < num_fixed_params {
               return Err(format!(
                 "Function '{}' expected at least {} arguments, but got {}.",
                 func_name, num_fixed_params, num_provided_args

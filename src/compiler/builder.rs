@@ -185,6 +185,7 @@ impl<'ctx> CodeGen<'ctx> {
     return main_fn;
   }
 
+  // TODO: Narrow this down to intrinsics
   fn build_external_functions(&self) {
     let ptr_type = self.context.ptr_type(AddressSpace::default());
 
@@ -220,6 +221,14 @@ impl<'ctx> CodeGen<'ctx> {
 
     let fputs_type = self.context.i32_type().fn_type(&[ptr_type.into(), ptr_type.into()], true);
     self.module.add_function("fputs", fputs_type, Some(Linkage::External));
+
+    // declare void @llvm.va_start(ptr) - va_list i8* / ptr
+    let va_start_type = self.context.void_type().fn_type(&[ptr_type.into()], false);
+    self.module.add_function("llvm.va_start", va_start_type, None);
+
+    // declare void @llvm.va_end(ptr)
+    let va_end_type = self.context.void_type().fn_type(&[ptr_type.into()], false);
+    self.module.add_function("llvm.va_end", va_end_type, None);
   }
 
   pub fn _jtype_to_basic_type(&self, jtype: JType) -> Result<BasicTypeEnum<'ctx>, Error> {
@@ -579,6 +588,12 @@ impl<'ctx> CodeGen<'ctx> {
           return Ok(());
 
         } else if let Expr::ContinueLoop = expr.expr.clone() {
+          // Increment index value before branching back
+          if typ == "for" {
+            let current_val = self.builder.build_load(self.context.i64_type(), var.unwrap(), "current_loop_idx_cont").unwrap().into_int_value();
+            let next_val = self.builder.build_int_add(current_val, self.context.i64_type().const_int(1, false), "next_loop_idx_cont").unwrap();
+            self.builder.build_store(var.unwrap(), next_val).unwrap();
+          }
           self.builder.build_unconditional_branch(cond_block).unwrap();
           return Ok(());
 
@@ -602,69 +617,132 @@ impl<'ctx> CodeGen<'ctx> {
   }
 
   fn build_for_loop(&mut self, value: Box<Expression>, expr: Box<Expression>, body: Option<Vec<Expression>>, function: FunctionValue<'ctx>, block: BasicBlock<'ctx>) -> Result<BasicBlock<'ctx>, Error> {
-
     let cond_block = self.context.append_basic_block(function, "loop_cond_block");
     let body_block = self.context.append_basic_block(function, "loop_body");
     let end_block = self.context.append_basic_block(function, "loop_end");
 
     self.builder.position_at_end(block);
 
-    // Collect the name
-    if let Expr::Literal(Literals::Identifier(Name(name))) = value.expr {
+    // Get loop variable name (e.g., 'i')
+    let loop_index_name = if let Expr::Literal(Literals::Identifier(Name(name))) = value.expr {
+      name
+    } else {
+      // Handle error: loop variable must be an identifier
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        "",
+        value.first_pos,
+        value.last_line,
+        "Loop variable must be an identifier".to_string()
+      ));
+    };
 
-      let i64_type = self.context.i64_type();
-      let init_value = i64_type.const_int(0, false);
+    // Initialize loop index variable to 0
+    let i64_type = self.context.i64_type();
+    let init_value = i64_type.const_int(0, false);
+    let loop_index_ptr = self.builder.build_alloca(init_value.get_type(), &loop_index_name).unwrap();
+    self.builder.build_store(loop_index_ptr, init_value).unwrap();
 
-      // Initialize an int to manage the index of the loop
-      let var = self.builder.build_alloca(init_value.get_type(), &name).unwrap();
-      self.builder.build_store(var, init_value).unwrap();
+    let end_condition_val: IntValue<'ctx>;
 
-      // Initialize the conditional block to ascertain whether the loop should continue
-      self.builder.build_unconditional_branch(cond_block).unwrap();
-      self.builder.position_at_end(cond_block);
+    // Get the name of the iterable expression ('args' etc.)
+    let iterable_name = if let Expr::Literal(Literals::Identifier(Name(n))) = expr.expr.clone() {
+      n
+    } else {
+      // TODO: Handle non-identifier iterables if supported (function calls returning arrays, etc.)
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        "",
+        expr.first_pos,
+        expr.last_line,
+        "Iterable in for loop must be an identifier for now".to_string()
+      ));
+    };
 
-      // Load the loop index in the conditional block
-      let loop_index = self.builder.build_load(i64_type, var, &name).unwrap().into_int_value();
+    // Check if the iterable is the variadic parameter array for the current function
+    let current_function_ctx = self.functions.get(function.get_name().to_str().unwrap());
+    let is_variadic_iterable = current_function_ctx.map_or(false, |ctx| {
+      // Check if the function is variadic AND if the iterable name matches the name of the spread parameter
+      ctx.variadic && ctx.parameters.iter().any(|p| p.is_spread && p.name == iterable_name)
+    });
 
-      // Visit the iterable that we are looping over
-      if let Expr::Literal(Literals::Identifier(Name(n))) = expr.expr.clone() {
-        let (_, typ, _) = self.var_from_ident(n.clone(), &expr)?;
-        if !typ.is_array_type() {
+    // For the variadic function array we just get and use the hidden count
+    if is_variadic_iterable {
+      if function.count_params() == 0 {
+        return Err(Error::new(Error::CompilerError,
+          None, "",
+          expr.first_pos,
+          expr.last_line,
+          "Internal error: Variadic function seems to be missing its hidden count parameter.".to_string()
+        ));
+      }
+      end_condition_val = function.get_nth_param(0).unwrap().into_int_value();
+    } else {
+      // Handle regular arrays/iterables
+      let (_iterable_ptr_opt, iterable_type, _iterable_val) = self.var_from_ident(iterable_name.clone(), &expr)?;
+
+      // Case: Compile-time array
+      if iterable_type.is_array_type() {
+        let array_len = iterable_type.into_array_type().len();
+        end_condition_val = i64_type.const_int(array_len as u64, false);
+
+      // Case: Dynamic array struct { len, ptr }
+      } else if iterable_type.is_struct_type() {
+        let struct_ptr = _iterable_ptr_opt.ok_or_else(|| Error::new(Error::CompilerError, None, "", expr.first_pos, expr.last_line, "Expected pointer for dynamic array struct".to_string()))?;
+        let array_struct_type = self.context.struct_type(&[i64_type.into(), self.context.ptr_type(AddressSpace::default()).into()], false);
+
+        // Ensure the pointer points to the expected struct type
+        if struct_ptr.get_type().as_basic_type_enum() != array_struct_type.as_basic_type_enum() {
           return Err(Error::new(
             Error::CompilerError,
             None,
-            self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+            "",
             expr.first_pos,
-            Some(expr.first_pos.unwrap() + n.len() as i32),
-            "Invalid iterable type".to_string()
+            expr.last_line,
+            format!("Iterable '{}' is not the expected dynamic array type.", iterable_name).to_string()
           ));
         }
 
-        // Get the length of the array
-        let array_len = typ.into_array_type().len();
-        let end_condition = i64_type.const_int(array_len as u64, false);
-
-        // Build the conditional branching
-        let cond = self.builder.build_int_compare(inkwell::IntPredicate::ULT, loop_index, end_condition, "loop_cond").unwrap();
-        self.builder.build_conditional_branch(cond, body_block, end_block).unwrap();
-
-        // Build the loop body
-        self.builder.position_at_end(body_block);
-        let current_value = self.builder.build_load(i64_type, var, "current_value").unwrap().into_int_value();
-        self.set_symbol(name.clone(), Some(var), current_value.get_type().as_basic_type_enum(), current_value.into());
-        self.build_loop_body("for", body, Some(var), Some(current_value), body_block, cond_block, end_block)?;
-
-        // If we terminated in a block that is not the end block, branch back to the conditional block to be sure if the loop should continue
-        if self.builder.get_insert_block().unwrap() != end_block {
-          self.builder.build_unconditional_branch(cond_block).unwrap();
-        }
-
-        self.builder.position_at_end(end_block);
-        return Ok(end_block);
+        // Load the length field (index 0)
+        let length_ptr = self.builder.build_struct_gep(array_struct_type, struct_ptr, 0, "dyn_arr_len_ptr").unwrap();
+        end_condition_val = self.builder.build_load(i64_type, length_ptr, "dyn_arr_len").unwrap().into_int_value();
+      } else {
+        return Err(Error::new(
+          Error::CompilerError,
+          None,
+          self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+          expr.first_pos,
+          expr.first_pos,
+          format!("'{}' not recognized as a valid iterable type.", iterable_name).to_string()
+        ));
       }
     }
 
-    panic!("Unreachable");
+    // Initialize the conditional block to ascertain whether the loop should continue
+    self.builder.build_unconditional_branch(cond_block).unwrap();
+    self.builder.position_at_end(cond_block);
+
+    // Load the loop index in the conditional block
+    let loop_index_val = self.builder.build_load(i64_type, loop_index_ptr, &loop_index_name).unwrap().into_int_value();
+
+    // Build the conditional branching
+    let cond = self.builder.build_int_compare(inkwell::IntPredicate::ULT, loop_index_val, end_condition_val, "loop_cond").unwrap();
+    self.builder.build_conditional_branch(cond, body_block, end_block).unwrap();
+
+    // Build the loop body
+    self.builder.position_at_end(body_block);
+    self.set_symbol(loop_index_name.clone(), Some(loop_index_ptr), i64_type.as_basic_type_enum(), loop_index_val.as_basic_value_enum());
+    self.build_loop_body("for", body, Some(loop_index_ptr), Some(loop_index_val), body_block, cond_block, end_block)?;
+
+    // If we terminated in a block that is not the end block, branch back to the conditional block to be sure if the loop should continue
+    if self.builder.get_insert_block().unwrap() != end_block {
+      self.builder.build_unconditional_branch(cond_block).unwrap();
+    }
+
+    self.builder.position_at_end(end_block);
+    return Ok(end_block);
   }
 
   // TODO: DRY this up with the repeat pattern in build_for_loop
@@ -1351,6 +1429,16 @@ impl<'ctx> CodeGen<'ctx> {
     // let mut placeholders: Vec<(usize, String, BasicTypeEnum)> = vec![];
     let mut defaults: Vec<(usize, String, Box<Expression>)> = vec![];
     let mut variadic = false;
+    let mut variadic_param_name: Option<String> = None;
+    let mut variadic_param_type: Option<JType> = None;
+
+    // If variadic, prepend function params to accept var count behind the scenes
+    if let Some(params_vec) = &params {
+      if params_vec.iter().any(|p| matches!(p.expr, Expr::FunctionParam(_, _, _, _, true))) {
+        variadic = true;
+        parameters.push(self.context.i64_type().into());
+      }
+    }
 
     for (i, param) in params.clone().unwrap().iter().enumerate() {
       let (typ, _is_const, name, val, spread) = match param.clone().expr {
@@ -1383,31 +1471,8 @@ impl<'ctx> CodeGen<'ctx> {
           ));
         }
 
-        // If not the inferred/dynamic type or the array type
-        // TODO: Unwrap to array type for spread operator
-        if !["let", "const"].contains(&typ.0.as_str()) {
-          return Err(Error::new(
-            Error::CompilerError,
-            None,
-            &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-            param.first_pos,
-            param.last_line,
-            "Invalid use of spread operator in function parameters, must be array type".to_string()
-          ));
-        }
-
-        // TODO: Spread operator default
-        if val.is_some() {
-          // defaults.push
-
-        // TODO: Spread operator unpack?
-        // We know whether function is variadic so builder might have tool for unpacking variadic args
-        // Would need to be pushed into some sort of array/struct construction eventually
-        } else {
-          // placeholders.push
-        }
-
-        variadic = true;
+        variadic_param_name = Some(name.clone());
+        variadic_param_type = Some(param.clone().inferred_type.unwrap());
 
       // Not a spread op parameter
       } else {
@@ -1484,7 +1549,11 @@ impl<'ctx> CodeGen<'ctx> {
       parameter_stack.push(FunctionParamCtx {
         name: name.clone(),
         _jtype: param.clone().inferred_type.unwrap(),
-        _llvm_type: parameters.last().unwrap().clone(),
+        _llvm_type: if spread {
+          self.context.ptr_type(AddressSpace::default()).into()
+        } else {
+          *parameters.last().unwrap()
+        },
         default_value_expr: val,
         is_spread: spread,
       });
@@ -1540,8 +1609,88 @@ impl<'ctx> CodeGen<'ctx> {
     // Enter the function scope
     self.enter_scope(true);
 
+    // Variadic call will pass hidden count as first argument for va_list
+    let mut hidden_argument_offset = 0;
+
+    // Get variadic count and build array if needed
+    let mut var_array_ptr: Option<PointerValue<'ctx>> = None;
+    if variadic {
+      hidden_argument_offset = 1;
+
+      // Get count from hidden first param
+      let var_arg_count = function.get_nth_param(0).unwrap().into_int_value();
+
+      // Get types
+      let var_llvm_type = self._jtype_to_basic_type(
+        variadic_param_type.expect("Variadic parameter missing type")
+      )?;
+
+      // Allocate for array
+      // TODO: build_array_alloca or fallback to malloc for dynamic sized arrays somehow?
+      let array_ptr = self.builder.build_array_alloca(
+        var_llvm_type,
+        var_arg_count,
+        &format!("{}-args", name.0).as_str(),
+      ).unwrap();
+      var_array_ptr = Some(array_ptr);
+
+      // Allocate and init va_list
+      let va_list_type = self.context.ptr_type(AddressSpace::default());
+      let va_list = self.builder.build_alloca(va_list_type, "va_list").unwrap();
+
+      let va_start_fn = self.module.get_function("llvm.va_start.p0")
+        .or_else(|| self.module.get_function("llvm.va_start")) // Fallback for LLVM versions
+        .expect("llvm.va_start function not found");
+      self.builder.build_call(va_start_fn, &[va_list.into()], "").unwrap();
+
+      // Loop and fill array using va_arg
+      let loop_block = self.context.append_basic_block(function, "va_arg_loop");
+      let after_loop_block = self.context.append_basic_block(function, "after_va_arg_loop");
+
+      let index_ptr = self.builder.build_alloca(self.context.i64_type(), "var_idx").unwrap();
+      self.builder.build_store(index_ptr, self.context.i64_type().const_int(0, false)).unwrap();
+      self.builder.build_unconditional_branch(loop_block).unwrap();
+      self.builder.position_at_end(loop_block);
+
+      let current_index = self.builder.build_load(self.context.i64_type(), index_ptr, "idx").unwrap().into_int_value();
+      let loop_cond = self.builder.build_int_compare(inkwell::IntPredicate::ULT, current_index, var_arg_count, "var_loop_cond").unwrap();
+
+      let body_block = self.context.append_basic_block(function, "va_arg_body");
+      self.builder.build_conditional_branch(loop_cond, body_block, after_loop_block).unwrap();
+      self.builder.position_at_end(body_block);
+
+      {
+        // Build va_arg
+        // va_list pointer and the type to extract
+        let arg_val = self.builder.build_va_arg(va_list, var_llvm_type, "va_arg_val").unwrap();
+
+        // Get pointer to the array element
+        let element_ptr = unsafe {
+          self.builder.build_gep(var_llvm_type, array_ptr, &[current_index], "var_elem_ptr").unwrap()
+        };
+        // Store the retrieved value
+        self.builder.build_store(element_ptr, arg_val).unwrap();
+
+        // Increment index
+        let next_index = self.builder.build_int_add(current_index, self.context.i64_type().const_int(1, false), "next_idx").unwrap();
+        self.builder.build_store(index_ptr, next_index).unwrap();
+        self.builder.build_unconditional_branch(loop_block).unwrap(); // Branch back to loop condition
+      }
+
+      // Position at the end of the loop
+      self.builder.position_at_end(after_loop_block);
+
+      // Call va_end
+      let va_end_fn = self.module.get_function("llvm.va_end.p0")
+        .or_else(|| self.module.get_function("llvm.va_end")) // Fallback for LLVM versions
+        .expect("llvm.va_end function not found");
+      self.builder.build_call(va_end_fn, &[va_list.into()], "").unwrap();
+
+      func_block = after_loop_block;
+    }
+
     // Set up function parameters
-    for (i, llvm_param) in function.get_params().iter().enumerate() {
+    for (i, llvm_param) in function.get_params().iter().enumerate().skip(hidden_argument_offset) {
 
       // Get name
       let name: String = match params.clone().unwrap()[i].clone().expr {
@@ -1567,6 +1716,12 @@ impl<'ctx> CodeGen<'ctx> {
       let alloca = self.builder.build_alloca(llvm_param.get_type(), &name).unwrap();
       self.builder.build_store(alloca, val_to_store).unwrap();
       self.set_symbol(name.clone(), Some(alloca), llvm_param.get_type(), val_to_store);
+    }
+
+    // If variadic, set the array pointer in the function context
+    if let (Some(name), Some(array_ptr)) = (variadic_param_name, var_array_ptr) {
+      let array_llvm_type = array_ptr.get_type().array_type(0).as_basic_type_enum();
+      self.set_symbol(name, Some(array_ptr), array_llvm_type, array_ptr.as_basic_value_enum());
     }
 
     // Fill the function body
@@ -1824,6 +1979,13 @@ impl<'ctx> CodeGen<'ctx> {
 
           // Build args list
           let mut llvm_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(num_params_fixed + (num_args_provided - num_params_fixed).max(0));
+
+          // Add hidden count for variadic functions
+          if variadic {
+            let var_arg_count = num_args_provided as i64 - num_params_fixed as i64;
+            llvm_args.push(self.context.i64_type().const_int(var_arg_count as u64, false).into());
+          }
+
           for i in 0..num_params_fixed {
 
             // Argument was provided

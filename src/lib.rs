@@ -382,11 +382,13 @@ impl std::fmt::Display for Error {
       },
       Error::CompilerError(err) => {
         let line = err.line.split("\n").next().unwrap();
-        let underline = if err.end_pos.is_some() {
-          " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat((err.end_pos.unwrap() - err.start_pos.unwrap()) as usize)
+        let mut dashes = if err.end_pos.is_some() {
+          err.end_pos.unwrap() - err.start_pos.unwrap()
         } else {
-          " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat(line.trim_start().len() - err.start_pos.unwrap() as usize)
+          line.trim_start().len() as i32 - err.start_pos.unwrap()
         };
+        if dashes <= 0 { dashes = 1; }
+        let underline = " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat(dashes as usize);
         return write!(f, "Compilation error at {}:{}\n  {}\n  {}\n\n{}", err.end_pos.unwrap(),
           err.start_pos.unwrap() + 1, err.line, underline, err.message
         );
