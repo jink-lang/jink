@@ -21,6 +21,7 @@ struct Scope<'ctx> {
   is_function: bool,
 }
 
+#[derive(Debug, Clone)]
 struct FunctionCtx<'ctx> {
   llvm_fun: FunctionValue<'ctx>,
   parameters: Vec<FunctionParamCtx<'ctx>>,
@@ -28,9 +29,10 @@ struct FunctionCtx<'ctx> {
   variadic: bool,
 }
 
+#[derive(Debug, Clone)]
 struct FunctionParamCtx<'ctx> {
   name: String,
-  _jtype: JType,
+  jtype: JType,
   _llvm_type: BasicMetadataTypeEnum<'ctx>,
   default_value_expr: Option<Box<Expression>>,
   is_spread: bool,
@@ -231,7 +233,7 @@ impl<'ctx> CodeGen<'ctx> {
     self.module.add_function("llvm.va_end", va_end_type, None);
   }
 
-  pub fn _jtype_to_basic_type(&self, jtype: JType) -> Result<BasicTypeEnum<'ctx>, Error> {
+  pub fn jtype_to_basic_type(&self, jtype: JType) -> Result<BasicTypeEnum<'ctx>, Error> {
     match jtype {
       JType::Integer => Ok(self.context.i64_type().as_basic_type_enum()),
       JType::UnsignedInteger => Ok(self.context.i64_type().as_basic_type_enum()),
@@ -1548,7 +1550,7 @@ impl<'ctx> CodeGen<'ctx> {
 
       parameter_stack.push(FunctionParamCtx {
         name: name.clone(),
-        _jtype: param.clone().inferred_type.unwrap(),
+        jtype: param.clone().inferred_type.unwrap(),
         _llvm_type: if spread {
           self.context.ptr_type(AddressSpace::default()).into()
         } else {
@@ -1596,7 +1598,7 @@ impl<'ctx> CodeGen<'ctx> {
     // Store function context
     let fun_ctx = FunctionCtx {
       llvm_fun: function,
-      parameters: parameter_stack,
+      parameters: parameter_stack.clone(),
       _ret_type: returns.clone(),
       variadic,
     };
@@ -1614,6 +1616,7 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Get variadic count and build array if needed
     let mut var_array_ptr: Option<PointerValue<'ctx>> = None;
+    let mut var_array_type: Option<BasicTypeEnum<'ctx>> = None;
     if variadic {
       hidden_argument_offset = 1;
 
@@ -1621,7 +1624,7 @@ impl<'ctx> CodeGen<'ctx> {
       let var_arg_count = function.get_nth_param(0).unwrap().into_int_value();
 
       // Get types
-      let var_llvm_type = self._jtype_to_basic_type(
+      let var_llvm_type = self.jtype_to_basic_type(
         variadic_param_type.expect("Variadic parameter missing type")
       )?;
 
@@ -1633,6 +1636,7 @@ impl<'ctx> CodeGen<'ctx> {
         &format!("{}-args", name.0).as_str(),
       ).unwrap();
       var_array_ptr = Some(array_ptr);
+      var_array_type = Some(var_llvm_type);
 
       // Allocate and init va_list
       let va_list_type = self.context.ptr_type(AddressSpace::default());
@@ -1690,38 +1694,37 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     // Set up function parameters
-    for (i, llvm_param) in function.get_params().iter().enumerate().skip(hidden_argument_offset) {
+    for (i, llvm_param) in function.get_params().iter().enumerate() {
+      // Skip hidden arg count
+      if variadic && i == 0 { continue; }
 
-      // Get name
-      let name: String = match params.clone().unwrap()[i].clone().expr {
-        Expr::FunctionParam(_, _, Literals::Identifier(Name(name)), _, _) => name,
-        _ => panic!("Invalid function parameter"),
-      };
+      // Get param info
+      let param_info = parameter_stack[i - hidden_argument_offset].clone();
+      if param_info.is_spread { continue; }
 
       // Set parameter name
-      llvm_param.set_name(&name);
+      llvm_param.set_name(&param_info.name);
 
-      // If this param has a default value
+      // If this param has a default value and one was not passed, set it to the default value
       let mut val_to_store = *llvm_param;
       if let Some((_, _, default_value)) = defaults.iter().find(|(index, _, _)| *index == i) {
         val_to_store = self.visit(&default_value, func_block)?;
       }
 
       // TODO: Handle when type is unknown at compile time
-      let jtype = params.clone().unwrap()[i].clone().inferred_type.unwrap();
+      let jtype = param_info.jtype.clone();
       if matches!(jtype, JType::Unknown) {
-        todo!();
+        todo!("Handle unknown JType for parameter {} during code generation", param_info.name);
       }
 
-      let alloca = self.builder.build_alloca(llvm_param.get_type(), &name).unwrap();
+      let alloca = self.builder.build_alloca(llvm_param.get_type(), &param_info.name).unwrap();
       self.builder.build_store(alloca, val_to_store).unwrap();
-      self.set_symbol(name.clone(), Some(alloca), llvm_param.get_type(), val_to_store);
+      self.set_symbol(param_info.name, Some(alloca), llvm_param.get_type(), val_to_store);
     }
 
     // If variadic, set the array pointer in the function context
-    if let (Some(name), Some(array_ptr)) = (variadic_param_name, var_array_ptr) {
-      let array_llvm_type = array_ptr.get_type().array_type(0).as_basic_type_enum();
-      self.set_symbol(name, Some(array_ptr), array_llvm_type, array_ptr.as_basic_value_enum());
+    if let (Some(name), Some(array_ptr), Some(array_type)) = (variadic_param_name, var_array_ptr, var_array_type) {
+      self.set_symbol(name, Some(array_ptr), array_type.array_type(0).as_basic_type_enum(), array_ptr.as_basic_value_enum());
     }
 
     // Fill the function body
