@@ -1,5 +1,4 @@
 use core::{panic, str};
-use std::f32::consts::E;
 use indexmap::IndexMap;
 use std::collections::HashSet;
 
@@ -36,8 +35,7 @@ struct FunctionParamCtx<'ctx> {
   jtype: JType,
   _llvm_type: BasicMetadataTypeEnum<'ctx>,
   default_value_expr: Option<Box<Expression>>,
-  is_spread: bool,
-  is_const: bool,
+  is_spread: bool
 }
 
 pub struct CodeGen<'ctx> {
@@ -1334,8 +1332,6 @@ impl<'ctx> CodeGen<'ctx> {
       }
     };
 
-    // TODO: Check for constants
-
     // Setting new variable
     if let Some(Type(ty)) = ty {
 
@@ -1443,7 +1439,7 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     for (i, param) in params.clone().unwrap().iter().enumerate() {
-      let (typ, is_const, name, default_value_expr, is_spread) = match param.clone().expr {
+      let (typ, _, name, default_value_expr, is_spread) = match param.clone().expr {
         Expr::FunctionParam(ty, is_const, name, default_val, spread) => {
           (
             ty.unwrap(),
@@ -1546,7 +1542,7 @@ impl<'ctx> CodeGen<'ctx> {
         } else {
           *parameters.last().unwrap()
         },
-        default_value_expr, is_spread, is_const
+        default_value_expr, is_spread
       });
     }
 
@@ -1969,7 +1965,7 @@ impl<'ctx> CodeGen<'ctx> {
           // Add hidden count for variadic functions
           if variadic {
             let count = num_args_provided as i64 - num_params_fixed as i64;
-            let var_arg_count = if count > 0 { count } else { 0 }; 
+            let var_arg_count = if count > 0 { count } else { 0 };
             llvm_args.push(self.context.i64_type().const_int(var_arg_count as u64, false).into());
           }
 

@@ -1,8 +1,14 @@
 use jink::{Error, ErrorCtx, Expr, Expression, Literals, Name, Operator, Type, JType};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone)]
+struct VariableInfo {
+  jtype: JType,
+  is_const: bool,
+}
+
 struct Scope {
-  variables: HashMap<String, JType>,
+  variables: HashMap<String, VariableInfo>,
 }
 
 pub struct TypeChecker {
@@ -62,23 +68,23 @@ impl TypeChecker {
     self.in_loop = false;
   }
 
-  fn add_variable(&mut self, name: &str, typ: JType) -> Result<(), String> {
+  fn add_variable(&mut self, name: &str, jtype: JType, is_const: bool) -> Result<(), String> {
     if let Some(scope) = self.scopes.last_mut() {
       // Check for redeclaration in the *current* scope only
       if scope.variables.contains_key(name) {
         return Err(format!("Variable '{}' already declared in this scope.", name));
       }
-      scope.variables.insert(name.to_string(), typ);
+      scope.variables.insert(name.to_string(), VariableInfo { jtype, is_const });
       Ok(())
     } else {
       Err(format!("Internal Error: No current scope to add variable '{}'", name))
     }
   }
 
-  fn lookup_variable(&self, name: &str) -> Option<JType> {
+  fn lookup_variable(&self, name: &str) -> Option<VariableInfo> {
     for (_, scope) in self.scopes.iter().rev().enumerate() {
-      if let Some(typ) = scope.variables.get(name) {
-        return Some(typ.clone());
+      if let Some(var_info) = scope.variables.get(name) {
+        return Some(var_info.clone());
       }
     }
     None
@@ -129,8 +135,9 @@ impl TypeChecker {
         Literals::Boolean(_) => Ok(JType::Boolean),
         Literals::Null => Ok(JType::Null),
         Literals::Identifier(Name(name)) => {
-          self.lookup_variable(name)
+          Ok(self.lookup_variable(name)
             .ok_or_else(|| format!("Variable '{}' not found.", name))
+            .unwrap().jtype)
         },
         _ => Ok(JType::Unknown),
       }
@@ -174,20 +181,23 @@ impl TypeChecker {
                     name, expected_type, rhs_type
                   ));
                 }
-                self.add_variable(name, expected_type)?;
+                self.add_variable(name, expected_type, false)?;
                 Ok(JType::Null)
               }
 
               // Case 2: Type inference (`let a = 5;` or `const a = true;`)
               Some(Type(type_name)) if type_name == "let" || type_name == "const" => {
+                // Declaration without initializer (e.g., `let a;`) - type remains Unknown for now
                 if rhs_type == JType::Unknown && value_expr.is_none() {
-                  // Declaration without initializer (e.g., `let a;`) - type remains Unknown for now
-                  self.add_variable(name, JType::Unknown)?;
+                  if type_name == "const" {
+                    return Err(format!("Cannot declare constant variable '{}' without an initializer.", name));
+                  }
+                  self.add_variable(name, JType::Unknown, false)?;
                 } else if rhs_type == JType::Null {
                   return Err(format!("Cannot assign null to variable '{}' without explicit type.", name));
                 } else {
                   // Infer type from RHS
-                  self.add_variable(name, rhs_type)?;
+                  self.add_variable(name, rhs_type, type_name == "const")?;
                 }
                 Ok(JType::Null)
               }
@@ -195,10 +205,16 @@ impl TypeChecker {
               // Case 3: Reassignment (`a = 10;`)
               None => {
                 match self.lookup_variable(name) {
-                  Some(existing_type) => {
+                  Some(VariableInfo { jtype: existing_type, is_const }) => {
                     if value_expr.is_none() {
                       return Err(format!("Cannot reassign variable '{}' without a value.", name));
                     }
+
+                    // Ensure the existing type is not a constant
+                    if is_const {
+                      return Err(format!("Cannot reassign constant variable '{}'.", name));
+                    }
+
                     if !self.check_type_compatibility(&existing_type, &rhs_type) {
                       return Err(format!(
                         "Type mismatch on reassignment of variable '{}'. Expected {}, got {}.",
@@ -335,7 +351,7 @@ impl TypeChecker {
         }
 
         let func_type = self.lookup_variable(func_name)
-          .ok_or_else(|| format!("Function '{}' not found.", func_name))?;
+          .ok_or_else(|| format!("Function '{}' not found.", func_name))?.jtype;
 
         if let JType::Function(param_types, return_type) = func_type {
 
@@ -438,16 +454,15 @@ impl TypeChecker {
       Expr::Function(Name(name), return_type, params, body) => {
         // Determine expected parameter types and return type
         let mut expected_param_types = Vec::new();
-        let mut param_names = Vec::new(); // To add to inner scope
+        // To add to inner scope - name, type, is_const
+        let mut param_names: Vec<(String, JType, bool)> = Vec::new();
         let mut is_variadic = false;
 
         if let Some(param_items) = params {
 
           for param in param_items.iter_mut() {
 
-            // TODO: Validate const (will definitely require overall refactoring)
-            // TODO: Validate spread / variadic parameters
-            if let Expr::FunctionParam(Some(Type(ptype)), _is_const, ident_literal, default_value, is_spread) = &mut param.expr {
+            if let Expr::FunctionParam(Some(Type(ptype)), is_const, ident_literal, default_value, is_spread) = &mut param.expr {
               if let Literals::Identifier(Name(pname)) = ident_literal {
                 let param_type = if ptype == "let" {
                   let typ = JType::Unknown;
@@ -464,11 +479,11 @@ impl TypeChecker {
 
                 // Push parameter type to the expected list
                 if !*is_spread {
-                  param_names.push((pname.clone(), param_type.clone()));
+                  param_names.push((pname.clone(), param_type.clone(), *is_const));
                 // Variadic
                 } else {
                   is_variadic = true;
-                  param_names.push((pname.clone(), JType::Array(Box::new(param_type.clone()))));
+                  param_names.push((pname.clone(), JType::Array(Box::new(param_type.clone())), *is_const));
                 }
 
                 // Check default value
@@ -513,12 +528,12 @@ impl TypeChecker {
 
         // Add function signature to scope before checking body scope
         let func_type = JType::Function(expected_param_types.clone(), Box::new(expected_return_type.clone()));
-        self.add_variable(name, func_type)?;
+        self.add_variable(name, func_type, false)?;
 
         self.enter_function(Some(expected_return_type.clone()));
         // Add parameters to the body scope
-        for (pname, ptype) in param_names {
-          self.add_variable(&pname, ptype)?;
+        for (pname, ptype, is_const) in param_names {
+          self.add_variable(&pname, ptype, is_const)?;
         }
 
         if let Some(body) = body {
@@ -652,7 +667,7 @@ impl TypeChecker {
 
         // Check body in a loop scope with the loop variable defined
         self.enter_loop();
-        self.add_variable(&var_name, JType::Integer)?; // Add loop variable to scope
+        self.add_variable(&var_name, JType::Integer, false)?; // Add loop variable to scope
         if let Some(body_vec) = body {
           for stmt in body_vec.iter_mut() {
             self.check_expression(stmt)?;
