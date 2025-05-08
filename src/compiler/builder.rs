@@ -2603,222 +2603,190 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     fs::remove_file(executable_name).unwrap();
 
-    // Assert the output is correct
+    // Assert the output matches, error or not
     if !test.status.success() && String::from_utf8_lossy(&test.stderr) != "" {
-      eprintln!("Error: {}", String::from_utf8_lossy(&test.stderr));
-      assert!(false);
+      let error_message = String::from_utf8_lossy(&test.stderr).to_string();
+      let error_message = &error_message.split("message: \"")
+        .nth(1).unwrap_or("")
+        .split("\"")
+        .nth(0).unwrap_or("");
+      assert_eq!(error_message, &output);
     } else {
       assert_eq!(String::from_utf8_lossy(&test.stdout), output);
     }
   }
 
-  #[test]
-  fn test_compile_assignment_reassignment() -> Result<(), Error> {
+  // Test helper function
+  fn run_test(code: &str, expected: &str) -> Result<(), Error> {
     let context = Context::create();
     let mut codegen = CodeGen::new(&context);
-    let code = "let a = 1;
-    let b = 2;
-    a = 3;
-    let c = a + b;
-    printf(\"%d\", c);".to_string();
     let mut parser = crate::Parser::new();
-    parser.set_source(code.clone());
-    let mut ast = parser.parse(String::new(), false, true)?;
+    parser.set_source(code.to_string());
+    let mut ast = parser.parse(String::new(), false, true).unwrap();
     let mut typer = crate::TypeChecker::new();
-    typer.set_source(code.clone());
+    typer.set_source(code.to_string());
     typer.check(&mut ast)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "5");
-    return Ok(());
+    let ir = codegen.build(code.to_string(), ast, IndexMap::new(), false, false).unwrap();
+    build_and_assert(ir, expected);
+    Ok(())
   }
 
   #[test]
-  fn test_compile_multi_binop() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "let a = (1 + 2) * 3;
-    let b = 3;
-    printf(\"%d\", a / b);".to_string();
-    let mut parser = crate::Parser::new();
-    parser.set_source(code.clone());
-    let mut ast = parser.parse(String::new(), false, true)?;
-    let mut typer = crate::TypeChecker::new();
-    typer.set_source(code.clone());
-    typer.check(&mut ast)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "3");
-    return Ok(());
+  fn test_build_assignment_reassignment() -> Result<(), Error> {
+    run_test("
+      let a = 1;
+      let b = 2;
+      a = 3;
+      let c = a + b;
+      printf(\"%d\", c);
+    ",
+    "5")
   }
 
   #[test]
-  fn test_assign_array_and_indexing() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "let a = [1, 2, 3];
-    let b = a[2];
-    printf(\"%d\", b);".to_string();
-    let mut parser = crate::Parser::new();
-    parser.set_source(code.clone());
-    let mut ast = parser.parse(String::new(), false, true)?;
-    let mut typer = crate::TypeChecker::new();
-    typer.set_source(code.clone());
-    typer.check(&mut ast)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "3");
-    return Ok(());
+  fn test_build_multi_binop() -> Result<(), Error> {
+    run_test("
+      let a = (1 + 2) * 3;
+      let b = 3;
+      printf(\"%d\", a / b);
+    ",
+    "3")
   }
 
   #[test]
-  fn test_array_reassign_index() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "let a = [1, 2, 3];
-    a[0] = 4;
-    let b = a[0];
-    printf(\"%d\", b);".to_string();
-    let mut parser = crate::Parser::new();
-    parser.set_source(code.clone());
-    let mut ast = parser.parse(String::new(), false, true)?;
-    let mut typer = crate::TypeChecker::new();
-    typer.set_source(code.clone());
-    typer.check(&mut ast)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "4");
-    return Ok(());
+  fn test_build_assign_array_and_indexing() -> Result<(), Error> {
+    run_test("
+      let a = [1, 2, 3];
+      let b = a[2];
+      printf(\"%d\", b);
+    ",
+    "3")
   }
 
   #[test]
-  fn test_for_loop() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "let array = [1, 2, 3, 4, 5];
-    for (let i in array) {
-      printf(\"%d\", array[i]);
-    }".to_string();
-    let mut parser = crate::Parser::new();
-    parser.set_source(code.clone());
-    let mut ast = parser.parse(String::new(), false, true)?;
-    let mut typer = crate::TypeChecker::new();
-    typer.set_source(code.clone());
-    typer.check(&mut ast)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "12345");
-    return Ok(());
+  fn test_build_array_reassign_index() -> Result<(), Error> {
+    run_test("
+      let a = [1, 2, 3];
+      a[0] = 4;
+      let b = a[0];
+      printf(\"%d\", b);
+    ",
+    "4")
   }
 
   #[test]
-  fn test_while_loop() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "let i = 0;
-    while (i < 5) {
-      printf(\"%d\", i);
-      i = i + 1;
-    }".to_string();
-    let mut parser = crate::Parser::new();
-    parser.set_source(code.clone());
-    let mut ast = parser.parse(String::new(), false, true)?;
-    let mut typer = crate::TypeChecker::new();
-    typer.set_source(code.clone());
-    typer.check(&mut ast)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "01234");
-    return Ok(());
+  fn test_build_for_loop() -> Result<(), Error> {
+    run_test("
+      let array = [1, 2, 3, 4, 5];
+      for (let i in array) {
+        printf(\"%d\", array[i]);
+      }
+    ",
+    "12345")
   }
 
   #[test]
-  fn test_conditional_phi() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "let a = 1;
-    if (a == 1) {
-      a = 5;
-    } else {
-      a = 10;
-    }
-    printf(\"%d\", a);".to_string();
-    let mut parser = crate::Parser::new();
-    parser.set_source(code.clone());
-    let mut ast = parser.parse(String::new(), false, true)?;
-    let mut typer = crate::TypeChecker::new();
-    typer.set_source(code.clone());
-    typer.check(&mut ast)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "5");
-    return Ok(());
+  fn test_build_while_loop() -> Result<(), Error> {
+    run_test("
+      let i = 0;
+      while (i < 5) {
+        printf(\"%d\", i);
+        i = i + 1;
+      }
+    ",
+    "01234")
   }
 
   #[test]
-  fn test_type_struct_index() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "type Test = {
-      a: int,
-      b: int,
-    }
-    Test test = { a: 1, b: 2 };
-    printf(\"%d\", test.b);".to_string();
-    let mut parser = crate::Parser::new();
-    parser.set_source(code.clone());
-    let mut ast = parser.parse(String::new(), false, true)?;
-    let mut typer = crate::TypeChecker::new();
-    typer.set_source(code.clone());
-    typer.check(&mut ast)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "2");
-    return Ok(());
+  fn test_build_function() -> Result<(), Error> {
+    run_test("
+      fun add(int a, int b) -> int {
+        return a + b;
+      }
+      let result = add(1, 2);
+      printf(\"%d\", result);
+    ",
+    "3")
   }
 
   #[test]
-  fn test_deep_type_struct_index() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "// types
-    type TestType = { a: int, b: int, c: int, d: int, };
-    type TestTypeTwo = { test_one: TestType, };
-    type TestTypeThree = { test_two: TestTypeTwo, };
-    type TestTypeFour = { test_three: TestTypeThree, };
-    // vars
-    TestType test_var = { a: 1, b: 2, c: 3, d: 4 };
-    TestTypeTwo test_var_two = { test_one: test_var };
-    TestTypeThree test_var_three = { test_two: test_var_two };
-    TestTypeFour test_var_four = { test_three: test_var_three };
-    printf(\"%d, %d, %d, %d\",
-      test_var_four.test_three.test_two.test_one.a,
-      test_var_three.test_two.test_one.b,
-      test_var_two.test_one.c,
-      test_var.d
-    );".to_string();
-    let mut parser = crate::Parser::new();
-    parser.set_source(code.clone());
-    let mut ast = parser.parse(String::new(), false, true)?;
-    let mut typer = crate::TypeChecker::new();
-    typer.set_source(code.clone());
-    typer.check(&mut ast)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "1, 2, 3, 4");
-    return Ok(());
+  fn test_build_variadic_function() -> Result<(), Error> {
+    run_test("
+      fun add(int a, int b, int ...nums) -> int {
+        let sum = a + b;
+        for (let i in nums) {
+          sum += nums[i];
+        }
+        return sum;
+      }
+
+      let result = add(1, 2, 3, 4, 5);
+      printf(\"%d\", result);
+    ",
+    "15")
   }
 
   #[test]
-  fn test_enum_type() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "enum TestEnum = {
-      TestOne,
-      TestTwo,
-      TestThree,
-    }
-    let test_var = TestEnum.TestThree;
-    printf(\"%d\", test_var);".to_string();
-    let mut parser = crate::Parser::new();
-    parser.set_source(code.clone());
-    let mut ast = parser.parse(String::new(), false, true)?;
-    let mut typer = crate::TypeChecker::new();
-    typer.set_source(code.clone());
-    typer.check(&mut ast)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "2");
-    return Ok(());
+  fn test_build_conditional_phi() -> Result<(), Error> {
+    run_test("
+      let a = 1;
+      if (a == 1) {
+        a = 5;
+      } else {
+        a = 10;
+      }
+      printf(\"%d\", a);
+    ",
+    "5")
+  }
+
+  #[test]
+  fn test_build_type_struct_index() -> Result<(), Error> {
+    run_test("
+      type Test = {
+        a: int,
+        b: int,
+      }
+      Test test = { a: 1, b: 2 };
+      printf(\"%d\", test.b);
+    ",
+    "2")
+  }
+
+  #[test]
+  fn test_build_deep_type_struct_index() -> Result<(), Error> {
+    run_test("
+      // types
+      type TestType = { a: int, b: int, c: int, d: int, };
+      type TestTypeTwo = { test_one: TestType, };
+      type TestTypeThree = { test_two: TestTypeTwo, };
+      type TestTypeFour = { test_three: TestTypeThree, };
+      // vars
+      TestType test_var = { a: 1, b: 2, c: 3, d: 4 };
+      TestTypeTwo test_var_two = { test_one: test_var };
+      TestTypeThree test_var_three = { test_two: test_var_two };
+      TestTypeFour test_var_four = { test_three: test_var_three };
+      printf(\"%d, %d, %d, %d\",
+        test_var_four.test_three.test_two.test_one.a,
+        test_var_three.test_two.test_one.b,
+        test_var_two.test_one.c,
+        test_var.d
+      );
+    ",
+    "1, 2, 3, 4")
+  }
+
+  #[test]
+  fn test_build_enum_type() -> Result<(), Error> {
+    run_test("
+      enum TestEnum = {
+        TestOne,
+        TestTwo,
+        TestThree,
+      }
+      let test_var = TestEnum.TestThree;
+      printf(\"%d\", test_var);
+    ",
+    "2")
   }
 }
