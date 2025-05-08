@@ -2603,14 +2603,10 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     fs::remove_file(executable_name).unwrap();
 
-    // Assert the output matches, error or not
+    // Assert the output matches
     if !test.status.success() && String::from_utf8_lossy(&test.stderr) != "" {
-      let error_message = String::from_utf8_lossy(&test.stderr).to_string();
-      let error_message = &error_message.split("message: \"")
-        .nth(1).unwrap_or("")
-        .split("\"")
-        .nth(0).unwrap_or("");
-      assert_eq!(error_message, &output);
+      eprintln!("Error: {}", String::from_utf8_lossy(&test.stderr));
+      assert!(false);
     } else {
       assert_eq!(String::from_utf8_lossy(&test.stdout), output);
     }
