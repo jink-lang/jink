@@ -76,7 +76,7 @@ pub enum Literals {
   String(String),
   Boolean(bool),
   Object(Box<Vec<Self>>),
-  ObjectProperty(Option<Name>, Box<Expression>),
+  ObjectProperty(Name, Box<Expression>),
   Identifier(Name),
   Null,
   EOF
@@ -179,6 +179,10 @@ pub enum JType {
   FunctionParam(Box<JType>, Option<Box<JType>>, bool),
   /// parameters; return type
   Function(Vec<JType>, Box<JType>),
+  /// fields
+  StructDef(HashMap<String, JType>),
+  /// members
+  Enum(Vec<String>),
   /// Absence of a value or type, e.g., for statements
   Null,
   Void,
@@ -217,6 +221,26 @@ impl std::fmt::Display for JType {
           write!(f, "{}", param)?;
         }
         write!(f, ") -> {}", ret)
+      },
+      JType::StructDef(fields) => {
+        write!(f, "struct(")?;
+        for (i, (name, field_type)) in fields.iter().enumerate() {
+          if i > 0 {
+            write!(f, ", ")?;
+          }
+          write!(f, "{}: {}", name, field_type)?;
+        }
+        write!(f, ")")
+      },
+      JType::Enum(members) => {
+        write!(f, "enum(")?;
+        for (i, member) in members.iter().enumerate() {
+          if i > 0 {
+            write!(f, ", ")?;
+          }
+          write!(f, "{}", member)?;
+        }
+        write!(f, ")")
       },
       JType::Null => write!(f, "null"),
       JType::Void => write!(f, "void"),

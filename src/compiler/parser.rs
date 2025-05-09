@@ -1080,7 +1080,7 @@ impl Parser {
       if type_tok.is_none() {
         let value = self.parse_expression(0)?;
         obj.push(Literals::ObjectProperty(
-          Some(Name(key.value.unwrap())),
+          Name(key.value.unwrap()),
           Box::new(value)
         ));
 
@@ -1088,7 +1088,7 @@ impl Parser {
       } else {
         let val = self.consume(&[TokenTypes::Identifier], false)?;
         obj.push(Literals::ObjectProperty(
-          Some(Name(key.value.unwrap())),
+          Name(key.value.unwrap()),
           Box::new(self.get_expr(
             Expr::Literal(Literals::Identifier(Name(val.value.unwrap()))),
             Some(val.line), val.start_pos, Some(val.line)

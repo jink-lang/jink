@@ -108,7 +108,14 @@ impl TypeChecker {
       "string" => Ok(JType::String),
       "bool" => Ok(JType::Boolean),
       "void" => Ok(JType::Void),
-      _ => Ok(JType::TypeName(type_name.to_string())), // Assume custom type name for now
+      _ => {
+        // Check if it's a user-defined type (class, enum, etc.)
+        let var = self.lookup_variable(type_name);
+        match var {
+          Some(VariableInfo { jtype, .. }) => Ok(jtype),
+          None => Err(format!("Unknown type '{}'.", type_name)),
+        }
+      }
     }
   }
 
@@ -134,6 +141,10 @@ impl TypeChecker {
         Literals::String(_) => Ok(JType::String),
         Literals::Boolean(_) => Ok(JType::Boolean),
         Literals::Null => Ok(JType::Null),
+        Literals::Object(ref mut props) => {
+          let obj = self.check_object(props, false)?;
+          Ok(JType::Object(obj))
+        },
         Literals::Identifier(Name(name)) => {
           Ok(self.lookup_variable(name)
             .ok_or_else(|| format!("Variable '{}' not found.", name))
@@ -692,9 +703,156 @@ impl TypeChecker {
         Ok(JType::Null)
       }
 
-      Expr::Public(expr) => {
-        // Handle internal expression of the public modifier
-        Ok(self.check_expression(expr)?)
+      Expr::TypeDef(name, literals) => {
+        if self.lookup_variable(&name.0).is_some() {
+          return Err(format!("Type '{}' already declared.", &name.0));
+        }
+
+        match literals.as_mut() {
+          // Case: Alias to custom type
+          // type MyType = MyOtherType;
+          Literals::Identifier(Name(type_name)) => {
+            let typ = self.string_to_jtype(&type_name)?;
+            // Store the name pointing to the resolved type
+            self.add_variable(&name.0, typ, false)?;
+          },
+          // Case: Alias to primitive type
+          // type MyType = int;
+          Literals::Boolean(_) | Literals::Integer(_) | Literals::FloatingPoint(_) | Literals::String(_) | Literals::Null => {
+            self.add_variable(&name.0, JType::TypeName(name.0.clone()), false)?;
+          },
+          // Case: Struct definition
+          // type MyType = { a: int, b: string };
+          Literals::Object(inner) => {
+            let props = self.check_object(inner, true)?;
+            self.add_variable(&name.0, JType::Object(props.clone()), false)?;
+          },
+          _ => {
+            return Err(format!("Invalid type definition for '{}'.", name.0));
+          }
+        }
+
+        Ok(JType::Null)
+      }
+
+      Expr::Enum(name, members) => {
+        if self.lookup_variable(&name.0).is_some() {
+          return Err(format!("Enum '{}' already declared.", &name.0));
+        }
+
+        // Check members
+        let mut enum_members: Vec<String> = Vec::new();
+        for member in members.iter_mut() {
+          match member {
+            Literals::Identifier(Name(member_name)) => {
+              if enum_members.contains(&member_name) {
+                return Err(format!("Enum member '{}' already declared.", member_name));
+              }
+              enum_members.push(member_name.clone());
+            }
+            _ => return Err(format!("Invalid enum member in '{}'. Members must be identifiers.", name.0)),
+          }
+        }
+
+        let enum_type = JType::Enum(enum_members);
+        self.add_variable(&name.0, enum_type.clone(), false)?;
+        Ok(enum_type)
+      }
+
+      Expr::Index(initial_lhs_expr, initial_rhs_expr) => {
+        let mut cur_lhs_type = self.check_expression(initial_lhs_expr)?;
+
+        // Current link in chain being processed
+        // Starts by pointing to initial rhs of the Index
+        let mut cur_chain_node: &mut Expression = initial_rhs_expr;
+
+        // Loop to resolve right-associative chain like A.B.C.D
+        // Assuming we have, for example, AST: Index(A, Index(B, Index(C, D)))
+        // 1: cur_lhs_type = Type(A), cur_chain_node = Index(B, Index(C,D))
+        // 2: cur_lhs_type = Type(A.B), cur_chain_node = Index(C,D)
+        // 3: cur_lhs_type = Type(A.B.C), cur_chain_node = D
+        loop {
+          match &mut cur_chain_node.expr {
+            Expr::Literal(Literals::Identifier(Name(member_name))) => {
+              // Final identifier in the chain (e.g., the 'D' in A.B.C.D)
+              // cur_lhs_type is the type of A.B.C
+              match cur_lhs_type.clone() {
+                JType::Object(fields) => {
+                  if let Some(field_type) = fields.get(member_name) {
+                    cur_lhs_type = field_type.clone(); // Update type to Type(A.B.C.D)
+                    cur_chain_node.inferred_type = Some(cur_lhs_type.clone());
+                  } else {
+                    return Err(format!("Property '{}' not found on type '{}'.", member_name, cur_lhs_type));
+                  }
+                },
+                JType::Enum(enum_members_list) => {
+                  // Accessing MyEnum.MEMBER
+                  if enum_members_list.contains(member_name) {
+                    // Type of 'MyEnum.MEMBER' is 'MyEnum' itself
+                    // cur_lhs_type is already the JType::Enum
+                    initial_rhs_expr.inferred_type = Some(cur_lhs_type.clone());
+                  } else {
+                    return Err(format!("Enum member '{}' not found in enum '{}'.", member_name, cur_lhs_type));
+                  }
+                },
+                _ => return Err(format!("Type '{}' does not support '.' access for member '{}'.", cur_lhs_type, member_name)),
+              }
+
+              break;
+            }
+
+            // Case: Further chain link rhs (Index(B, Index(C,D)))
+            Expr::Index(next_link_ident, next_rhs) => {
+              let member_name_to_access = match &next_link_ident.expr {
+                Expr::Literal(Literals::Identifier(Name(name_str))) => name_str,
+                _ => return Err(format!("Invalid AST structure in Index chain: expected identifier as link, got {:?}.", next_rhs.expr)),
+              };
+
+              match cur_lhs_type.clone() {
+                JType::Object(fields) => {
+                  if let Some(field_type) = fields.get(member_name_to_access) {
+                    cur_lhs_type = field_type.clone(); // Update type to Type(A.B)
+                    // Optionally set inferred_type on the identifier expression node
+                    next_rhs.inferred_type = Some(cur_lhs_type.clone());
+                    cur_chain_node = next_rhs; // Continue with Index(C,D)
+                  } else {
+                    return Err(format!("Property '{}' not found on type '{}'.", member_name_to_access, cur_lhs_type));
+                  }
+                },
+                _ => return Err(format!("Type '{}' does not support '.' accessor for member '{}'.", cur_lhs_type, member_name_to_access)),
+              }
+            },
+
+            // Case: Current part of chain is method call: cur_lhs_type.method_name(...)
+            Expr::Call(Name(method_name), args_expr_vec) => {
+              let method_type = match cur_lhs_type.clone() {
+                JType::Object(object_fields) => object_fields.get(method_name).cloned(),
+                _ => None,
+              };
+
+              if let Some(JType::Function(_, return_type)) = method_type {
+                let mut provided_types = Vec::with_capacity(args_expr_vec.len());
+                for arg_node in args_expr_vec.iter_mut() {
+                  provided_types.push(self.check_expression(arg_node)?);
+                }
+
+                // TODO: DRY call signature checks to separate function when classes are ready for this
+
+                cur_lhs_type = *return_type;
+              } else if method_type.is_some() {
+                return Err(format!("Member '{}' on type '{}' is not a callable method.", method_name, cur_lhs_type));
+              } else {
+                return Err(format!("Method '{}' not found on type '{}'.", method_name, cur_lhs_type));
+              }
+
+              initial_rhs_expr.inferred_type = Some(cur_lhs_type.clone());
+              break;
+            },
+            _ => return Err("Invalid expression in Index chain. Expected Identifier, further Index, or Call.".to_string()),
+          }
+        }
+
+        Ok(cur_lhs_type)
       }
 
       // TODO: Array bounds check in type checker?
@@ -715,6 +873,11 @@ impl TypeChecker {
         }
       }
 
+      Expr::Public(expr) => {
+        // Handle internal expression of the public modifier
+        Ok(self.check_expression(expr)?)
+      }
+
       // TODO: Module, Delete, Index, Class
       _ => Ok(JType::Unknown),
     }?;
@@ -725,6 +888,40 @@ impl TypeChecker {
     }
 
     Ok(typ)
+  }
+
+  fn check_object(&mut self, props: &mut Vec<Literals>, is_type_def: bool) -> Result<HashMap<String, JType>, String> {
+    let mut obj_properties = HashMap::new();
+    for literal in props.iter_mut() {
+      match literal.clone() {
+        Literals::ObjectProperty(name, mut val) => {
+          // Check if property already exists
+          if obj_properties.contains_key(&name.0) {
+            return Err(format!("Duplicate property '{}' in object.", name.0));
+          }
+
+          // If checking for a struct definition handle types literally without checking expressions
+          if is_type_def {
+            match &mut val.expr {
+              Expr::Literal(Literals::Identifier(Name(type_name))) => {
+                let typ = self.string_to_jtype(type_name)?;
+                obj_properties.insert(name.clone().0, typ.clone());
+              },
+              _ => {
+                return Err(format!("Invalid property type for '{}'. Expected identifier, got {}.", name.0, val.inferred_type.unwrap_or(JType::Unknown)));
+              }
+            }
+          } else {
+            obj_properties.insert(name.clone().0, self.check_expression(&mut val)?);
+          }
+        },
+        _ => {
+          return Err(format!("Invalid item in object literal or type definition. Expected 'key: Type' or 'key: value'. Got: {:?}", literal));
+        }
+      }
+    }
+
+    Ok(obj_properties.clone())
   }
 
   pub fn check(&mut self, ast: &mut [Expression]) -> Result<(), Error> {

@@ -834,20 +834,20 @@ impl<'ctx> CodeGen<'ctx> {
         if let Literals::ObjectProperty(n, val) = literal.to_owned() {
 
           // Ensure name doesn't already exist in fields
-          if fields.iter().any(|(name, _, _)| name == &n.as_ref().unwrap().0) {
+          if fields.iter().any(|(name, _, _)| name == &n.0) {
             return Err(Error::new(
               Error::CompilerError,
               None,
               &"",
               Some(0),
               Some(0),
-              format!("Field {} already defined", n.unwrap().0)
+              format!("Field {} already defined", n.0)
             ));
           }
 
           // Build the field
           let (typ, struct_name_if_any) = self.build_struct_field(val.expr)?;
-          let field: (String, BasicTypeEnum<'ctx>, Option<String>) = (n.unwrap().0, typ, struct_name_if_any);
+          let field: (String, BasicTypeEnum<'ctx>, Option<String>) = (n.0, typ, struct_name_if_any);
           fields.push(field);
 
         // Field was not an object property, parsing error
@@ -2419,7 +2419,20 @@ impl<'ctx> CodeGen<'ctx> {
               "eqtmp"
             ).unwrap().as_basic_value_enum())
           },
-          _ => panic!("Invalid types for equality"), // TODO: pretty up errors
+          (JType::Enum(a_members), JType::Enum(b_members)) if a_members == b_members => Ok(self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ,
+            left.into_int_value(),
+            right.into_int_value(),
+            "eqtmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth((lhs.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+            lhs.first_pos,
+            lhs.last_line,
+            format!("Invalid types for equality: {} and {}", lhs_type, rhs_type)
+          ))
         }
       },
       "!=" => {
