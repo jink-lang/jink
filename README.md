@@ -36,7 +36,6 @@ If you are interested in and new to contributing to the project, TODOs here mark
 - [ ] Add pull request templates
 ##### IR Builder
 - [x] Standardize type inference (see [Type checker](#type-checker))
-- [ ] Build dynamic array type
 - [ ] Build heterogenous array type
 - [ ] Build nested arrays
 - [x] Build structs/types
@@ -59,10 +58,12 @@ If you are interested in and new to contributing to the project, TODOs here mark
 - [ ] Write class tests
 - [ ] Write module tests
 ##### Type checker
-- [ ] Add object type handling
+- [x] Add object type handling
 - [ ] Add heterogeneous array type handling
 - [ ] Add nested array type handling
 - [x] Refactor to add handling for constants
+- [ ] Add class handling
+- [ ] Add class inheritance handling
 ##### Lexer
 - [ ] Lex string interpolation (Dart/Haxe/Kotlin/Scala style "\$apples apples of ${apples + bananas} fruits") (`N`)
 ##### Parser

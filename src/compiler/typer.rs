@@ -812,7 +812,6 @@ impl TypeChecker {
                 JType::Object(fields) => {
                   if let Some(field_type) = fields.get(member_name_to_access) {
                     cur_lhs_type = field_type.clone(); // Update type to Type(A.B)
-                    // Optionally set inferred_type on the identifier expression node
                     next_rhs.inferred_type = Some(cur_lhs_type.clone());
                     cur_chain_node = next_rhs; // Continue with Index(C,D)
                   } else {

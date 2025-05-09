@@ -1324,7 +1324,7 @@ impl<'ctx> CodeGen<'ctx> {
         // Case: Array rhs
         // TODO: Handle heterogeneous arrays
         Expr::Array(_) => {
-          let (ptr, typ, val) = self.visit_array(*value.clone().unwrap(), block)?;
+          let (ptr, typ, val) = self.build_array(*value.clone().unwrap(), block)?;
           self.set_symbol(name, Some(ptr), typ.as_basic_type_enum(), val);
           return Ok(());
         },
@@ -1875,9 +1875,9 @@ impl<'ctx> CodeGen<'ctx> {
     ));
   }
 
-  fn visit_array(&mut self, expr: Expression, block: BasicBlock<'ctx>) -> Result<(PointerValue<'ctx>, ArrayType<'ctx>, BasicValueEnum<'ctx>), Error> {
-    let a = match expr.expr {
-      Expr::Array(a) => a,
+  fn build_array(&mut self, expr: Expression, block: BasicBlock<'ctx>) -> Result<(PointerValue<'ctx>, ArrayType<'ctx>, BasicValueEnum<'ctx>), Error> {
+    let arr_exprs = match expr.expr {
+      Expr::Array(exprs) => exprs,
       _ => {
         return Err(Error::new(
           Error::ParserError,
@@ -1890,30 +1890,76 @@ impl<'ctx> CodeGen<'ctx> {
       }
     };
 
-    let mut values = Vec::new();
-    for v in a.iter() {
-      values.push(self.visit(&v, block)?.into_int_value());
+    // Get array element type
+    let elem_jtype = match expr.inferred_type.clone() {
+      Some(JType::Array(typ)) => *typ,
+      _ => {
+        // Fallback to the first element type if available
+        if let Some(elem) = arr_exprs.first() {
+          if let Some(typ) = elem.inferred_type.clone() {
+            typ
+          } else {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
+              expr.first_pos,
+              expr.last_line,
+              "Array type missing".to_string()
+            ));
+          }
+
+        // Array is empty
+        } else {
+          JType::Unknown
+        }
+      }
+    };
+
+    let llvm_elem_type = self.jtype_to_basic_type(elem_jtype.clone())?;
+    let array_len = arr_exprs.len() as u32;
+    let final_array_type = llvm_elem_type.array_type(array_len);
+
+    // Allocate memory for array
+    let array_alloca = self.builder.build_alloca(final_array_type, "arr_data").unwrap();
+
+    // Populate array memory
+    for (i, elem_expr) in arr_exprs.iter().enumerate() {
+      let elem_val = self.visit(elem_expr, block)?;
+      if elem_val.get_type() != llvm_elem_type {
+        return Err(Error::new(
+          Error::CompilerError,
+          None,
+          &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
+          expr.first_pos,
+          expr.last_line,
+          format!("Array element type mismatch: expected {:?}, got {:?}", llvm_elem_type, elem_val.get_type())
+        ));
+      }
+
+      let idx = self.context.i64_type().const_int(i as u64, false);
+      let elem_ptr = unsafe { self.builder.build_gep(final_array_type, array_alloca, &[self.context.i64_type().const_zero(), idx], "arr_elem") }.unwrap();
+      self.builder.build_store(elem_ptr, elem_val).unwrap();
     }
 
-    let struct_type = self.context.struct_type(&[
+    // Create the array object ({ len, arr_ptr })
+    let array_struct_type = self.context.struct_type(&[
       self.context.i64_type().into(),                        // len
       self.context.ptr_type(AddressSpace::default()).into(), // arr ptr
     ], false);
 
-    let array = self.context.i64_type().const_array(&values);
-    let arr_alloca = self.builder.build_alloca(array.get_type(), "arr").unwrap();
-    self.builder.build_store(arr_alloca, array).unwrap();
+    let array_struct_alloca = self.builder.build_alloca(array_struct_type, "array_alloc").unwrap();
 
-    let array_struct_alloca = self.builder.build_alloca(struct_type, "array_set").unwrap();
-
-    let length = self.context.i64_type().const_int(values.len() as u64, false);
-    let length_field_ptr = self.builder.build_struct_gep(struct_type, array_struct_alloca, 0, "arr_len").unwrap();
+    // Store pointer to length
+    let length = self.context.i64_type().const_int(array_len as u64, false);
+    let length_field_ptr = self.builder.build_struct_gep(array_struct_type, array_struct_alloca, 0, "arr_len_ptr").unwrap();
     self.builder.build_store(length_field_ptr, length).unwrap();
 
-    let array_field_ptr = self.builder.build_struct_gep(struct_type, array_struct_alloca, 1, "arr_ptr").unwrap();
-    self.builder.build_store(array_field_ptr, arr_alloca).unwrap();
+    // Store pointer to array
+    let array_field_ptr = self.builder.build_struct_gep(array_struct_type, array_struct_alloca, 1, "arr_data_ptr").unwrap();
+    self.builder.build_store(array_field_ptr, array_alloca).unwrap();
 
-    return Ok((arr_alloca, array.get_type(), array_struct_alloca.as_basic_value_enum()));
+    return Ok((array_alloca, final_array_type, array_struct_alloca.as_basic_value_enum()));
   }
 
   fn visit(&mut self, expr: &Expression, block: BasicBlock<'ctx>) -> Result<BasicValueEnum<'ctx>, Error> {
