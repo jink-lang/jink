@@ -18,6 +18,22 @@ use super::parser::Namespace;
 
 struct Scope<'ctx> {
   symbols: IndexMap<String, (Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>)>,
+  /// Table of struct and enum types
+  struct_enum_types: IndexMap<
+    String,                // Struct type name
+    Vec<(                  // Struct fields
+      String,              // Field name
+      BasicTypeEnum<'ctx>, // Field type
+      Option<String>       // Struct type name if field is a struct
+    )>
+  >,
+  /// Map known struct variables to their corresponding struct type names
+  struct_map: IndexMap<String, String>,
+  /// Map known enum variables to their enum type names
+  enum_map: IndexMap<
+    String,                // Enum type name
+    String                 // Enum variants
+  >,
   is_function: bool,
 }
 
@@ -48,22 +64,6 @@ pub struct CodeGen<'ctx> {
   functions: IndexMap<String, FunctionCtx<'ctx>>,
   /// Stack of symbol tables
   symbol_table_stack: Vec<Scope<'ctx>>,
-  /// Table of struct types
-  struct_table: IndexMap<
-    String,                // Struct type name
-    Vec<(                  // Struct fields
-      String,              // Field name
-      BasicTypeEnum<'ctx>, // Field type
-      Option<String>       // Struct type name if field is a struct
-    )>
-  >,
-  /// Stack of variables known to be structs and their corresponding struct type names
-  struct_stack: IndexMap<String, String>,
-  /// We reuse the struct table for enums, but map variables to their enum type names with this
-  enum_table: IndexMap<
-    String,                // Enum type name
-    String                 // Enum variants
-  >,
   _type_tags: IndexMap<String, u64>,
   execution_engine: ExecutionEngine<'ctx>
 }
@@ -86,9 +86,6 @@ impl<'ctx> CodeGen<'ctx> {
       builder: context.create_builder(),
       functions: IndexMap::new(),
       symbol_table_stack: Vec::new(),
-      struct_table: IndexMap::new(),
-      struct_stack: IndexMap::new(),
-      enum_table: IndexMap::new(),
       _type_tags: Self::map_types(),
       execution_engine
     };
@@ -127,7 +124,13 @@ impl<'ctx> CodeGen<'ctx> {
   // }
 
   pub fn enter_scope(&mut self, is_function: bool) {
-    self.symbol_table_stack.push(Scope { symbols: IndexMap::new(), is_function });
+    self.symbol_table_stack.push(Scope {
+      symbols: IndexMap::new(),
+      struct_enum_types: IndexMap::new(),
+      struct_map: IndexMap::new(),
+      enum_map: IndexMap::new(),
+      is_function,
+    });
   }
 
   pub fn exit_scope(&mut self) {
@@ -151,7 +154,8 @@ impl<'ctx> CodeGen<'ctx> {
 
   /// Get symbol from symbol table stack
   /// 
-  /// Returns Result->Option of symbol name, instruction pointer, value and whether we left a function scope to obtain it 
+  /// Returns Result->Option of symbol name, instruction pointer, value and whether we left a function scope to obtain it
+  /// 
   /// If the instruction pointer is None the symbol is a constant value
   pub fn get_symbol(&self, name: &str) -> Result<Option<(String, Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool)>, Error> {
     let mut exited_function = false;
@@ -172,7 +176,69 @@ impl<'ctx> CodeGen<'ctx> {
     for (name, (inst, typ, value)) in self.symbol_table_stack.last().unwrap().symbols.iter() {
       symbols.insert(name.clone(), (inst.clone(), typ.clone(), value.clone(), false));
     }
+    // Add structs/enums to emerging in-scope symbols
+    for (name, fields) in self.symbol_table_stack.last().unwrap().struct_enum_types.iter() {
+      let mut field_names = vec![];
+      for (field_name, _, _) in fields.iter() {
+        field_names.push(field_name.clone());
+      }
+      symbols.insert(name.clone(), (None, self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(), self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum(), false));
+    }
     return symbols;
+  }
+
+  fn set_struct(&mut self, name: String, fields: Vec<(String, BasicTypeEnum<'ctx>, Option<String>)>) {
+    if let Some(scope) = self.symbol_table_stack.last_mut() {
+      scope.struct_enum_types.insert(name.clone(), fields);
+    } else {
+      panic!("Unexpected compilation error, set struct type without a scope");
+    }
+  }
+
+  /// Get struct type from symbol table stack
+  /// 
+  /// Returns Result->Option of struct fields: name, type and other struct type name if any
+  fn get_struct(&self, name: &str) -> Option<&Vec<(String, BasicTypeEnum<'ctx>, Option<String>)>> {
+    for scope in self.symbol_table_stack.iter().rev() {
+      if let Some(fields) = scope.struct_enum_types.get(name) {
+        return Some(fields);
+      }
+    }
+    return None;
+  }
+
+  fn set_struct_mapping(&mut self, name: String, struct_name: String) {
+    if let Some(scope) = self.symbol_table_stack.last_mut() {
+      scope.struct_map.insert(name.clone(), struct_name.clone());
+    } else {
+      panic!("Unexpected compilation error, set struct map without a scope");
+    }
+  }
+
+  fn get_struct_mapping(&self, name: &str) -> Option<&String> {
+    for scope in self.symbol_table_stack.iter().rev() {
+      if let Some(struct_name) = scope.struct_map.get(name) {
+        return Some(struct_name);
+      }
+    }
+    return None;
+  }
+
+  fn set_enum_mapping(&mut self, name: String, enum_name: String) {
+    if let Some(scope) = self.symbol_table_stack.last_mut() {
+      scope.enum_map.insert(name.clone(), enum_name.clone());
+    } else {
+      panic!("Unexpected compilation error, set enum map without a scope");
+    }
+  }
+
+  fn get_enum_mapping(&self, name: &str) -> Option<&String> {
+    for scope in self.symbol_table_stack.iter().rev() {
+      if let Some(enum_name) = scope.enum_map.get(name) {
+        return Some(enum_name);
+      }
+    }
+    return None;
   }
 
   fn get_required_function_param_count(&self, params: &[FunctionParamCtx]) -> usize {
@@ -463,7 +529,7 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Get struct information by type
     let struct_type_name = if getting_inner_parent && !passing_type_name {
-      self.struct_stack.get(&parent_name)
+      self.get_struct_mapping(&parent_name)
     } else {
       Some(&parent_name)
     };
@@ -481,7 +547,7 @@ impl<'ctx> CodeGen<'ctx> {
     // Get value of child
     // Used at final index as well as passing indexes back through recursively
     if let Expr::Literal(Literals::Identifier(Name(name))) = child.expr {
-      let struct_ref = self.struct_table.get(struct_type_name.unwrap());
+      let struct_ref = self.get_struct(struct_type_name.unwrap());
       if struct_ref.is_none() {
         return Err(Error::new(
           Error::CompilerError,
@@ -818,9 +884,9 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     self.set_symbol(name.clone(), Some(enum_ptr), enum_struct_type.as_basic_type_enum(), enum_ptr.as_basic_value_enum());
-    self.struct_stack.insert(name.clone(), format!("{}_enum", name));
-    self.struct_table.insert(format!("{}_enum", name), fields);
-    self.enum_table.insert(name.clone(), format!("{}_enum", name));
+    self.set_struct(format!("{}_enum", name), fields);
+    self.set_struct_mapping(name.clone(), format!("{}_enum", name));
+    self.set_enum_mapping(name.clone(), format!("{}_enum", name));
     return Ok(());
   }
 
@@ -886,7 +952,7 @@ impl<'ctx> CodeGen<'ctx> {
       // Save a reference to the struct
       if let Some(n) = struct_lit_name {
         // Special saving method for structs to keep track of their fields
-        if self.struct_table.contains_key(&n) {
+        if self.get_struct(&n).is_some() {
           return Err(Error::new(
             Error::CompilerError,
             None,
@@ -896,7 +962,7 @@ impl<'ctx> CodeGen<'ctx> {
             format!("Name {} already defined", n)
           ));
         } else {
-          self.struct_table.insert(n, fields);
+          self.set_struct(n, fields);
         }
       }
 
@@ -926,14 +992,15 @@ impl<'ctx> CodeGen<'ctx> {
           "bool" => return Ok((self.context.bool_type().as_basic_type_enum(), None)),
           _ => {
             // Check for enum
-            let enum_type = self.enum_table.get(&name);
-            if enum_type.is_some() {
-              return Ok((self.context.i64_type().as_basic_type_enum(), Some(enum_type.unwrap().to_string())));
-            }
+            if let Some(enum_type) = self.get_enum_mapping(&name) {
+              return Ok((self.context.i64_type().as_basic_type_enum(), Some(enum_type.to_string())));
 
             // Check for type alias
-            let struct_type = self.struct_table.get(&name);
-            if struct_type.is_none() {
+            } else if self.get_struct(&name).is_some() {
+              let struct_type = self.context.get_struct_type(&name);
+              return Ok((struct_type.unwrap().as_basic_type_enum(), Some(name)));
+
+            } else {
               return Err(Error::new(
                 Error::CompilerError,
                 None,
@@ -942,9 +1009,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Some(0),
                 format!("Invalid struct field type {}", name)
               ));
-            } else {
-              let struct_type = self.context.get_struct_type(&name);
-              return Ok((struct_type.unwrap().as_basic_type_enum(), Some(name)));
             }
           }
         }
@@ -963,7 +1027,7 @@ impl<'ctx> CodeGen<'ctx> {
   // Name of type struct; name of variable; fields
   fn build_initialize_struct(&mut self, struct_name: String, var_name: String, fields: Vec<Literals>, block: BasicBlock<'ctx>) -> Result<PointerValue<'ctx>, Error> {
     let struct_type = self.context.get_struct_type(&struct_name).unwrap();
-    let field_types = self.struct_table.get(&struct_name)
+    let field_types = self.get_struct(&struct_name)
       .ok_or_else(|| Error::new(
         Error::CompilerError,
         None,
@@ -998,8 +1062,8 @@ impl<'ctx> CodeGen<'ctx> {
 
         // Ensure type consistency
         if field_val_type.is_pointer_type() {
-          // Check struct table for ptr name
-          let struct_ref = self.struct_table.get(&struct_name);
+          // Check structs for ptr name
+          let struct_ref = self.get_struct(&struct_name);
           if struct_ref.is_some() {
             field_val_type = self.context.get_struct_type(&struct_name).unwrap().as_basic_type_enum();
 
@@ -1043,7 +1107,7 @@ impl<'ctx> CodeGen<'ctx> {
       }
     }
 
-    self.struct_stack.insert(var_name.clone(), struct_name.clone());
+    self.set_struct_mapping(var_name.clone(), struct_name.clone());
     return Ok(struct_ptr);
   }
 
@@ -1438,6 +1502,10 @@ impl<'ctx> CodeGen<'ctx> {
       }
     }
 
+    // Enter the function scope
+    // This is up here in case we encounter a struct parameter and need to create local mappings
+    self.enter_scope(true);
+
     for (i, param) in params.clone().unwrap().iter().enumerate() {
       let (typ, _, name, default_value_expr, is_spread) = match param.clone().expr {
         Expr::FunctionParam(ty, is_const, name, default_val, spread) => {
@@ -1505,30 +1573,30 @@ impl<'ctx> CodeGen<'ctx> {
             // Check for defined type (TODO: add aliases)
 
             // Check for enum definition
-            let enum_type = self.enum_table.get(&typ.0);
-            if enum_type.is_some() {
+            if self.get_enum_mapping(&typ.0).is_some() {
               let t = self.context.i64_type();
               parameters.push(t.into());
+              // Map parameter name to its enum type within the function scope
+              self.set_enum_mapping(name.clone(), typ.0.clone());
               t.into()
 
             // Check for struct definition
+            } else if self.get_struct(&typ.0).is_some() {
+              let t = self.context.ptr_type(AddressSpace::default());
+              parameters.push(t.into());
+              // Map parameter name to its struct type within the function scope
+              self.set_struct_mapping(name.clone(), typ.0.clone());
+              t.into()
+
             } else {
-              let struct_ref = self.struct_table.get(&typ.0);
-              if struct_ref.is_none() {
-                return Err(Error::new(
-                  Error::NameError,
-                  None,
-                  &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-                  param.first_pos,
-                  Some(typ.0.len() as i32),
-                  format!("Type {} not found", typ.0)
-                ));
-              } else {
-                let struct_type = self.context.get_struct_type(&typ.0).unwrap();
-                let t = struct_type.as_basic_type_enum();
-                parameters.push(t.into());
-                t.into()
-              }
+              return Err(Error::new(
+                Error::NameError,
+                None,
+                &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+                param.first_pos,
+                Some(typ.0.len() as i32),
+                format!("Type {} not found", typ.0)
+              ));
             }
           },
         };
@@ -1561,10 +1629,10 @@ impl<'ctx> CodeGen<'ctx> {
       "string" => self.context.ptr_type(AddressSpace::default()).fn_type(&parameters, variadic),
       _ => {
         // Check for enum
-        let enum_type = self.enum_table.get(&returns);
-        if enum_type.is_some() {
+        if self.get_enum_mapping(&returns).is_some() {
           self.context.i64_type().fn_type(&parameters, variadic)
-        } else if self.struct_table.contains_key(&returns) {
+        // Check for struct
+        } else if self.get_struct_mapping(&returns).is_some() {
           self.context.get_struct_type(&returns).unwrap().fn_type(&parameters, variadic)
         } else {
           return Err(Error::new(
@@ -1592,9 +1660,6 @@ impl<'ctx> CodeGen<'ctx> {
     // Create a new block for function body
     let mut func_block = self.context.append_basic_block(function, format!("{}-entry", name.0).as_str());
     self.builder.position_at_end(func_block);
-
-    // Enter the function scope
-    self.enter_scope(true);
 
     // Variadic call will pass hidden count as first argument for va_list
     let mut hidden_argument_offset = 0;
@@ -1690,10 +1755,13 @@ impl<'ctx> CodeGen<'ctx> {
       // Set parameter name
       llvm_param_val.set_name(&param_info.name);
 
-      // TODO: Handle when type is unknown at compile time
       let jtype = param_info.jtype.clone();
-      if matches!(jtype, JType::Unknown) {
-        todo!("Handle unknown JType for parameter {} during code generation", param_info.name);
+      match jtype {
+        // TODO: Handle when type is unknown at compile time
+        JType::Unknown => {
+          todo!("Handle unknown JType for parameter {} during code generation", param_info.name);
+        },
+        _ => {}
       }
 
       let alloca = self.builder.build_alloca(llvm_param_val.get_type(), &param_info.name).unwrap();
