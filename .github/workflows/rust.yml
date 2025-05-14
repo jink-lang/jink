@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  GH_WORKFLOW: true
 
 jobs:
   build:
@@ -17,6 +18,20 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
+
+    - name: Get clang-18
+      run: |
+        apt-get update
+        wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+        chmod +x llvm.sh
+        ./llvm.sh 18
+
+        if command -v clang-18 &> /dev/null; then
+          echo "clang-18 installed successfully"
+        else
+          echo "clang-18 installation failed"
+          exit 1
+        fi
 
     - name: Set rustup version
       run: rustup default stable

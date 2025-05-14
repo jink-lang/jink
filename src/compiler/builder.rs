@@ -2682,6 +2682,7 @@ impl<'ctx> CodeGen<'ctx> {
 // Tests
 #[cfg(test)]
 mod tests {
+  use core::panic;
   use std::fs;
   use std::fs::File;
   use std::io::Write;
@@ -2692,43 +2693,66 @@ mod tests {
   // Compile the IR and assert the output matches
   fn build_and_assert(ir: LLVMString, output: &str) {
     let test_count = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let llvm_ir_name = format!("test{}.ll", test_count);
-    let executable_name = format!("test{}", test_count);
+    let llvm_ir_file = format!("test{}.ll", test_count);
+    let executable_file = if cfg!(target_os = "windows") {
+      format!("test{}.exe", test_count)
+    } else {
+      format!("test{}", test_count)
+    };
 
     // Generate LLVM IR file
-    let mut file = File::create(format!("./{}", &llvm_ir_name)).unwrap();
+    let mut file = File::create(format!("./{}", &llvm_ir_file)).unwrap();
     file.write_all(ir.to_bytes()).unwrap();
 
-    // Compile and execute the binary
-    #[cfg(target_os = "windows")]
-    std::process::Command::new("clang")
-      .arg("-o")
-      .arg(format!("{}.exe", &executable_name)) // `test1.exe`
-      .arg(&llvm_ir_name)                      // `test1.ll`
-      .output()
-      .expect("Failed to compile LLVM IR");
-    #[cfg(not(target_os = "windows"))]
-    std::process::Command::new("clang")
-      .arg("-o")
-      .arg(&executable_name) // `test1`
-      .arg(&llvm_ir_name)   // `test1.ll`
-      .output()
-      .expect("Failed to compile LLVM IR");
-    #[cfg(target_os = "windows")]
-    let test = std::process::Command::new(format!("./{}.exe", &executable_name))
-      .output()
-      .expect("Failed to run executable");
-    #[cfg(not(target_os = "windows"))]
-    let test = std::process::Command::new(format!("./{}", &executable_name))
+    // Compile the executable
+    let clang_output = if cfg!(target_os = "windows") {
+      std::process::Command::new("clang")
+        .arg("-o")
+        .arg(&executable_file) // `test1.exe`
+        .arg(&llvm_ir_file)                       // `test1.ll`
+        .output()
+        .expect(format!("Failed to execute clang for file {}", llvm_ir_file).as_str())
+    } else {
+      // If running in GitHub build tests workflow use clang-18
+      let clang_cmd = if std::env::var("GH_WORKFLOW").is_ok() {
+        std::process::Command::new("clang-18")
+        .arg("--version")
+        .output()
+        .expect("clang-18 is not available in the workflow environment");
+
+        "clang-18"
+      } else {
+        "clang"
+      };
+
+      std::process::Command::new(clang_cmd)
+        .arg("-o")
+        .arg(&executable_file) // `test1`
+        .arg("-no-pie")
+        .arg(&llvm_ir_file)    // `test1.ll`
+        .output()
+        .expect(format!("Failed to execute clang for file {}", llvm_ir_file).as_str())
+    };
+
+    // Check for clang errors
+    if !clang_output.status.success() {
+      panic!(
+        "clang compilation failed for '{}' (exit code: {:?}):\nStdout: {}\nStderr: {}",
+        llvm_ir_file,
+        clang_output.status.code(),
+        String::from_utf8_lossy(&clang_output.stdout),
+        String::from_utf8_lossy(&clang_output.stderr)
+      );
+    }
+
+    // Run the executable
+    let test = std::process::Command::new(&executable_file)
       .output()
       .expect("Failed to run executable");
 
     // Delete the test execution files
-    fs::remove_file(llvm_ir_name).unwrap();
-    #[cfg(target_os = "windows")]
-    fs::remove_file(format!("{}.exe", executable_name)).unwrap();
-    #[cfg(not(target_os = "windows"))]
-    fs::remove_file(executable_name).unwrap();
+    fs::remove_file(llvm_ir_file).unwrap();
+    fs::remove_file(executable_file).unwrap();
 
     // Assert the output matches
     if !test.status.success() && String::from_utf8_lossy(&test.stderr) != "" {
