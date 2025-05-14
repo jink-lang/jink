@@ -17,7 +17,7 @@ jobs:
       image: ghcr.io/imposd/llvm-ubuntu:latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Get clang-18
       run: |
@@ -35,7 +35,7 @@ jobs:
 
     - name: Set rustup version
       run: rustup default stable
-    
+
     - name: Build
       run: cargo build --verbose
 

@@ -2693,15 +2693,15 @@ mod tests {
   // Compile the IR and assert the output matches
   fn build_and_assert(ir: LLVMString, output: &str) {
     let test_count = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let llvm_ir_file = format!("test{}.ll", test_count);
+    let llvm_ir_file = format!("./test{}.ll", test_count);
     let executable_file = if cfg!(target_os = "windows") {
-      format!("test{}.exe", test_count)
+      format!("./test{}.exe", test_count)
     } else {
-      format!("test{}", test_count)
+      format!("./test{}", test_count)
     };
 
     // Generate LLVM IR file
-    let mut file = File::create(format!("./{}", &llvm_ir_file)).unwrap();
+    let mut file = File::create(&llvm_ir_file).unwrap();
     file.write_all(ir.to_bytes()).unwrap();
 
     // Compile the executable
@@ -2709,7 +2709,7 @@ mod tests {
       std::process::Command::new("clang")
         .arg("-o")
         .arg(&executable_file) // `test1.exe`
-        .arg(&llvm_ir_file)                       // `test1.ll`
+        .arg(&llvm_ir_file)    // `test1.ll`
         .output()
         .expect(format!("Failed to execute clang for file {}", llvm_ir_file).as_str())
     } else {
