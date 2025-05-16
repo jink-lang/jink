@@ -1678,8 +1678,7 @@ impl<'ctx> CodeGen<'ctx> {
         variadic_param_type.expect("Variadic parameter missing type")
       )?;
 
-      // Allocate for array
-      // TODO: build_array_alloca or fallback to malloc for dynamic sized arrays somehow?
+      // Allocate for array to store variadic arguments
       let array_ptr = self.builder.build_array_alloca(
         var_llvm_type,
         var_arg_count,
@@ -1688,14 +1687,44 @@ impl<'ctx> CodeGen<'ctx> {
       var_array_ptr = Some(array_ptr);
       var_array_type = Some(var_llvm_type);
 
-      // Allocate and init va_list
-      let va_list_type = self.context.ptr_type(AddressSpace::default());
-      let va_list = self.builder.build_alloca(va_list_type, "va_list").unwrap();
+      // Define the target-specific va_list type
+      // In the x86-64 System V ABI, va_list should be:
+      // [1 x struct {
+      //   gp_offset:         i32, -- offset to next general-purpose register
+      //   fp_offset:         i32, -- offset to next floating-point register
+      //   overflow_arg_area: ptr, -- ptr to C stack area for args passed
+      //   reg_save_area:     ptr  -- ptr to area where registers are saved
+      // }]
+      // In Windows x64, va_list is char* -- pointer to the first argument
 
-      let va_start_fn = self.module.get_function("llvm.va_start.p0")
-        .or_else(|| self.module.get_function("llvm.va_start")) // Fallback for LLVM versions
-        .expect("llvm.va_start function not found");
-      self.builder.build_call(va_start_fn, &[va_list.into()], "").unwrap();
+      let ptr_type = self.context.ptr_type(AddressSpace::default());
+
+      #[cfg(not(target_os = "windows"))]
+      let va_list_type = {
+        let i32_type = self.context.i32_type();
+        let va_list_struct_fields: [BasicTypeEnum<'ctx>; 4] = [
+          i32_type.into(), // gp_offset
+          i32_type.into(), // fp_offset
+          ptr_type.into(), // overflow_arg_area
+          ptr_type.into(), // reg_save_area
+        ];
+        let va_list_struct_type = self.context.struct_type(&va_list_struct_fields, false);
+        // va_list = array of the single struct
+        va_list_struct_type.array_type(1)
+      };
+      #[cfg(target_os = "windows")]
+      let va_list_type = ptr_type;
+
+      // Allocate for va_list object itself
+      let va_list_ptr = self.builder.build_alloca(va_list_type, "va_list_storage").unwrap();
+
+      // llvm.va_start
+      let va_start_fn_name = "llvm.va_start";
+      let va_start_fn = self.module.get_function(va_start_fn_name).unwrap_or_else(|| {
+        let fn_type = self.context.void_type().fn_type(&[ptr_type.into()], false);
+        self.module.add_function(va_start_fn_name, fn_type, None)
+      });
+      self.builder.build_call(va_start_fn, &[va_list_ptr.into()], "call_va_start").unwrap();
 
       // Loop and fill array using va_arg
       let loop_block = self.context.append_basic_block(function, "va_arg_loop");
@@ -1716,7 +1745,7 @@ impl<'ctx> CodeGen<'ctx> {
       {
         // Build va_arg
         // va_list pointer and the type to extract
-        let arg_val = self.builder.build_va_arg(va_list, var_llvm_type, "va_arg_val").unwrap();
+        let arg_val = self.builder.build_va_arg(va_list_ptr, var_llvm_type, "va_arg_val").unwrap();
 
         // Get pointer to the array element
         let element_ptr = unsafe {
@@ -1734,11 +1763,13 @@ impl<'ctx> CodeGen<'ctx> {
       // Position at the end of the loop
       self.builder.position_at_end(after_loop_block);
 
-      // Call va_end
-      let va_end_fn = self.module.get_function("llvm.va_end.p0")
-        .or_else(|| self.module.get_function("llvm.va_end")) // Fallback for LLVM versions
-        .expect("llvm.va_end function not found");
-      self.builder.build_call(va_end_fn, &[va_list.into()], "").unwrap();
+      // llvm.va_end
+      let va_end_fn_name = "llvm.va_end";
+      let va_end_fn = self.module.get_function(va_end_fn_name).unwrap_or_else(|| {
+        let fn_type = self.context.void_type().fn_type(&[ptr_type.into()], false);
+        self.module.add_function(va_end_fn_name, fn_type, None)
+      });
+      self.builder.build_call(va_end_fn, &[va_list_ptr.into()], "call_va_end").unwrap();
 
       func_block = after_loop_block;
     }
