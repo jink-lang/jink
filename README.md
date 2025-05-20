@@ -42,7 +42,7 @@ If you are interested in and new to contributing to the project, TODOs here mark
 - [x] Build nested structs
 - [x] Build struct indexing
 - [x] Build nested struct indexing
-- [ ] Build break and continue in loops
+- [x] Build break and continue in loops
 - [ ] Build classes
 - [ ] Build class inheritance
 - [x] Build enums

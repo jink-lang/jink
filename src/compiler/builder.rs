@@ -623,7 +623,7 @@ impl<'ctx> CodeGen<'ctx> {
     }
   }
 
-  fn build_loop_body(&mut self, typ: &str, body: Option<Vec<Expression>>, var: Option<PointerValue<'ctx>>, current_value: Option<IntValue>, body_block: BasicBlock<'ctx>, cond_block: BasicBlock<'ctx>, end_block: BasicBlock<'ctx>) -> Result<(), Error> {
+  fn build_loop_body(&mut self, body: Option<Vec<Expression>>, body_block: BasicBlock<'ctx>, continue_block_target: BasicBlock<'ctx>, break_block_target: BasicBlock<'ctx>) -> Result<BasicBlock<'ctx>, Error> {
     self.enter_scope(false);
     let mut current_block = body_block;
 
@@ -632,7 +632,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         if let Expr::Conditional(typ, expr, body, ebody) = expr.expr.clone() {
           let merge_block = self.context.append_basic_block(body_block.get_parent().unwrap(), "merge");
-          (_, _, current_block) = self.build_if(true, typ, expr, body, ebody, body_block.get_parent().unwrap(), body_block, merge_block, Some(cond_block), Some(end_block))?;
+          (_, _, current_block) = self.build_if(true, typ, expr, body, ebody, body_block.get_parent().unwrap(), body_block, merge_block, Some(continue_block_target), Some(break_block_target))?;
 
         } else if let Expr::Return(ret) = expr.expr.clone() {
           let val = self.visit(&ret, current_block)?;
@@ -652,18 +652,12 @@ impl<'ctx> CodeGen<'ctx> {
           current_block = self.build_while_loop(expr, body, body_block.get_parent().unwrap(), current_block)?;
 
         } else if let Expr::BreakLoop = expr.expr.clone() {
-          self.builder.build_unconditional_branch(end_block).unwrap();
-          return Ok(());
+          self.builder.build_unconditional_branch(break_block_target).unwrap();
+          return Ok(current_block);
 
         } else if let Expr::ContinueLoop = expr.expr.clone() {
-          // Increment index value before branching back
-          if typ == "for" {
-            let current_val = self.builder.build_load(self.context.i64_type(), var.unwrap(), "current_loop_idx_cont").unwrap().into_int_value();
-            let next_val = self.builder.build_int_add(current_val, self.context.i64_type().const_int(1, false), "next_loop_idx_cont").unwrap();
-            self.builder.build_store(var.unwrap(), next_val).unwrap();
-          }
-          self.builder.build_unconditional_branch(cond_block).unwrap();
-          return Ok(());
+          self.builder.build_unconditional_branch(continue_block_target).unwrap();
+          return Ok(current_block);
 
         } else {
           self.visit(&expr, current_block)?;
@@ -671,22 +665,15 @@ impl<'ctx> CodeGen<'ctx> {
       }
     }
 
-    if typ == "for" {
-      // If we did not leave the body block, increment the iterator and branch back to the conditional block
-      // if self.builder.get_insert_block().unwrap() == body_block || conditional_block.is_some() {
-      let next_value = self.builder.build_int_add(current_value.unwrap(), self.context.i64_type().const_int(1, false), "next_value").unwrap();
-      self.builder.build_store(var.unwrap(), next_value).unwrap();
-      // }
-    }
-
     // Exit the loop body scope
     self.exit_scope();
-    return Ok(());
+    return Ok(current_block);
   }
 
   fn build_for_loop(&mut self, value: Box<Expression>, expr: Box<Expression>, body: Option<Vec<Expression>>, function: FunctionValue<'ctx>, block: BasicBlock<'ctx>) -> Result<BasicBlock<'ctx>, Error> {
     let cond_block = self.context.append_basic_block(function, "loop_cond_block");
     let body_block = self.context.append_basic_block(function, "loop_body");
+    let increment_block = self.context.append_basic_block(function, "loop_var_increment");
     let end_block = self.context.append_basic_block(function, "loop_end");
 
     self.builder.position_at_end(block);
@@ -790,24 +777,29 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Initialize the conditional block to ascertain whether the loop should continue
     self.builder.build_unconditional_branch(cond_block).unwrap();
+
+    // Build the condition block
     self.builder.position_at_end(cond_block);
-
-    // Load the loop index in the conditional block
     let loop_index_val = self.builder.build_load(i64_type, loop_index_ptr, &loop_index_name).unwrap().into_int_value();
-
-    // Build the conditional branching
     let cond = self.builder.build_int_compare(inkwell::IntPredicate::ULT, loop_index_val, end_condition_val, "loop_cond").unwrap();
     self.builder.build_conditional_branch(cond, body_block, end_block).unwrap();
 
     // Build the loop body
     self.builder.position_at_end(body_block);
     self.set_symbol(loop_index_name.clone(), Some(loop_index_ptr), i64_type.as_basic_type_enum(), loop_index_val.as_basic_value_enum());
-    self.build_loop_body("for", body, Some(loop_index_ptr), Some(loop_index_val), body_block, cond_block, end_block)?;
-
-    // If we terminated in a block that is not the end block, branch back to the conditional block to be sure if the loop should continue
-    if self.builder.get_insert_block().unwrap() != end_block {
-      self.builder.build_unconditional_branch(cond_block).unwrap();
+    let last_body_block = self.build_loop_body(body, body_block, increment_block, end_block)?;
+    if last_body_block.get_terminator().is_none() {
+      self.builder.position_at_end(last_body_block);
+      self.builder.build_unconditional_branch(increment_block).unwrap();
     }
+
+    // Build the increment block
+    self.builder.position_at_end(increment_block);
+    let current_val = self.builder.build_load(self.context.i64_type(), loop_index_ptr, "current_loop_idx").unwrap().into_int_value();
+    let next_val = self.builder.build_int_add(current_val, self.context.i64_type().const_int(1, false), "next_loop_idx").unwrap();
+    self.builder.build_store(loop_index_ptr, next_val).unwrap();
+    // After increment go to the condition block
+    self.builder.build_unconditional_branch(cond_block).unwrap(); 
 
     self.builder.position_at_end(end_block);
     return Ok(end_block);
@@ -839,10 +831,9 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Build the loop body
     self.builder.position_at_end(body_block);
-    self.build_loop_body("while", body, None, None, body_block, cond_block, end_block)?;
-
-    // If we terminated in a block that is not the end block, branch back to the conditional block to be sure if the loop should continue
-    if self.builder.get_insert_block().unwrap() != end_block {
+    let last_body_block = self.build_loop_body(body, body_block, cond_block, end_block)?;
+    if last_body_block.get_terminator().is_none() {
+      self.builder.position_at_end(last_body_block);
       self.builder.build_unconditional_branch(cond_block).unwrap();
     }
 
@@ -1112,7 +1103,7 @@ impl<'ctx> CodeGen<'ctx> {
   }
 
   // Builder for conditional expressions
-  fn build_if(&mut self, top_level: bool, _typ: Type, expr: Option<Box<Expression>>, body: Box<Vec<Expression>>, else_body: Option<Box<Vec<Expression>>>, function: FunctionValue<'ctx>, block: BasicBlock<'ctx>, top_level_merge_block: BasicBlock<'ctx>, loop_cond_block: Option<BasicBlock<'ctx>>, exit_loop_block: Option<BasicBlock<'ctx>>) -> Result<(BasicBlock<'ctx>, BasicBlock<'ctx>, BasicBlock<'ctx>), Error> {
+  fn build_if(&mut self, top_level: bool, _typ: Type, expr: Option<Box<Expression>>, body: Box<Vec<Expression>>, else_body: Option<Box<Vec<Expression>>>, function: FunctionValue<'ctx>, block: BasicBlock<'ctx>, top_level_merge_block: BasicBlock<'ctx>, loop_continue_target: Option<BasicBlock<'ctx>>, loop_break_target: Option<BasicBlock<'ctx>>) -> Result<(BasicBlock<'ctx>, BasicBlock<'ctx>, BasicBlock<'ctx>), Error> {
     let mut cond = self.visit(&expr.unwrap(), block)?;
 
     // If the condition is a number, condition on the basis of it not being 0
@@ -1141,7 +1132,7 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Build the "then" block and collect the resulting values
     self.enter_scope(false);
-    let then_out = self.build_conditional_block(then_block, Some(body.clone()), function, top_level_merge_block, loop_cond_block, exit_loop_block)?;
+    let then_out = self.build_conditional_block(then_block, Some(body.clone()), function, top_level_merge_block, loop_continue_target, loop_break_target)?;
     let then_vals = self.get_all_cur_symbols();
     self.exit_scope();
     // Merge back if the block wasn't already terminated
@@ -1151,7 +1142,7 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Build the "else" block and collect the resulting values
     self.enter_scope(false);
-    let else_out = self.build_conditional_block(else_block, else_body, function, top_level_merge_block, loop_cond_block, exit_loop_block)?;
+    let else_out = self.build_conditional_block(else_block, else_body, function, top_level_merge_block, loop_continue_target, loop_break_target)?;
     let else_vals = self.get_all_cur_symbols();
     self.exit_scope();
     // Merge back if the block wasn't already terminated
@@ -1257,7 +1248,7 @@ impl<'ctx> CodeGen<'ctx> {
     }
   }
 
-  fn build_conditional_block(&mut self, block: BasicBlock<'ctx>, body: Option<Box<Vec<Expression>>>, function: FunctionValue<'ctx>, top_level_merge_block: BasicBlock<'ctx>, loop_cond_block: Option<BasicBlock<'ctx>>, exit_loop_block: Option<BasicBlock<'ctx>>) -> Result<BasicBlock<'ctx>, Error> {
+  fn build_conditional_block(&mut self, block: BasicBlock<'ctx>, body: Option<Box<Vec<Expression>>>, function: FunctionValue<'ctx>, top_level_merge_block: BasicBlock<'ctx>, loop_continue_target: Option<BasicBlock<'ctx>>, loop_break_target: Option<BasicBlock<'ctx>>) -> Result<BasicBlock<'ctx>, Error> {
     self.builder.position_at_end(block);
     let mut current_block = block;
 
@@ -1267,10 +1258,10 @@ impl<'ctx> CodeGen<'ctx> {
           Expr::Conditional(typ, exp, body, ebody) => {
             // This is the end, build the body
             if typ.0 == "else" {
-              current_block = self.build_conditional_block(current_block, Some(body), function, top_level_merge_block, loop_cond_block, exit_loop_block)?;
+              current_block = self.build_conditional_block(current_block, Some(body), function, top_level_merge_block, loop_continue_target, loop_break_target)?;
             // This is a new branch, return to the top
             } else {
-              (_, _, current_block) = self.build_if(false, typ, exp, body, ebody, function, current_block, top_level_merge_block, loop_cond_block, exit_loop_block)?;
+              (_, _, current_block) = self.build_if(false, typ, exp, body, ebody, function, current_block, top_level_merge_block, loop_continue_target, loop_continue_target)?;
             }
           },
           Expr::Assignment(_, _, _) => {
@@ -1292,36 +1283,10 @@ impl<'ctx> CodeGen<'ctx> {
             current_block = self.build_while_loop(expr, body, function, current_block)?;
           },
           Expr::BreakLoop => {
-            if exit_loop_block.is_none() {
-              return Err(Error::new(
-                Error::CompilerError,
-                None,
-                &"",
-                Some(0),
-                Some(0),
-                "Cannot break outside of loop".to_string()
-              ));
-            }
-
-            // TODO: Break out of loop
-            // We still need to build else block(s) below so we can't return here
-
+            self.builder.build_unconditional_branch(loop_break_target.unwrap()).unwrap();
           },
           Expr::ContinueLoop => {
-            if exit_loop_block.is_none() {
-              return Err(Error::new(
-                Error::CompilerError,
-                None,
-                &"",
-                Some(0),
-                Some(0),
-                "Cannot continue outside of loop".to_string()
-              ));
-            }
-
-            // TODO: Continue loop (branch back to loop condition block)
-            // We still need to build else block(s) below so we can't return here
-
+            self.builder.build_unconditional_branch(loop_continue_target.unwrap()).unwrap();
           }
           _ => {
             self.visit(expr, current_block)?;
