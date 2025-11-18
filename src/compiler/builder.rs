@@ -171,19 +171,32 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(None);
   }
 
-  fn get_all_cur_symbols(&self) -> IndexMap<String, (Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool)> {
+  fn get_all_cur_symbols(&self, get_all_scopes: bool) -> IndexMap<String, (Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool)> {
     let mut symbols = IndexMap::new();
-    for (name, (inst, typ, value)) in self.symbol_table_stack.last().unwrap().symbols.iter() {
-      symbols.insert(name.clone(), (inst.clone(), typ.clone(), value.clone(), false));
-    }
-    // Add structs/enums to emerging in-scope symbols
-    for (name, fields) in self.symbol_table_stack.last().unwrap().struct_enum_types.iter() {
-      let mut field_names = vec![];
-      for (field_name, _, _) in fields.iter() {
-        field_names.push(field_name.clone());
+    if self.symbol_table_stack.is_empty() { return symbols; }
+
+    let scopes_to_use = if get_all_scopes {
+      self.symbol_table_stack.iter().rev()
+    } else {
+      std::slice::from_ref(self.symbol_table_stack.last().unwrap()).iter().rev()
+    };
+
+    for scope in scopes_to_use {
+      // Add all symbols to the emerging in-scope symbols
+      for (name, (inst, typ, value)) in scope.symbols.iter() {
+        symbols.insert(name.clone(), (inst.clone(), typ.clone(), value.clone(), false));
       }
-      symbols.insert(name.clone(), (None, self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(), self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum(), false));
+
+      // Add structs/enums to emerging in-scope symbols
+      for (name, fields) in scope.struct_enum_types.iter() {
+        let mut field_names = vec![];
+        for (field_name, _, _) in fields.iter() {
+          field_names.push(field_name.clone());
+        }
+        symbols.insert(name.clone(), (None, self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(), self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum(), false));
+      }
     }
+
     return symbols;
   }
 
@@ -1116,11 +1129,8 @@ impl<'ctx> CodeGen<'ctx> {
 
     // If the condition is a pointer, condition on the basis of it not being null
     } else if let BasicValueEnum::PointerValue(p) = cond {
-      if p.is_null() {
-        cond = self.context.bool_type().const_int(0, false).as_basic_value_enum();
-      } else {
-        cond = self.context.bool_type().const_int(1, false).as_basic_value_enum();
-      }
+      let is_null = self.builder.build_is_null(p, "is_null").unwrap();
+      cond = self.builder.build_not(is_null, "ifcond").unwrap().as_basic_value_enum();
     }
 
     // Set up blocks
@@ -1133,28 +1143,31 @@ impl<'ctx> CodeGen<'ctx> {
     // Build the "then" block and collect the resulting values
     self.enter_scope(false);
     let then_out = self.build_conditional_block(then_block, Some(body.clone()), function, top_level_merge_block, loop_continue_target, loop_break_target)?;
-    let then_vals = self.get_all_cur_symbols();
+    let then_vals = self.get_all_cur_symbols(false);
     self.exit_scope();
     // Merge back if the block wasn't already terminated
-    if then_block.get_terminator().is_none() {
+    let then_branches_to_merge = then_out.get_terminator().is_none();
+    if then_branches_to_merge {
       self.builder.build_unconditional_branch(merge_block).unwrap();
     }
 
     // Build the "else" block and collect the resulting values
     self.enter_scope(false);
     let else_out = self.build_conditional_block(else_block, else_body, function, top_level_merge_block, loop_continue_target, loop_break_target)?;
-    let else_vals = self.get_all_cur_symbols();
+    let else_vals = self.get_all_cur_symbols(false);
     self.exit_scope();
     // Merge back if the block wasn't already terminated
-    if else_block.get_terminator().is_none() {
+    let else_branches_to_merge = else_out.get_terminator().is_none();
+    if else_branches_to_merge {
       self.builder.build_unconditional_branch(merge_block).unwrap();
     }
 
-    // Position the builder at the merge block
-    self.builder.position_at_end(merge_block);
-
     // Collect all keys from both then_vals and else_vals
     let all_keys: HashSet<&String> = then_vals.keys().chain(else_vals.keys()).collect();
+
+    // Pre-compute the values we need for PHI nodes before positioning at merge block
+    // This is important because we might need to load values from memory in the source blocks
+    let mut phi_nodes_to_create: Vec<(String, BasicTypeEnum<'ctx>, Vec<(BasicValueEnum<'ctx>, BasicBlock<'ctx>)>)> = Vec::new();
 
     for name in all_keys {
 
@@ -1162,14 +1175,14 @@ impl<'ctx> CodeGen<'ctx> {
       let then_val: Option<(Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool)> = then_vals.get(name)
         .cloned()
         .or_else(|| {
-        self.get_symbol(name).unwrap_or(None).map(|(_, pval, typ, val, exited_func)| {
+        self.get_symbol(name).ok().flatten().map(|(_, pval, typ, val, exited_func)| {
           (pval, typ, val, exited_func)
         })
       });
       let else_val: Option<(Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool)> = else_vals.get(name)
         .cloned()
         .or_else(|| {
-        self.get_symbol(name).unwrap_or(None).map(|(_, pval, typ, val, exited_func)| {
+        self.get_symbol(name).ok().flatten().map(|(_, pval, typ, val, exited_func)| {
           (pval, typ, val, exited_func)
         })
       });
@@ -1178,8 +1191,8 @@ impl<'ctx> CodeGen<'ctx> {
       if then_val.is_none() || else_val.is_none() { continue; }
 
       // Determine the types of the values
-      let then_type = then_val.unwrap().1;
-      let else_type = else_val.unwrap().1;
+      let then_type = then_val.as_ref().unwrap().1;
+      let else_type = else_val.as_ref().unwrap().1;
 
       // Determine the common type for the phi node
       let phi_type = if then_type.is_int_type() && else_type.is_int_type() {
@@ -1202,17 +1215,79 @@ impl<'ctx> CodeGen<'ctx> {
         }
       };
 
-      // Create the phi node with the determined type
-      let phi = self.builder.build_phi(phi_type, name).unwrap();
+      // Check if the variable was actually modified in each branch
+      let then_modified = then_vals.contains_key(name);
+      let else_modified = else_vals.contains_key(name);
 
-      // Add incoming values from both branches
-      phi.add_incoming(&[
-        (&then_val.unwrap().2, then_out),
-        (&else_val.unwrap().2, else_out),
-      ]);
+      // If neither branch modified the variable, skip PHI creation
+      if !then_modified && !else_modified {
+        continue;
+      }
+
+      let mut incoming_for_phi: Vec<(BasicValueEnum<'ctx>, BasicBlock<'ctx>)> = Vec::new();
+
+      if then_branches_to_merge {
+        let value_to_use = if then_modified {
+          // Branch modified it, use the modified value
+          then_val.as_ref().unwrap().2
+        } else {
+          // Branch didn't modify it, load the current value from memory before the terminator of then_out block
+          if let Some((ptr, typ, _, _)) = then_val.as_ref() {
+            if let Some(p) = ptr {
+              // Insert load BEFORE the terminator (branch instruction)
+              let terminator = then_out.get_terminator().unwrap();
+              self.builder.position_before(&terminator);
+              let loaded = self.builder.build_load(*typ, *p, &format!("{}_loaded_then", name)).unwrap();
+              loaded
+            } else {
+              then_val.as_ref().unwrap().2
+            }
+          } else {
+            then_val.as_ref().unwrap().2
+          }
+        };
+        incoming_for_phi.push((value_to_use, then_out));
+      }
+
+      if else_branches_to_merge {
+        let value_to_use = if else_modified {
+          // Branch modified it, use the modified value
+          else_val.as_ref().unwrap().2
+        } else {
+          // Branch didn't modify it, load the current value from memory before the terminator of else_out block
+          if let Some((ptr, typ, _, _)) = else_val.as_ref() {
+            if let Some(p) = ptr {
+              // Insert load BEFORE the terminator (branch instruction)
+              let terminator = else_out.get_terminator().unwrap();
+              self.builder.position_before(&terminator);
+              let loaded = self.builder.build_load(*typ, *p, &format!("{}_loaded_else", name)).unwrap();
+              loaded
+            } else {
+              else_val.as_ref().unwrap().2
+            }
+          } else {
+            else_val.as_ref().unwrap().2
+          }
+        };
+        incoming_for_phi.push((value_to_use, else_out));
+      }
+
+      // Only create PHI node if we have incoming values
+      if !incoming_for_phi.is_empty() {
+        phi_nodes_to_create.push((name.clone(), phi_type, incoming_for_phi));
+      }
+    }
+
+    // Now position the builder at the merge block and create all PHI nodes
+    self.builder.position_at_end(merge_block);
+
+    for (name, phi_type, incoming_for_phi) in phi_nodes_to_create {
+      let phi = self.builder.build_phi(phi_type, &name).unwrap();
+      let incoming_refs: Vec<(&dyn BasicValue<'ctx>, BasicBlock<'ctx>)> = incoming_for_phi.iter().map(|(v, b)| (v as &dyn BasicValue<'ctx>, *b)).collect();
+      phi.add_incoming(&incoming_refs);
 
       // Check if the symbol exists in the symbol table
-      if let Some(symbol) = self.get_symbol(name)? {
+      if let Some(symbol) = self.get_symbol(&name)? {
         // Update the existing variable with the new PHI value
         let (_, inst, _, _, exited_func) = symbol;
         if exited_func {
@@ -1231,7 +1306,7 @@ impl<'ctx> CodeGen<'ctx> {
         // Create a new variable and store the PHI value
         let var = self.builder.build_alloca(phi_type, &name).unwrap();
         self.builder.build_store(var, phi.as_basic_value()).unwrap();
-        self.set_symbol(name.to_string(), Some(var), phi_type, phi.as_basic_value());
+        self.set_symbol(name.to_string(), None, phi_type, phi.as_basic_value());
       }
     }
 
@@ -2838,6 +2913,22 @@ mod tests {
       }
     ",
     "01234")
+  }
+
+  #[test]
+  fn test_build_continue_break() -> Result<(), Error> {
+    run_test("
+      let i = 0;
+      while (i < 5) {
+        if (i == 2) {
+          i = i + 1;
+          continue;
+        }
+        printf(\"%d\", i);
+        i = i + 1;
+      }
+    ",
+    "0134")
   }
 
   #[test]
