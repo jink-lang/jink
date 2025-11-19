@@ -2193,7 +2193,7 @@ impl<'ctx> CodeGen<'ctx> {
           }
 
           let call = self.builder.build_call(llvm_fun, &llvm_args, &name.0).unwrap();
-          match call.try_as_basic_value().left() {
+          match call.try_as_basic_value().basic() {
             Some(val) => Ok(val),
             None => Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum()),
           }
@@ -2236,7 +2236,7 @@ impl<'ctx> CodeGen<'ctx> {
           }).collect::<Result<Vec<_>, _>>()?;
 
           let call = self.builder.build_call(llvm_function.unwrap(), &llvm_args, &name.0).unwrap();
-          return match call.try_as_basic_value().left() {
+          return match call.try_as_basic_value().basic() {
             Some(val) => Ok(val),
             None => Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum()),
           };
