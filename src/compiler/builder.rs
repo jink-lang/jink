@@ -64,22 +64,6 @@ pub struct CodeGen<'ctx> {
   functions: IndexMap<String, FunctionCtx<'ctx>>,
   /// Stack of symbol tables
   symbol_table_stack: Vec<Scope<'ctx>>,
-  /// Table of struct types
-  struct_table: IndexMap<
-    String,                // Struct type name
-    Vec<(                  // Struct fields
-      String,              // Field name
-      BasicTypeEnum<'ctx>, // Field type
-      Option<String>       // Struct type name if field is a struct
-    )>
-  >,
-  /// Stack of variables known to be structs and their corresponding struct type names
-  struct_stack: IndexMap<String, String>,
-  /// We reuse the struct table for enums, but map variables to their enum type names with this
-  enum_table: IndexMap<
-    String, // Enum type name
-    String  // Enum variants
-  >,
   /// Table of class types, similar to struct table but with references to parents and methods
   class_table: IndexMap<String, (       // name
     Option<Vec<String>>,                // parents
@@ -110,9 +94,6 @@ impl<'ctx> CodeGen<'ctx> {
       builder: context.create_builder(),
       functions: IndexMap::new(),
       symbol_table_stack: Vec::new(),
-      struct_table: IndexMap::new(),
-      struct_stack: IndexMap::new(),
-      enum_table: IndexMap::new(),
       class_table: IndexMap::new(),
       current_class: None,
       _type_tags: Self::map_types(),
@@ -2024,8 +2005,10 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     // Add class to the known class information
-    self.struct_table.insert(name.clone(), vec![]);
-    self.struct_stack.insert(format!("{}_ptr", name), name.clone());
+    self.set_struct(name.clone(), vec![]);
+    self.set_struct_mapping(name.clone(), name.clone());
+    // self.struct_table.insert(name.clone(), vec![]);
+    // self.struct_stack.insert(format!("{}_ptr", name), name.clone());
     self.class_table.insert(name.clone(), (Some(parent_classes), types_as_fields.clone(), vec![]));
 
     // Set up the constructor
@@ -2079,12 +2062,12 @@ impl<'ctx> CodeGen<'ctx> {
           _ => {
 
             // Check for enum definition
-            let enum_type = self.enum_table.get(&typ.as_ref().unwrap().0);
+            let enum_type = self.get_enum_mapping(&typ.as_ref().unwrap().0);
             if enum_type.is_some() {
               self.context.i64_type().as_basic_type_enum()
             // Check for struct definition
             } else {
-              let struct_ref = self.struct_table.get(&typ.as_ref().unwrap().0);
+              let struct_ref = self.get_struct_mapping(&typ.as_ref().unwrap().0);
               if struct_ref.is_none() {
                 return Err(Error::new(
                   Error::NameError,
@@ -2127,7 +2110,8 @@ impl<'ctx> CodeGen<'ctx> {
           // Update the struct and class tables with the new fields
           let (_, class_fields, _) = self.class_table.get_mut(&name).unwrap();
           class_fields.push((field_name.clone(), set.get_type()));
-          self.struct_table.get_mut(&name).unwrap().push((field_name, set.get_type(), None));
+          // TODO: Fix struct_table dead code:
+          // self.struct_table.get_mut(&name).unwrap().push((field_name, set.get_type(), None));
 
         // Field without default
         } else {
@@ -2141,7 +2125,8 @@ impl<'ctx> CodeGen<'ctx> {
           // Update the struct and class tables with the new fields
           let (_, class_fields, _) = self.class_table.get_mut(&name).unwrap();
           class_fields.push((field_name.clone(), field_type));
-          self.struct_table.get_mut(&name).unwrap().push((field_name, field_type, None));
+          // TODO: Fix struct_table dead code:
+          // self.struct_table.get_mut(&name).unwrap().push((field_name, field_type, None));
         }
       }
     }
@@ -2279,7 +2264,7 @@ impl<'ctx> CodeGen<'ctx> {
           "float" => self.context.f64_type().into(),
           "bool" => self.context.bool_type().into(),
           _ => {
-            if self.struct_table.contains_key(&typ) {
+            if self.get_struct_mapping(&typ).is_some() {
               self.context.get_struct_type(&typ).unwrap().into()
             } else {
               return Err(Error::new(
@@ -2312,7 +2297,7 @@ impl<'ctx> CodeGen<'ctx> {
             "bool" => self.context.bool_type().fn_type(&types, false),
             "void" => self.context.void_type().fn_type(&types, false),
             _ => {
-              if self.struct_table.contains_key(&name) {
+              if self.get_struct_mapping(&name).is_some() {
                 self.context.get_struct_type(&name).unwrap().fn_type(&types, false)
               } else {
                 return Err(Error::new(
@@ -2344,9 +2329,9 @@ impl<'ctx> CodeGen<'ctx> {
         return Err(Error::new(
           Error::ParserError,
           None,
-          &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+          &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
           expr.first_pos,
-          expr.first_pos,
+          expr.last_line,
           "Invalid index".to_string()
         ));
       }
@@ -2441,9 +2426,9 @@ impl<'ctx> CodeGen<'ctx> {
     return Err(Error::new(
       Error::ParserError,
       None,
-      &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+      &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
       expr.first_pos,
-      expr.first_pos,
+      expr.last_line,
       "Invalid index".to_string()
     ));
   }
