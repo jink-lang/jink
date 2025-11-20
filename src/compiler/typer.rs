@@ -256,21 +256,25 @@ impl TypeChecker {
             }
           }
           // Case: Assignment to an index (array or object property)
-          Expr::ArrayIndex(arr_expr, idx_expr) | Expr::Index(arr_expr, idx_expr) => {
-            // For now, just check that the array/object exists and the assignment type matches
+          Expr::ArrayIndex(arr_expr, idx_expr) => {
             let arr_type = self.check_expression(arr_expr)?;
             let _idx_type = self.check_expression(idx_expr)?;
-            // Only allow assignment to arrays or objects
+
             match arr_type {
               JType::Array(boxed_elem_type) => {
-                // Check type compatibility for array element
                 if !self.check_type_compatibility(&boxed_elem_type, &rhs_type) {
                   return Err("Type mismatch for array element assignment.".to_string());
                 }
                 Ok(JType::Null)
               }
+              _ => Err("Left-hand side of indexed assignment must be array.".to_string()),
+            }
+          }
+          Expr::Index(arr_expr, idx_expr) => {
+            let arr_type = self.check_expression(arr_expr)?;
+
+            match arr_type {
               JType::Object(_) => {
-                // For objects, allow any assignment for now (TODO: check property type)
                 Ok(JType::Null)
               }
               JType::TypeName(type_name) => {

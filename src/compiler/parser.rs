@@ -108,7 +108,7 @@ impl Parser {
           Expr::WhileLoop(_, _) => {},
           Expr::Public(_) => {},
           Expr::Delete(_) => {},
-          // Expr::Index(_, _) => {}, // Will only be necessary when indexing at top level - module imports and class methods
+          Expr::Index(_, _) => {},
           _ => {
             return Err(Error::new(
               Error::UnexpectedExpression,
@@ -493,7 +493,7 @@ impl Parser {
       return self.parse_class();
 
     } else if init.unwrap().value.as_ref().unwrap() == "self" {
-      return self.parse_self();
+      return self.parse_expression(0);
 
     } else if init.unwrap().value.as_ref().unwrap() == "pub" {
       return self.parse_public();
@@ -694,7 +694,7 @@ impl Parser {
         return self.parse_call(ident);
 
       // Assignment
-      } else if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "=" {
+      } else if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "=" && !self.is_indexing {
         return self.parse_assignment(None, ident, None);
 
       // Typed assignment
@@ -725,7 +725,7 @@ impl Parser {
         ));
       
       } else if keyword.value.as_ref().unwrap() == "self" {
-        return self.parse_self();
+        return self.parse_self(Some(keyword));
 
       // Nulls
       } else if keyword.value.as_ref().unwrap() == "null" {
@@ -1852,8 +1852,8 @@ impl Parser {
     }
   }
 
-  fn parse_self(&mut self) -> Result<Expression, Error> {
-    let init = self.iter.next();
+  fn parse_self(&mut self, consumed: Option<Token>) -> Result<Expression, Error> {
+    let init = if consumed.is_some() { consumed } else { self.iter.next() };
     if !self.is_parsing_class_body {
       return Err(Error::new(
         Error::UnexpectedToken,
