@@ -8,21 +8,67 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  GH_WORKFLOW: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/imposd/llvm-ubuntu:latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
+
+    - name: Setup LLVM 18
+      run: |
+        sudo apt-get update
+
+        # Download and install LLVM using official script
+        tmpdir="$(mktemp -d)"
+        cd "$tmpdir"
+        curl -fsSL https://apt.llvm.org/llvm.sh -o llvm.sh
+        chmod +x llvm.sh
+
+        # Install LLVM 18 with all tools
+        # DPKG_FORCE=overwrite handles conflicts with pre-installed packages
+        sudo env DPKG_FORCE=overwrite ./llvm.sh 18 all
+
+        cd -
+        rm -rf "$tmpdir"
+
+        # Add LLVM to PATH for subsequent steps
+        echo "/usr/lib/llvm-18/bin" >> $GITHUB_PATH
+
+        # Set LLVM_PATH environment variable
+        echo "LLVM_PATH=/usr/lib/llvm-18" >> $GITHUB_ENV
+
+        # Verify installation
+        /usr/lib/llvm-18/bin/clang-18 --version
+
+        # Sanity check: verify major version
+        llvm_version=$(/usr/lib/llvm-18/bin/llvm-config --version)
+        major_version=$(echo "$llvm_version" | cut -d. -f1)
+        if [ "$major_version" != "18" ]; then
+          echo "Expected LLVM major version 18, got $llvm_version" >&2
+          exit 1
+        fi
+
+        echo "LLVM 18 has been installed successfully"
+
+    - name: Install Rust
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
     - name: Set rustup version
-      run: rustup default stable
-    
+      run: |
+        source $HOME/.cargo/env
+        rustup default stable
+
     - name: Build
-      run: cargo build --verbose
+      run: |
+        source $HOME/.cargo/env
+        cargo build --verbose
 
     - name: Run tests
-      run: cargo test --verbose
+      run: |
+        source $HOME/.cargo/env
+        cargo test --verbose

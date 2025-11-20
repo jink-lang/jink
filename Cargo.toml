@@ -7,7 +7,7 @@ authors = ["jink-lang", "Jacob Noah"]
 edition = "2021"
 
 [dependencies]
-strum_macros = "0.26"
-thiserror = "1.0.59"
-indexmap = "2.2.6"
+strum_macros = "0.27.1"
+thiserror = "2.0.12"
+indexmap = "2.9.0"
 inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm16-0"] }

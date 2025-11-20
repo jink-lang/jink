@@ -1,4 +1,5 @@
 use std::fmt::{ Display, Formatter, Result };
+use std::collections::HashMap;
 
 #[derive(strum_macros::Display, Debug, Eq, PartialEq, Clone, Default)]
 pub enum TokenTypes {
@@ -75,7 +76,7 @@ pub enum Literals {
   String(String),
   Boolean(bool),
   Object(Box<Vec<Self>>),
-  ObjectProperty(Option<Name>, Box<Expression>),
+  ObjectProperty(Name, Box<Expression>),
   Identifier(Name),
   Null,
   EOF
@@ -165,12 +166,98 @@ pub enum Expr {
   ModuleParsed(Vec<Name>, bool, Option<Vec<(Name, Option<Name>)>>, Vec<Expression>)
 }
 
+// Type checker types
+#[derive(Debug, PartialEq, Clone)]
+pub enum JType {
+  Integer,
+  UnsignedInteger,
+  FloatingPoint,
+  String,
+  Boolean,
+  Object(HashMap<String, JType>),
+  Array(Box<JType>),
+  /// type; default value; is spread
+  FunctionParam(Box<JType>, Option<Box<JType>>, bool),
+  /// parameters; return type
+  Function(Vec<JType>, Box<JType>),
+  /// fields
+  StructDef(HashMap<String, JType>),
+  /// members
+  Enum(Vec<String>),
+  /// Absence of a value or type, e.g., for statements
+  Null,
+  Void,
+  /// Type that cannot be determined yet
+  Unknown,
+  /// Named types such as classes or type aliases
+  TypeName(String),
+}
+
+impl std::fmt::Display for JType {
+  fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    match self {
+      JType::Integer => write!(f, "int"),
+      JType::UnsignedInteger => write!(f, "uint"),
+      JType::FloatingPoint => write!(f, "float"),
+      JType::String => write!(f, "string"),
+      JType::Boolean => write!(f, "bool"),
+      JType::Object(_) => write!(f, "object"), // TODO: Improve display
+      JType::Array(t) => write!(f, "array<{}>", t),
+      JType::FunctionParam(t, default, is_spread) => {
+        if *is_spread {
+          write!(f, "...")?;
+        }
+        write!(f, "{}", t)?;
+        if let Some(default) = default {
+          write!(f, " = {}", default)?;
+        }
+        Ok(())
+      },
+      JType::Function(params, ret) => {
+        write!(f, "fun(")?;
+        for (i, param) in params.iter().enumerate() {
+          if i > 0 {
+            write!(f, ", ")?;
+          }
+          write!(f, "{}", param)?;
+        }
+        write!(f, ") -> {}", ret)
+      },
+      JType::StructDef(fields) => {
+        write!(f, "struct(")?;
+        for (i, (name, field_type)) in fields.iter().enumerate() {
+          if i > 0 {
+            write!(f, ", ")?;
+          }
+          write!(f, "{}: {}", name, field_type)?;
+        }
+        write!(f, ")")
+      },
+      JType::Enum(members) => {
+        write!(f, "enum(")?;
+        for (i, member) in members.iter().enumerate() {
+          if i > 0 {
+            write!(f, ", ")?;
+          }
+          write!(f, "{}", member)?;
+        }
+        write!(f, ")")
+      },
+      JType::Null => write!(f, "null"),
+      JType::Void => write!(f, "void"),
+      JType::Unknown => write!(f, "unknown"),
+      JType::TypeName(name) => write!(f, "{}", name),
+    }
+  }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct Expression {
   pub expr: Expr,
   pub first_line: Option<i32>,
   pub first_pos: Option<i32>,
   pub last_line: Option<i32>,
+  pub inferred_type: Option<JType>,
 }
 
 pub struct FutureIter {
@@ -323,11 +410,13 @@ impl std::fmt::Display for Error {
       },
       Error::CompilerError(err) => {
         let line = err.line.split("\n").next().unwrap();
-        let underline = if err.end_pos.is_some() {
-          " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat((err.end_pos.unwrap() - err.start_pos.unwrap()) as usize)
+        let mut dashes = if err.end_pos.is_some() {
+          err.end_pos.unwrap() - err.start_pos.unwrap()
         } else {
-          " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat(line.trim_start().len() - err.start_pos.unwrap() as usize)
+          line.trim_start().len() as i32 - err.start_pos.unwrap()
         };
+        if dashes <= 0 { dashes = 1; }
+        let underline = " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat(dashes as usize);
         return write!(f, "Compilation error at {}:{}\n  {}\n  {}\n\n{}", err.end_pos.unwrap(),
           err.start_pos.unwrap() + 1, err.line, underline, err.message
         );

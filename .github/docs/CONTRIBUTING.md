@@ -136,7 +136,6 @@ We ask that you adhere to the existing code style when making contributions to t
 - Using snake_case for variable and function names
 - Using SCREAMING_SNAKE_CASE for constants
 - Using PascalCase for type names
-- Use explicit return statements (for readability)
 
 For more specific styling examples, please refer to the existing codebase. We recommend against using a linter or formatter, as they are often very strict and cause more harm than good. Instead, use your best judgment and try to match the existing style as closely as possible. If you have questions, feel free to ask in the issue or pull request you are working on or in Jacob's project [Discord server](https://discord.gg/cWzcQz2).
 

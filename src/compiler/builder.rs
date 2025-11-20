@@ -12,13 +12,46 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, Functi
 use inkwell::AddressSpace;
 use inkwell::support::LLVMString;
 
-use jink::{Error, Expr, Expression, Name, Type, Operator, Literals};
+use jink::{Error, Expr, Expression, JType, Literals, Name, Operator, Type};
 
 use super::parser::Namespace;
 
-pub struct Scope<'ctx> {
+struct Scope<'ctx> {
   symbols: IndexMap<String, (Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>)>,
+  /// Table of struct and enum types
+  struct_enum_types: IndexMap<
+    String,                // Struct type name
+    Vec<(                  // Struct fields
+      String,              // Field name
+      BasicTypeEnum<'ctx>, // Field type
+      Option<String>       // Struct type name if field is a struct
+    )>
+  >,
+  /// Map known struct variables to their corresponding struct type names
+  struct_map: IndexMap<String, String>,
+  /// Map known enum variables to their enum type names
+  enum_map: IndexMap<
+    String,                // Enum type name
+    String                 // Enum variants
+  >,
   is_function: bool,
+}
+
+#[derive(Debug, Clone)]
+struct FunctionCtx<'ctx> {
+  llvm_fun: FunctionValue<'ctx>,
+  parameters: Vec<FunctionParamCtx<'ctx>>,
+  _ret_type: String,
+  variadic: bool,
+}
+
+#[derive(Debug, Clone)]
+struct FunctionParamCtx<'ctx> {
+  name: String,
+  jtype: JType,
+  _llvm_type: BasicMetadataTypeEnum<'ctx>,
+  default_value_expr: Option<Box<Expression>>,
+  is_spread: bool
 }
 
 pub struct CodeGen<'ctx> {
@@ -27,6 +60,8 @@ pub struct CodeGen<'ctx> {
   context: &'ctx Context,
   pub module: Module<'ctx>,
   builder: Builder<'ctx>,
+  /// Functions defined in the module
+  functions: IndexMap<String, FunctionCtx<'ctx>>,
   /// Stack of symbol tables
   symbol_table_stack: Vec<Scope<'ctx>>,
   /// Table of struct types
@@ -73,6 +108,7 @@ impl<'ctx> CodeGen<'ctx> {
       context: &context,
       module,
       builder: context.create_builder(),
+      functions: IndexMap::new(),
       symbol_table_stack: Vec::new(),
       struct_table: IndexMap::new(),
       struct_stack: IndexMap::new(),
@@ -117,7 +153,13 @@ impl<'ctx> CodeGen<'ctx> {
   // }
 
   pub fn enter_scope(&mut self, is_function: bool) {
-    self.symbol_table_stack.push(Scope { symbols: IndexMap::new(), is_function });
+    self.symbol_table_stack.push(Scope {
+      symbols: IndexMap::new(),
+      struct_enum_types: IndexMap::new(),
+      struct_map: IndexMap::new(),
+      enum_map: IndexMap::new(),
+      is_function,
+    });
   }
 
   pub fn exit_scope(&mut self) {
@@ -141,7 +183,8 @@ impl<'ctx> CodeGen<'ctx> {
 
   /// Get symbol from symbol table stack
   /// 
-  /// Returns Result->Option of symbol name, instruction pointer, value and whether we left a function scope to obtain it 
+  /// Returns Result->Option of symbol name, instruction pointer, value and whether we left a function scope to obtain it
+  /// 
   /// If the instruction pointer is None the symbol is a constant value
   pub fn get_symbol(&self, name: &str) -> Result<Option<(String, Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool)>, Error> {
     let mut exited_function = false;
@@ -157,12 +200,91 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(None);
   }
 
-  fn get_all_cur_symbols(&self) -> IndexMap<String, (Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool)> {
+  fn get_all_cur_symbols(&self, get_all_scopes: bool) -> IndexMap<String, (Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool)> {
     let mut symbols = IndexMap::new();
-    for (name, (inst, typ, value)) in self.symbol_table_stack.last().unwrap().symbols.iter() {
-      symbols.insert(name.clone(), (inst.clone(), typ.clone(), value.clone(), false));
+    if self.symbol_table_stack.is_empty() { return symbols; }
+
+    let scopes_to_use = if get_all_scopes {
+      self.symbol_table_stack.iter().rev()
+    } else {
+      std::slice::from_ref(self.symbol_table_stack.last().unwrap()).iter().rev()
+    };
+
+    for scope in scopes_to_use {
+      // Add all symbols to the emerging in-scope symbols
+      for (name, (inst, typ, value)) in scope.symbols.iter() {
+        symbols.insert(name.clone(), (inst.clone(), typ.clone(), value.clone(), false));
+      }
+
+      // Add structs/enums to emerging in-scope symbols
+      for (name, fields) in scope.struct_enum_types.iter() {
+        let mut field_names = vec![];
+        for (field_name, _, _) in fields.iter() {
+          field_names.push(field_name.clone());
+        }
+        symbols.insert(name.clone(), (None, self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(), self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum(), false));
+      }
     }
+
     return symbols;
+  }
+
+  fn set_struct(&mut self, name: String, fields: Vec<(String, BasicTypeEnum<'ctx>, Option<String>)>) {
+    if let Some(scope) = self.symbol_table_stack.last_mut() {
+      scope.struct_enum_types.insert(name.clone(), fields);
+    } else {
+      panic!("Unexpected compilation error, set struct type without a scope");
+    }
+  }
+
+  /// Get struct type from symbol table stack
+  /// 
+  /// Returns Result->Option of struct fields: name, type and other struct type name if any
+  fn get_struct(&self, name: &str) -> Option<&Vec<(String, BasicTypeEnum<'ctx>, Option<String>)>> {
+    for scope in self.symbol_table_stack.iter().rev() {
+      if let Some(fields) = scope.struct_enum_types.get(name) {
+        return Some(fields);
+      }
+    }
+    return None;
+  }
+
+  fn set_struct_mapping(&mut self, name: String, struct_name: String) {
+    if let Some(scope) = self.symbol_table_stack.last_mut() {
+      scope.struct_map.insert(name.clone(), struct_name.clone());
+    } else {
+      panic!("Unexpected compilation error, set struct map without a scope");
+    }
+  }
+
+  fn get_struct_mapping(&self, name: &str) -> Option<&String> {
+    for scope in self.symbol_table_stack.iter().rev() {
+      if let Some(struct_name) = scope.struct_map.get(name) {
+        return Some(struct_name);
+      }
+    }
+    return None;
+  }
+
+  fn set_enum_mapping(&mut self, name: String, enum_name: String) {
+    if let Some(scope) = self.symbol_table_stack.last_mut() {
+      scope.enum_map.insert(name.clone(), enum_name.clone());
+    } else {
+      panic!("Unexpected compilation error, set enum map without a scope");
+    }
+  }
+
+  fn get_enum_mapping(&self, name: &str) -> Option<&String> {
+    for scope in self.symbol_table_stack.iter().rev() {
+      if let Some(enum_name) = scope.enum_map.get(name) {
+        return Some(enum_name);
+      }
+    }
+    return None;
+  }
+
+  fn get_required_function_param_count(&self, params: &[FunctionParamCtx]) -> usize {
+    params.iter().filter(|p| p.default_value_expr.is_none() && !p.is_spread).count()
   }
 
   fn create_main_function(&self) -> FunctionValue<'ctx> {
@@ -173,6 +295,7 @@ impl<'ctx> CodeGen<'ctx> {
     return main_fn;
   }
 
+  // TODO: Narrow this down to intrinsics
   fn build_external_functions(&self) {
     let ptr_type = self.context.ptr_type(AddressSpace::default());
 
@@ -208,6 +331,38 @@ impl<'ctx> CodeGen<'ctx> {
 
     let fputs_type = self.context.i32_type().fn_type(&[ptr_type.into(), ptr_type.into()], true);
     self.module.add_function("fputs", fputs_type, Some(Linkage::External));
+
+    // declare void @llvm.va_start(ptr) - va_list i8* / ptr
+    let va_start_type = self.context.void_type().fn_type(&[ptr_type.into()], false);
+    self.module.add_function("llvm.va_start", va_start_type, None);
+
+    // declare void @llvm.va_end(ptr)
+    let va_end_type = self.context.void_type().fn_type(&[ptr_type.into()], false);
+    self.module.add_function("llvm.va_end", va_end_type, None);
+  }
+
+  pub fn jtype_to_basic_type(&self, jtype: JType) -> Result<BasicTypeEnum<'ctx>, Error> {
+    match jtype {
+      JType::Integer => Ok(self.context.i64_type().as_basic_type_enum()),
+      JType::UnsignedInteger => Ok(self.context.i64_type().as_basic_type_enum()),
+      JType::FloatingPoint => Ok(self.context.f64_type().as_basic_type_enum()),
+      JType::String => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
+      JType::Boolean => Ok(self.context.bool_type().as_basic_type_enum()),
+      JType::Object(_) => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
+      JType::Array(_) => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
+      JType::Null => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
+      JType::Unknown => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
+      _ => {
+        return Err(Error::new(
+          Error::CompilerError,
+          None,
+          &"",
+          Some(0),
+          Some(0),
+          format!("Invalid type: {:?}", jtype)
+        ));
+      }
+    }
   }
 
   pub fn build(&mut self, code: String, ast: Vec<Expression>, namespaces: IndexMap<String, Namespace>, verbose: bool, do_execute: bool) -> Result<LLVMString, Error> {
@@ -416,7 +571,7 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Get struct information by type
     let struct_type_name = if getting_inner_parent && !passing_type_name {
-      self.struct_stack.get(&parent_name)
+      self.get_struct_mapping(&parent_name)
     } else {
       Some(&parent_name)
     };
@@ -434,7 +589,7 @@ impl<'ctx> CodeGen<'ctx> {
     // Get value of child
     // Used at final index as well as passing indexes back through recursively
     if let Expr::Literal(Literals::Identifier(Name(name))) = child.expr {
-      let struct_ref = self.struct_table.get(struct_type_name.unwrap());
+      let struct_ref = self.get_struct(struct_type_name.unwrap());
       if struct_ref.is_none() {
         return Err(Error::new(
           Error::CompilerError,
@@ -486,7 +641,8 @@ impl<'ctx> CodeGen<'ctx> {
         expr: Expr::Literal(Literals::Identifier(Name(field_struct_type_name.unwrap()))),
         first_line: parent.first_line,
         first_pos: parent.first_pos,
-        last_line: parent.last_line
+        last_line: parent.last_line,
+        inferred_type: parent.inferred_type,
       };
 
       // Recurse to get the inner child
@@ -509,7 +665,7 @@ impl<'ctx> CodeGen<'ctx> {
     }
   }
 
-  fn build_loop_body(&mut self, typ: &str, body: Option<Vec<Expression>>, var: Option<PointerValue<'ctx>>, current_value: Option<IntValue>, body_block: BasicBlock<'ctx>, cond_block: BasicBlock<'ctx>, end_block: BasicBlock<'ctx>) -> Result<(), Error> {
+  fn build_loop_body(&mut self, body: Option<Vec<Expression>>, body_block: BasicBlock<'ctx>, continue_block_target: BasicBlock<'ctx>, break_block_target: BasicBlock<'ctx>) -> Result<BasicBlock<'ctx>, Error> {
     self.enter_scope(false);
     let mut current_block = body_block;
 
@@ -518,7 +674,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         if let Expr::Conditional(typ, expr, body, ebody) = expr.expr.clone() {
           let merge_block = self.context.append_basic_block(body_block.get_parent().unwrap(), "merge");
-          (_, _, current_block) = self.build_if(true, typ, expr, body, ebody, body_block.get_parent().unwrap(), body_block, merge_block, Some(cond_block), Some(end_block))?;
+          (_, _, current_block) = self.build_if(true, typ, expr, body, ebody, body_block.get_parent().unwrap(), body_block, merge_block, Some(continue_block_target), Some(break_block_target))?;
 
         } else if let Expr::Return(ret) = expr.expr.clone() {
           let val = self.visit(&ret, current_block)?;
@@ -538,12 +694,12 @@ impl<'ctx> CodeGen<'ctx> {
           current_block = self.build_while_loop(expr, body, body_block.get_parent().unwrap(), current_block)?;
 
         } else if let Expr::BreakLoop = expr.expr.clone() {
-          self.builder.build_unconditional_branch(end_block).unwrap();
-          return Ok(());
+          self.builder.build_unconditional_branch(break_block_target).unwrap();
+          return Ok(current_block);
 
         } else if let Expr::ContinueLoop = expr.expr.clone() {
-          self.builder.build_unconditional_branch(cond_block).unwrap();
-          return Ok(());
+          self.builder.build_unconditional_branch(continue_block_target).unwrap();
+          return Ok(current_block);
 
         } else {
           self.visit(&expr, current_block)?;
@@ -551,83 +707,144 @@ impl<'ctx> CodeGen<'ctx> {
       }
     }
 
-    if typ == "for" {
-      // If we did not leave the body block, increment the iterator and branch back to the conditional block
-      // if self.builder.get_insert_block().unwrap() == body_block || conditional_block.is_some() {
-      let next_value = self.builder.build_int_add(current_value.unwrap(), self.context.i64_type().const_int(1, false), "next_value").unwrap();
-      self.builder.build_store(var.unwrap(), next_value).unwrap();
-      // }
-    }
-
     // Exit the loop body scope
     self.exit_scope();
-    return Ok(());
+    return Ok(current_block);
   }
 
   fn build_for_loop(&mut self, value: Box<Expression>, expr: Box<Expression>, body: Option<Vec<Expression>>, function: FunctionValue<'ctx>, block: BasicBlock<'ctx>) -> Result<BasicBlock<'ctx>, Error> {
-
     let cond_block = self.context.append_basic_block(function, "loop_cond_block");
     let body_block = self.context.append_basic_block(function, "loop_body");
+    let increment_block = self.context.append_basic_block(function, "loop_var_increment");
     let end_block = self.context.append_basic_block(function, "loop_end");
 
     self.builder.position_at_end(block);
 
-    // Collect the name
-    if let Expr::Literal(Literals::Identifier(Name(name))) = value.expr {
+    // Get loop variable name (e.g., 'i')
+    let loop_index_name = if let Expr::Literal(Literals::Identifier(Name(name))) = value.expr {
+      name
+    } else {
+      // Handle error: loop variable must be an identifier
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        "",
+        value.first_pos,
+        value.last_line,
+        "Loop variable must be an identifier".to_string()
+      ));
+    };
 
-      let i64_type = self.context.i64_type();
-      let init_value = i64_type.const_int(0, false);
+    // Initialize loop index variable to 0
+    let i64_type = self.context.i64_type();
+    let init_value = i64_type.const_int(0, false);
+    let loop_index_ptr = self.builder.build_alloca(init_value.get_type(), &loop_index_name).unwrap();
+    self.builder.build_store(loop_index_ptr, init_value).unwrap();
 
-      // Initialize an int to manage the index of the loop
-      let var = self.builder.build_alloca(init_value.get_type(), &name).unwrap();
-      self.builder.build_store(var, init_value).unwrap();
+    let end_condition_val: IntValue<'ctx>;
 
-      // Initialize the conditional block to ascertain whether the loop should continue
-      self.builder.build_unconditional_branch(cond_block).unwrap();
-      self.builder.position_at_end(cond_block);
+    // Get the name of the iterable expression ('args' etc.)
+    let iterable_name = if let Expr::Literal(Literals::Identifier(Name(n))) = expr.expr.clone() {
+      n
+    } else {
+      // TODO: Handle non-identifier iterables if supported (function calls returning arrays, etc.)
+      return Err(Error::new(
+        Error::CompilerError,
+        None,
+        "",
+        expr.first_pos,
+        expr.last_line,
+        "Iterable in for loop must be an identifier for now".to_string()
+      ));
+    };
 
-      // Load the loop index in the conditional block
-      let loop_index = self.builder.build_load(i64_type, var, &name).unwrap().into_int_value();
+    // Check if the iterable is the variadic parameter array for the current function
+    let current_function_ctx = self.functions.get(function.get_name().to_str().unwrap());
+    let is_variadic_iterable = current_function_ctx.map_or(false, |ctx| {
+      // Check if the function is variadic AND if the iterable name matches the name of the spread parameter
+      ctx.variadic && ctx.parameters.iter().any(|p| p.is_spread && p.name == iterable_name)
+    });
 
-      // Visit the iterable that we are looping over
-      if let Expr::Literal(Literals::Identifier(Name(n))) = expr.expr.clone() {
-        let (_, typ, _) = self.var_from_ident(n.clone(), &expr)?;
-        if !typ.is_array_type() {
+    // For the variadic function array we just get and use the hidden count
+    if is_variadic_iterable {
+      if function.count_params() == 0 {
+        return Err(Error::new(Error::CompilerError,
+          None, "",
+          expr.first_pos,
+          expr.last_line,
+          "Internal error: Variadic function seems to be missing its hidden count parameter.".to_string()
+        ));
+      }
+      end_condition_val = function.get_nth_param(0).unwrap().into_int_value();
+    } else {
+      // Handle regular arrays/iterables
+      let (_iterable_ptr_opt, iterable_type, _iterable_val) = self.var_from_ident(iterable_name.clone(), &expr)?;
+
+      // Case: Compile-time array
+      if iterable_type.is_array_type() {
+        let array_len = iterable_type.into_array_type().len();
+        end_condition_val = i64_type.const_int(array_len as u64, false);
+
+      // Case: Dynamic array struct { len, ptr }
+      } else if iterable_type.is_struct_type() {
+        let struct_ptr = _iterable_ptr_opt.ok_or_else(|| Error::new(Error::CompilerError, None, "", expr.first_pos, expr.last_line, "Expected pointer for dynamic array struct".to_string()))?;
+        let array_struct_type = self.context.struct_type(&[i64_type.into(), self.context.ptr_type(AddressSpace::default()).into()], false);
+
+        // Ensure the pointer points to the expected struct type
+        if struct_ptr.get_type().as_basic_type_enum() != array_struct_type.as_basic_type_enum() {
           return Err(Error::new(
             Error::CompilerError,
             None,
-            self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+            "",
             expr.first_pos,
-            Some(expr.first_pos.unwrap() + n.len() as i32),
-            "Invalid iterable type".to_string()
+            expr.last_line,
+            format!("Iterable '{}' is not the expected dynamic array type.", iterable_name).to_string()
           ));
         }
 
-        // Get the length of the array
-        let array_len = typ.into_array_type().len();
-        let end_condition = i64_type.const_int(array_len as u64, false);
-
-        // Build the conditional branching
-        let cond = self.builder.build_int_compare(inkwell::IntPredicate::ULT, loop_index, end_condition, "loop_cond").unwrap();
-        self.builder.build_conditional_branch(cond, body_block, end_block).unwrap();
-
-        // Build the loop body
-        self.builder.position_at_end(body_block);
-        let current_value = self.builder.build_load(i64_type, var, "current_value").unwrap().into_int_value();
-        self.set_symbol(name.clone(), Some(var), current_value.get_type().as_basic_type_enum(), current_value.into());
-        self.build_loop_body("for", body, Some(var), Some(current_value), body_block, cond_block, end_block)?;
-
-        // If we terminated in a block that is not the end block, branch back to the conditional block to be sure if the loop should continue
-        if self.builder.get_insert_block().unwrap() != end_block {
-          self.builder.build_unconditional_branch(cond_block).unwrap();
-        }
-
-        self.builder.position_at_end(end_block);
-        return Ok(end_block);
+        // Load the length field (index 0)
+        let length_ptr = self.builder.build_struct_gep(array_struct_type, struct_ptr, 0, "dyn_arr_len_ptr").unwrap();
+        end_condition_val = self.builder.build_load(i64_type, length_ptr, "dyn_arr_len").unwrap().into_int_value();
+      } else {
+        return Err(Error::new(
+          Error::CompilerError,
+          None,
+          self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap(),
+          expr.first_pos,
+          expr.first_pos,
+          format!("'{}' not recognized as a valid iterable type.", iterable_name).to_string()
+        ));
       }
     }
 
-    panic!("Unreachable");
+    // Initialize the conditional block to ascertain whether the loop should continue
+    self.builder.build_unconditional_branch(cond_block).unwrap();
+
+    // Build the condition block
+    self.builder.position_at_end(cond_block);
+    let loop_index_val = self.builder.build_load(i64_type, loop_index_ptr, &loop_index_name).unwrap().into_int_value();
+    let cond = self.builder.build_int_compare(inkwell::IntPredicate::ULT, loop_index_val, end_condition_val, "loop_cond").unwrap();
+    self.builder.build_conditional_branch(cond, body_block, end_block).unwrap();
+
+    // Build the loop body
+    self.builder.position_at_end(body_block);
+    self.set_symbol(loop_index_name.clone(), Some(loop_index_ptr), i64_type.as_basic_type_enum(), loop_index_val.as_basic_value_enum());
+    let last_body_block = self.build_loop_body(body, body_block, increment_block, end_block)?;
+    if last_body_block.get_terminator().is_none() {
+      self.builder.position_at_end(last_body_block);
+      self.builder.build_unconditional_branch(increment_block).unwrap();
+    }
+
+    // Build the increment block
+    self.builder.position_at_end(increment_block);
+    let current_val = self.builder.build_load(self.context.i64_type(), loop_index_ptr, "current_loop_idx").unwrap().into_int_value();
+    let next_val = self.builder.build_int_add(current_val, self.context.i64_type().const_int(1, false), "next_loop_idx").unwrap();
+    self.builder.build_store(loop_index_ptr, next_val).unwrap();
+    // After increment go to the condition block
+    self.builder.build_unconditional_branch(cond_block).unwrap(); 
+
+    self.builder.position_at_end(end_block);
+    return Ok(end_block);
   }
 
   // TODO: DRY this up with the repeat pattern in build_for_loop
@@ -656,10 +873,9 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Build the loop body
     self.builder.position_at_end(body_block);
-    self.build_loop_body("while", body, None, None, body_block, cond_block, end_block)?;
-
-    // If we terminated in a block that is not the end block, branch back to the conditional block to be sure if the loop should continue
-    if self.builder.get_insert_block().unwrap() != end_block {
+    let last_body_block = self.build_loop_body(body, body_block, cond_block, end_block)?;
+    if last_body_block.get_terminator().is_none() {
+      self.builder.position_at_end(last_body_block);
       self.builder.build_unconditional_branch(cond_block).unwrap();
     }
 
@@ -701,9 +917,9 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     self.set_symbol(name.clone(), Some(enum_ptr), enum_struct_type.as_basic_type_enum(), enum_ptr.as_basic_value_enum());
-    self.struct_stack.insert(name.clone(), format!("{}_enum", name));
-    self.struct_table.insert(format!("{}_enum", name), fields);
-    self.enum_table.insert(name.clone(), format!("{}_enum", name));
+    self.set_struct(format!("{}_enum", name), fields);
+    self.set_struct_mapping(name.clone(), format!("{}_enum", name));
+    self.set_enum_mapping(name.clone(), format!("{}_enum", name));
     return Ok(());
   }
 
@@ -717,20 +933,20 @@ impl<'ctx> CodeGen<'ctx> {
         if let Literals::ObjectProperty(n, val) = literal.to_owned() {
 
           // Ensure name doesn't already exist in fields
-          if fields.iter().any(|(name, _, _)| name == &n.as_ref().unwrap().0) {
+          if fields.iter().any(|(name, _, _)| name == &n.0) {
             return Err(Error::new(
               Error::CompilerError,
               None,
               &"",
               Some(0),
               Some(0),
-              format!("Field {} already defined", n.unwrap().0)
+              format!("Field {} already defined", n.0)
             ));
           }
 
           // Build the field
           let (typ, struct_name_if_any) = self.build_struct_field(val.expr)?;
-          let field: (String, BasicTypeEnum<'ctx>, Option<String>) = (n.unwrap().0, typ, struct_name_if_any);
+          let field: (String, BasicTypeEnum<'ctx>, Option<String>) = (n.0, typ, struct_name_if_any);
           fields.push(field);
 
         // Field was not an object property, parsing error
@@ -769,7 +985,7 @@ impl<'ctx> CodeGen<'ctx> {
       // Save a reference to the struct
       if let Some(n) = struct_lit_name {
         // Special saving method for structs to keep track of their fields
-        if self.struct_table.contains_key(&n) {
+        if self.get_struct(&n).is_some() {
           return Err(Error::new(
             Error::CompilerError,
             None,
@@ -779,7 +995,7 @@ impl<'ctx> CodeGen<'ctx> {
             format!("Name {} already defined", n)
           ));
         } else {
-          self.struct_table.insert(n, fields);
+          self.set_struct(n, fields);
         }
       }
 
@@ -809,14 +1025,15 @@ impl<'ctx> CodeGen<'ctx> {
           "bool" => return Ok((self.context.bool_type().as_basic_type_enum(), None)),
           _ => {
             // Check for enum
-            let enum_type = self.enum_table.get(&name);
-            if enum_type.is_some() {
-              return Ok((self.context.i64_type().as_basic_type_enum(), Some(enum_type.unwrap().to_string())));
-            }
+            if let Some(enum_type) = self.get_enum_mapping(&name) {
+              return Ok((self.context.i64_type().as_basic_type_enum(), Some(enum_type.to_string())));
 
             // Check for type alias
-            let struct_type = self.struct_table.get(&name);
-            if struct_type.is_none() {
+            } else if self.get_struct(&name).is_some() {
+              let struct_type = self.context.get_struct_type(&name);
+              return Ok((struct_type.unwrap().as_basic_type_enum(), Some(name)));
+
+            } else {
               return Err(Error::new(
                 Error::CompilerError,
                 None,
@@ -825,9 +1042,6 @@ impl<'ctx> CodeGen<'ctx> {
                 Some(0),
                 format!("Invalid struct field type {}", name)
               ));
-            } else {
-              let struct_type = self.context.get_struct_type(&name);
-              return Ok((struct_type.unwrap().as_basic_type_enum(), Some(name)));
             }
           }
         }
@@ -846,7 +1060,7 @@ impl<'ctx> CodeGen<'ctx> {
   // Name of type struct; name of variable; fields
   fn build_initialize_struct(&mut self, struct_name: String, var_name: String, fields: Vec<Literals>, block: BasicBlock<'ctx>) -> Result<PointerValue<'ctx>, Error> {
     let struct_type = self.context.get_struct_type(&struct_name).unwrap();
-    let field_types = self.struct_table.get(&struct_name)
+    let field_types = self.get_struct(&struct_name)
       .ok_or_else(|| Error::new(
         Error::CompilerError,
         None,
@@ -881,8 +1095,8 @@ impl<'ctx> CodeGen<'ctx> {
 
         // Ensure type consistency
         if field_val_type.is_pointer_type() {
-          // Check struct table for ptr name
-          let struct_ref = self.struct_table.get(&struct_name);
+          // Check structs for ptr name
+          let struct_ref = self.get_struct(&struct_name);
           if struct_ref.is_some() {
             field_val_type = self.context.get_struct_type(&struct_name).unwrap().as_basic_type_enum();
 
@@ -926,12 +1140,12 @@ impl<'ctx> CodeGen<'ctx> {
       }
     }
 
-    self.struct_stack.insert(var_name.clone(), struct_name.clone());
+    self.set_struct_mapping(var_name.clone(), struct_name.clone());
     return Ok(struct_ptr);
   }
 
   // Builder for conditional expressions
-  fn build_if(&mut self, top_level: bool, _typ: Type, expr: Option<Box<Expression>>, body: Box<Vec<Expression>>, else_body: Option<Box<Vec<Expression>>>, function: FunctionValue<'ctx>, block: BasicBlock<'ctx>, top_level_merge_block: BasicBlock<'ctx>, loop_cond_block: Option<BasicBlock<'ctx>>, exit_loop_block: Option<BasicBlock<'ctx>>) -> Result<(BasicBlock<'ctx>, BasicBlock<'ctx>, BasicBlock<'ctx>), Error> {
+  fn build_if(&mut self, top_level: bool, _typ: Type, expr: Option<Box<Expression>>, body: Box<Vec<Expression>>, else_body: Option<Box<Vec<Expression>>>, function: FunctionValue<'ctx>, block: BasicBlock<'ctx>, top_level_merge_block: BasicBlock<'ctx>, loop_continue_target: Option<BasicBlock<'ctx>>, loop_break_target: Option<BasicBlock<'ctx>>) -> Result<(BasicBlock<'ctx>, BasicBlock<'ctx>, BasicBlock<'ctx>), Error> {
     let mut cond = self.visit(&expr.unwrap(), block)?;
 
     // If the condition is a number, condition on the basis of it not being 0
@@ -944,11 +1158,8 @@ impl<'ctx> CodeGen<'ctx> {
 
     // If the condition is a pointer, condition on the basis of it not being null
     } else if let BasicValueEnum::PointerValue(p) = cond {
-      if p.is_null() {
-        cond = self.context.bool_type().const_int(0, false).as_basic_value_enum();
-      } else {
-        cond = self.context.bool_type().const_int(1, false).as_basic_value_enum();
-      }
+      let is_null = self.builder.build_is_null(p, "is_null").unwrap();
+      cond = self.builder.build_not(is_null, "ifcond").unwrap().as_basic_value_enum();
     }
 
     // Set up blocks
@@ -960,23 +1171,32 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Build the "then" block and collect the resulting values
     self.enter_scope(false);
-    let then_out = self.build_conditional_block(then_block, Some(body.clone()), function, top_level_merge_block, loop_cond_block, exit_loop_block)?;
-    let then_vals = self.get_all_cur_symbols();
+    let then_out = self.build_conditional_block(then_block, Some(body.clone()), function, top_level_merge_block, loop_continue_target, loop_break_target)?;
+    let then_vals = self.get_all_cur_symbols(false);
     self.exit_scope();
-    self.builder.build_unconditional_branch(merge_block).unwrap();
+    // Merge back if the block wasn't already terminated
+    let then_branches_to_merge = then_out.get_terminator().is_none();
+    if then_branches_to_merge {
+      self.builder.build_unconditional_branch(merge_block).unwrap();
+    }
 
     // Build the "else" block and collect the resulting values
     self.enter_scope(false);
-    let else_out = self.build_conditional_block(else_block, else_body, function, top_level_merge_block, loop_cond_block, exit_loop_block)?;
-    let else_vals = self.get_all_cur_symbols();
+    let else_out = self.build_conditional_block(else_block, else_body, function, top_level_merge_block, loop_continue_target, loop_break_target)?;
+    let else_vals = self.get_all_cur_symbols(false);
     self.exit_scope();
-    self.builder.build_unconditional_branch(merge_block).unwrap();
-
-    // Position the builder at the merge block
-    self.builder.position_at_end(merge_block);
+    // Merge back if the block wasn't already terminated
+    let else_branches_to_merge = else_out.get_terminator().is_none();
+    if else_branches_to_merge {
+      self.builder.build_unconditional_branch(merge_block).unwrap();
+    }
 
     // Collect all keys from both then_vals and else_vals
     let all_keys: HashSet<&String> = then_vals.keys().chain(else_vals.keys()).collect();
+
+    // Pre-compute the values we need for PHI nodes before positioning at merge block
+    // This is important because we might need to load values from memory in the source blocks
+    let mut phi_nodes_to_create: Vec<(String, BasicTypeEnum<'ctx>, Vec<(BasicValueEnum<'ctx>, BasicBlock<'ctx>)>)> = Vec::new();
 
     for name in all_keys {
 
@@ -984,14 +1204,14 @@ impl<'ctx> CodeGen<'ctx> {
       let then_val: Option<(Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool)> = then_vals.get(name)
         .cloned()
         .or_else(|| {
-        self.get_symbol(name).unwrap_or(None).map(|(_, pval, typ, val, exited_func)| {
+        self.get_symbol(name).ok().flatten().map(|(_, pval, typ, val, exited_func)| {
           (pval, typ, val, exited_func)
         })
       });
       let else_val: Option<(Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool)> = else_vals.get(name)
         .cloned()
         .or_else(|| {
-        self.get_symbol(name).unwrap_or(None).map(|(_, pval, typ, val, exited_func)| {
+        self.get_symbol(name).ok().flatten().map(|(_, pval, typ, val, exited_func)| {
           (pval, typ, val, exited_func)
         })
       });
@@ -1000,8 +1220,8 @@ impl<'ctx> CodeGen<'ctx> {
       if then_val.is_none() || else_val.is_none() { continue; }
 
       // Determine the types of the values
-      let then_type = then_val.unwrap().1;
-      let else_type = else_val.unwrap().1;
+      let then_type = then_val.as_ref().unwrap().1;
+      let else_type = else_val.as_ref().unwrap().1;
 
       // Determine the common type for the phi node
       let phi_type = if then_type.is_int_type() && else_type.is_int_type() {
@@ -1024,17 +1244,79 @@ impl<'ctx> CodeGen<'ctx> {
         }
       };
 
-      // Create the phi node with the determined type
-      let phi = self.builder.build_phi(phi_type, name).unwrap();
+      // Check if the variable was actually modified in each branch
+      let then_modified = then_vals.contains_key(name);
+      let else_modified = else_vals.contains_key(name);
 
-      // Add incoming values from both branches
-      phi.add_incoming(&[
-        (&then_val.unwrap().2, then_out),
-        (&else_val.unwrap().2, else_out),
-      ]);
+      // If neither branch modified the variable, skip PHI creation
+      if !then_modified && !else_modified {
+        continue;
+      }
+
+      let mut incoming_for_phi: Vec<(BasicValueEnum<'ctx>, BasicBlock<'ctx>)> = Vec::new();
+
+      if then_branches_to_merge {
+        let value_to_use = if then_modified {
+          // Branch modified it, use the modified value
+          then_val.as_ref().unwrap().2
+        } else {
+          // Branch didn't modify it, load the current value from memory before the terminator of then_out block
+          if let Some((ptr, typ, _, _)) = then_val.as_ref() {
+            if let Some(p) = ptr {
+              // Insert load BEFORE the terminator (branch instruction)
+              let terminator = then_out.get_terminator().unwrap();
+              self.builder.position_before(&terminator);
+              let loaded = self.builder.build_load(*typ, *p, &format!("{}_loaded_then", name)).unwrap();
+              loaded
+            } else {
+              then_val.as_ref().unwrap().2
+            }
+          } else {
+            then_val.as_ref().unwrap().2
+          }
+        };
+        incoming_for_phi.push((value_to_use, then_out));
+      }
+
+      if else_branches_to_merge {
+        let value_to_use = if else_modified {
+          // Branch modified it, use the modified value
+          else_val.as_ref().unwrap().2
+        } else {
+          // Branch didn't modify it, load the current value from memory before the terminator of else_out block
+          if let Some((ptr, typ, _, _)) = else_val.as_ref() {
+            if let Some(p) = ptr {
+              // Insert load BEFORE the terminator (branch instruction)
+              let terminator = else_out.get_terminator().unwrap();
+              self.builder.position_before(&terminator);
+              let loaded = self.builder.build_load(*typ, *p, &format!("{}_loaded_else", name)).unwrap();
+              loaded
+            } else {
+              else_val.as_ref().unwrap().2
+            }
+          } else {
+            else_val.as_ref().unwrap().2
+          }
+        };
+        incoming_for_phi.push((value_to_use, else_out));
+      }
+
+      // Only create PHI node if we have incoming values
+      if !incoming_for_phi.is_empty() {
+        phi_nodes_to_create.push((name.clone(), phi_type, incoming_for_phi));
+      }
+    }
+
+    // Now position the builder at the merge block and create all PHI nodes
+    self.builder.position_at_end(merge_block);
+
+    for (name, phi_type, incoming_for_phi) in phi_nodes_to_create {
+      let phi = self.builder.build_phi(phi_type, &name).unwrap();
+      let incoming_refs: Vec<(&dyn BasicValue<'ctx>, BasicBlock<'ctx>)> = incoming_for_phi.iter().map(|(v, b)| (v as &dyn BasicValue<'ctx>, *b)).collect();
+      phi.add_incoming(&incoming_refs);
 
       // Check if the symbol exists in the symbol table
-      if let Some(symbol) = self.get_symbol(name)? {
+      if let Some(symbol) = self.get_symbol(&name)? {
         // Update the existing variable with the new PHI value
         let (_, inst, _, _, exited_func) = symbol;
         if exited_func {
@@ -1053,7 +1335,7 @@ impl<'ctx> CodeGen<'ctx> {
         // Create a new variable and store the PHI value
         let var = self.builder.build_alloca(phi_type, &name).unwrap();
         self.builder.build_store(var, phi.as_basic_value()).unwrap();
-        self.set_symbol(name.to_string(), Some(var), phi_type, phi.as_basic_value());
+        self.set_symbol(name.to_string(), None, phi_type, phi.as_basic_value());
       }
     }
 
@@ -1070,7 +1352,7 @@ impl<'ctx> CodeGen<'ctx> {
     }
   }
 
-  fn build_conditional_block(&mut self, block: BasicBlock<'ctx>, body: Option<Box<Vec<Expression>>>, function: FunctionValue<'ctx>, top_level_merge_block: BasicBlock<'ctx>, loop_cond_block: Option<BasicBlock<'ctx>>, exit_loop_block: Option<BasicBlock<'ctx>>) -> Result<BasicBlock<'ctx>, Error> {
+  fn build_conditional_block(&mut self, block: BasicBlock<'ctx>, body: Option<Box<Vec<Expression>>>, function: FunctionValue<'ctx>, top_level_merge_block: BasicBlock<'ctx>, loop_continue_target: Option<BasicBlock<'ctx>>, loop_break_target: Option<BasicBlock<'ctx>>) -> Result<BasicBlock<'ctx>, Error> {
     self.builder.position_at_end(block);
     let mut current_block = block;
 
@@ -1080,10 +1362,10 @@ impl<'ctx> CodeGen<'ctx> {
           Expr::Conditional(typ, exp, body, ebody) => {
             // This is the end, build the body
             if typ.0 == "else" {
-              current_block = self.build_conditional_block(current_block, Some(body), function, top_level_merge_block, loop_cond_block, exit_loop_block)?;
+              current_block = self.build_conditional_block(current_block, Some(body), function, top_level_merge_block, loop_continue_target, loop_break_target)?;
             // This is a new branch, return to the top
             } else {
-              (_, _, current_block) = self.build_if(false, typ, exp, body, ebody, function, current_block, top_level_merge_block, loop_cond_block, exit_loop_block)?;
+              (_, _, current_block) = self.build_if(false, typ, exp, body, ebody, function, current_block, top_level_merge_block, loop_continue_target, loop_continue_target)?;
             }
           },
           Expr::Assignment(_, _, _) => {
@@ -1105,36 +1387,10 @@ impl<'ctx> CodeGen<'ctx> {
             current_block = self.build_while_loop(expr, body, function, current_block)?;
           },
           Expr::BreakLoop => {
-            if exit_loop_block.is_none() {
-              return Err(Error::new(
-                Error::CompilerError,
-                None,
-                &"",
-                Some(0),
-                Some(0),
-                "Cannot break outside of loop".to_string()
-              ));
-            }
-
-            // TODO: Break out of loop
-            // We still need to build else block(s) below so we can't return here
-
+            self.builder.build_unconditional_branch(loop_break_target.unwrap()).unwrap();
           },
           Expr::ContinueLoop => {
-            if exit_loop_block.is_none() {
-              return Err(Error::new(
-                Error::CompilerError,
-                None,
-                &"",
-                Some(0),
-                Some(0),
-                "Cannot continue outside of loop".to_string()
-              ));
-            }
-
-            // TODO: Continue loop (branch back to loop condition block)
-            // We still need to build else block(s) below so we can't return here
-
+            self.builder.build_unconditional_branch(loop_continue_target.unwrap()).unwrap();
           }
           _ => {
             self.visit(expr, current_block)?;
@@ -1151,6 +1407,7 @@ impl<'ctx> CodeGen<'ctx> {
     self.builder.position_at_end(block);
 
     // Extract assignment values
+    // (type or let/const; ident or index; value)
     let (ty, ident_or_idx, value) = match expr.clone().expr {
       Expr::Assignment(ty, ident_or_idx, value) => (ty, ident_or_idx, value),
       _ => {
@@ -1165,20 +1422,10 @@ impl<'ctx> CodeGen<'ctx> {
       }
     };
 
-    // Array index isn't typed so we need to extract the type
-    if let Expr::ArrayIndex(_, _) = ident_or_idx.expr.clone() {
-      let (ptr, val) = self.build_index(&ident_or_idx)?;
+    // Case: Array/struct index lhs
+    if let Expr::ArrayIndex(_, _) | Expr::Index(_, _) = ident_or_idx.expr.clone() {
+      let (ptr, _) = self.build_index(&ident_or_idx)?;
       let set = self.visit(&value.clone().unwrap(), block)?;
-      if set.get_type() != val.get_type() {
-        return Err(Error::new(
-          Error::CompilerError,
-          None,
-          &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
-          expr.first_pos,
-          Some(self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string().len() as i32),
-          format!("Invalid assignment type for array index, expected {:?} but got {:?}", val.get_type().print_to_string(), set.get_type().print_to_string())
-        ));
-      }
       self.builder.build_store(ptr, set).unwrap();
       return Ok(());
     }
@@ -1198,36 +1445,25 @@ impl<'ctx> CodeGen<'ctx> {
       }
     };
 
-    let mut set: BasicValueEnum;
-    if value.is_some() {
-      if let Expr::Literal(e) = &value.as_ref().unwrap().expr {
-        if let Literals::Object(obj) = e {
+    let set = match &value {
+      // Case: No rhs / value, set to null
+      None => self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum(),
+      Some(v) => match &v.expr {
+        // Case: Object rhs
+        Expr::Literal(Literals::Object(obj)) => {
           let alloca = self.build_initialize_struct(ty.clone().unwrap().0, name.clone(), obj.to_vec(), block)?;
-          set = alloca.as_basic_value_enum();
-        } else {
-          set = self.visit(&value.unwrap(), block)?;
-        }
-
-      // If assignment value is an array, we need to extract the type
-      } else if let Expr::Array(_) = value.as_ref().unwrap().expr.clone() {
-        let (ptr, arr_type, val) = self.visit_array(*value.unwrap(), block)?;
-        self.set_symbol(name, Some(ptr), arr_type.as_basic_type_enum(), val);
-        return Ok(());
-
-      } else {
-        set = self.visit(&value.unwrap(), block)?;
+          alloca.as_basic_value_enum()
+        },
+        // Case: Array rhs
+        // TODO: Handle heterogeneous arrays
+        Expr::Array(_) => {
+          let (ptr, typ, val) = self.build_array(*value.clone().unwrap(), block)?;
+          self.set_symbol(name, Some(ptr), typ.as_basic_type_enum(), val);
+          return Ok(());
+        },
+        _ => self.visit(&value.unwrap(), block)?,
       }
-    // If no value is provided, set to null
-    } else {
-      set = self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum();
-    }
-
-    // Convert bool to int when storing (for now)
-    if set.get_type() == self.context.bool_type().as_basic_type_enum() {
-      set = self.builder.build_int_z_extend(set.into_int_value(), self.context.i64_type(), "bool_to_int").unwrap().as_basic_value_enum();
-    }
-
-    // TODO: Check for constants
+    };
 
     // Setting new variable
     if let Some(Type(ty)) = ty {
@@ -1246,74 +1482,15 @@ impl<'ctx> CodeGen<'ctx> {
       }
 
       match ty.as_str() {
-        "let" => {
-          match set {
-            BasicValueEnum::IntValue(i) => {
-              // Allocate space and store the value
-              let ptr = self.builder.build_alloca(self.context.i64_type(), &name).unwrap();
-              self.builder.build_store(ptr, i).unwrap();
-
-              // Build tagged pointer
-              // let tagged = self.tag_ptr(ptr, *self.type_tags.get("int").unwrap());
-
-              // Set the symbol
-              self.set_symbol(name, Some(ptr), i.get_type().as_basic_type_enum(), i.into());
-            },
-            BasicValueEnum::FloatValue(f) => {
-              // Allocate space and store the value
-              let ptr = self.builder.build_alloca(self.context.f64_type(), &name).unwrap();
-              self.builder.build_store(ptr, f).unwrap();
-
-              // Build tagged pointer
-              // let tagged = self.tag_ptr(ptr, *self.type_tags.get("float").unwrap());
-
-              // Set the symbol
-              self.set_symbol(name, Some(ptr), f.get_type().as_basic_type_enum(),f.into());
-            },
-            BasicValueEnum::StructValue(s) => {
-              let var = self.builder.build_alloca(s.get_type(), &name).unwrap();
-              self.builder.build_store(var, s).unwrap();
-              self.set_symbol(name, Some(var), s.get_type().as_basic_type_enum(), s.into());
-            },
-            // Strings
-            BasicValueEnum::ArrayValue(a) => {
-              let var = self.builder.build_alloca(a.get_type(), &name).unwrap();
-              self.builder.build_store(var, a).unwrap();
-              self.set_symbol(name, Some(var), a.get_type().as_basic_type_enum(), a.into());
-            },
-            BasicValueEnum::PointerValue(a) => {
-              let var = self.builder.build_alloca(self.context.ptr_type(AddressSpace::default()), &name).unwrap();
-              self.builder.build_store(var, a).unwrap();
-              self.set_symbol(name, Some(var), a.get_type().as_basic_type_enum(), a.into());
-            },
-            _ => panic!("Invalid type for let"),
-          }
+        "let" | "const" | "int" | "bool" | "float" | "string" => {
+          // Allocate space and store the value
+          let ptr = self.builder.build_alloca(set.get_type(), &name).unwrap();
+          self.builder.build_store(ptr, set).unwrap();
+          // Set the symbol
+          self.set_symbol(name, Some(ptr), set.get_type(), set);
         },
-        "const" => {
-          match set {
-            BasicValueEnum::IntValue(i) => {
-              let var = self.builder.build_alloca(self.context.i64_type(), &name).unwrap();
-              self.builder.build_store(var, i).unwrap();
-              self.set_symbol(name, Some(var), i.get_type().as_basic_type_enum(), var.as_basic_value_enum());
-            },
-            BasicValueEnum::FloatValue(f) => {
-              let var = self.builder.build_alloca(self.context.f64_type(), &name).unwrap();
-              self.builder.build_store(var, f).unwrap();
-              self.set_symbol(name, Some(var), f.get_type().as_basic_type_enum(), var.as_basic_value_enum());
-            },
-            _ => panic!("Invalid type for const"),
-          }
-        },
-        _ => {
-          if ["int", "bool", "float", "string"].contains(&ty.as_str()) {
-            let var = self.builder.build_alloca(set.get_type(), &name).unwrap();
-            self.builder.build_store(var, set).unwrap();
-            self.set_symbol(name, Some(var), set.get_type(), set);
-          } else {
-            // Custom type (we know exists from builder)
-            self.set_symbol(name, None, set.get_type(), set);
-          }
-        },
+        // Custom type (we know exists from builder)
+        _ => self.set_symbol(name, None, set.get_type(), set),
       }
     } else {
       // Setting existing variable
@@ -1381,139 +1558,129 @@ impl<'ctx> CodeGen<'ctx> {
   fn build_function(&mut self, name: Name, ret_typ: Option<Literals>, params: Option<Box<Vec<Expression>>>, body: Option<Box<Vec<Expression>>>, block: BasicBlock<'ctx>) -> Result<(), Error> {
     // Get function parameters
     let mut parameters: Vec<BasicMetadataTypeEnum> = vec![];
-    // let mut placeholders: Vec<(usize, String, BasicTypeEnum)> = vec![];
-    let mut defaults: Vec<(usize, String, Box<Expression>)> = vec![];
+    let mut parameter_stack: Vec<FunctionParamCtx<'ctx>> = vec![];
     let mut variadic = false;
-    if params.is_some() {
-      for (i, param) in params.clone().unwrap().iter().enumerate() {
-        let (typ, _is_const, name, val, spread) = match param.clone().expr {
-          Expr::FunctionParam(ty, is_const, name, default_val, spread) => {
-            (
-              ty.unwrap(),
-              is_const,
-              match name {
-                Literals::Identifier(Name(name)) => name,
-                _ => panic!("Invalid function parameter"),
-              },
-              default_val,
-              spread
-            )
-          },
-          _ => panic!("Invalid function parameter"),
-        };
+    let mut variadic_param_name: Option<String> = None;
+    let mut variadic_param_type: Option<JType> = None;
 
-        // If spread
-        if spread {
-          // If not last parameter
-          if i < params.clone().unwrap().len() - 1 {
-            return Err(Error::new(
-              Error::CompilerError,
-              None,
-              &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-              param.first_pos,
-              param.last_line,
-              "Invalid use of spread operator in function parameters, must be last parameter".to_string()
-            ));
-          }
+    // If variadic, prepend function params to accept var count behind the scenes
+    if let Some(params_vec) = &params {
+      if params_vec.iter().any(|p| matches!(p.expr, Expr::FunctionParam(_, _, _, _, true))) {
+        variadic = true;
+        parameters.push(self.context.i64_type().into());
+      }
+    }
 
-          // If not the inferred/dynamic type or the array type
-          // TODO: Unwrap to array type for spread operator
-          if !["let", "const"].contains(&typ.0.as_str()) {
-            return Err(Error::new(
-              Error::CompilerError,
-              None,
-              &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-              param.first_pos,
-              param.last_line,
-              "Invalid use of spread operator in function parameters, must be array type".to_string()
-            ));
-          }
+    // Enter the function scope
+    // This is up here in case we encounter a struct parameter and need to create local mappings
+    self.enter_scope(true);
 
-          // TODO: Spread operator default
-          if val.is_some() {
-            // defaults.push
-
-          // TODO: Spread operator unpack?
-          // We know whether function is variadic so builder might have tool for unpacking variadic args
-          // Would need to be pushed into some sort of array/struct construction eventually
-          } else {
-            // placeholders.push
-          }
-
-          variadic = true;
-
-        // Not a spread op parameter
-        } else {
-          let _t: BasicTypeEnum = match typ.0.as_str() {
-            "let" => {
-              // let t = self.context.struct_type(&self.get_types_as_list(), false);
-              let t = self.context.ptr_type(AddressSpace::default());
-              parameters.push(t.into());
-              t.into()
+    for (i, param) in params.clone().unwrap().iter().enumerate() {
+      let (typ, _, name, default_value_expr, is_spread) = match param.clone().expr {
+        Expr::FunctionParam(ty, is_const, name, default_val, spread) => {
+          (
+            ty.unwrap(),
+            is_const,
+            match name {
+              Literals::Identifier(Name(name)) => name,
+              _ => panic!("Invalid function parameter"),
             },
-            "int" => {
+            default_val,
+            spread
+          )
+        },
+        _ => panic!("Invalid function parameter"),
+      };
+
+      // If spread
+      if is_spread {
+        // If not last parameter
+        if i < params.clone().unwrap().len() - 1 {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+            param.first_pos,
+            param.last_line,
+            "Invalid use of spread operator in function parameters, must be last parameter".to_string()
+          ));
+        }
+
+        variadic_param_name = Some(name.clone());
+        variadic_param_type = Some(param.clone().inferred_type.unwrap());
+
+      // Not a spread op parameter
+      } else {
+        let _t: BasicTypeEnum = match typ.0.as_str() {
+          "let" => {
+            // let t = self.context.struct_type(&self.get_types_as_list(), false);
+            let t = self.context.ptr_type(AddressSpace::default());
+            parameters.push(t.into());
+            t.into()
+          },
+          "int" => {
+            let t = self.context.i64_type();
+            parameters.push(t.into());
+            t.into()
+          },
+          "float" => {
+            let t = self.context.f64_type();
+            parameters.push(t.into());
+            t.into()
+          },
+          "bool" => {
+            let t = self.context.bool_type();
+            parameters.push(t.into());
+            t.into()
+          },
+          "string" => {
+            let t = self.context.ptr_type(AddressSpace::default());
+            parameters.push(t.into());
+            t.into()
+          },
+          _ => {
+            // Check for defined type (TODO: add aliases)
+
+            // Check for enum definition
+            if self.get_enum_mapping(&typ.0).is_some() {
               let t = self.context.i64_type();
               parameters.push(t.into());
+              // Map parameter name to its enum type within the function scope
+              self.set_enum_mapping(name.clone(), typ.0.clone());
               t.into()
-            },
-            "float" => {
-              let t = self.context.f64_type();
-              parameters.push(t.into());
-              t.into()
-            },
-            "bool" => {
-              let t = self.context.bool_type();
-              parameters.push(t.into());
-              t.into()
-            },
-            "string" => {
+
+            // Check for struct definition
+            } else if self.get_struct(&typ.0).is_some() {
               let t = self.context.ptr_type(AddressSpace::default());
               parameters.push(t.into());
+              // Map parameter name to its struct type within the function scope
+              self.set_struct_mapping(name.clone(), typ.0.clone());
               t.into()
-            },
-            _ => {
-              // Check for defined type (TODO: add aliases)
 
-              // Check for enum definition
-              let enum_type = self.enum_table.get(&typ.0);
-              if enum_type.is_some() {
-                let t = self.context.i64_type();
-                parameters.push(t.into());
-                t.into()
-
-              // Check for struct definition
-              } else {
-                let struct_ref = self.struct_table.get(&typ.0);
-                if struct_ref.is_none() {
-                  return Err(Error::new(
-                    Error::NameError,
-                    None,
-                    &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-                    param.first_pos,
-                    Some(typ.0.len() as i32),
-                    format!("Type {} not found", typ.0)
-                  ));
-                } else {
-                  let struct_type = self.context.get_struct_type(&typ.0).unwrap();
-                  let t = struct_type.as_basic_type_enum();
-                  parameters.push(t.into());
-                  t.into()
-                }
-              }
-            },
-          };
-
-          // If parameter has default
-          if val.is_some() {
-            defaults.push((i, name, val.unwrap()));
-
-          // If parameter is a placeholder (no default)
-          // TODO: Change this around. I think we can get the parameter pointers instead of re-allocating
-          } else {
-            // placeholders.push((i, name.0, t));
-          }
-        }
+            } else {
+              return Err(Error::new(
+                Error::NameError,
+                None,
+                &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+                param.first_pos,
+                Some(typ.0.len() as i32),
+                format!("Type {} not found", typ.0)
+              ));
+            }
+          },
+        };
       }
+
+      parameter_stack.push(FunctionParamCtx {
+        name: name.clone(),
+        jtype: param.clone().inferred_type.unwrap(),
+        _llvm_type: if is_spread {
+          self.context.ptr_type(AddressSpace::default()).into()
+        } else {
+          *parameters.last().unwrap()
+        },
+        default_value_expr, is_spread
+      });
     }
 
     // Get return type
@@ -1528,8 +1695,13 @@ impl<'ctx> CodeGen<'ctx> {
       "float" => self.context.f64_type().fn_type(&parameters, variadic),
       "void" => self.context.void_type().fn_type(&parameters, variadic),
       "bool" => self.context.bool_type().fn_type(&parameters, variadic),
+      "string" => self.context.ptr_type(AddressSpace::default()).fn_type(&parameters, variadic),
       _ => {
-        if self.struct_table.contains_key(&returns) {
+        // Check for enum
+        if self.get_enum_mapping(&returns).is_some() {
+          self.context.i64_type().fn_type(&parameters, variadic)
+        // Check for struct
+        } else if self.get_struct_mapping(&returns).is_some() {
           self.context.get_struct_type(&returns).unwrap().fn_type(&parameters, variadic)
         } else {
           return Err(Error::new(
@@ -1538,81 +1710,169 @@ impl<'ctx> CodeGen<'ctx> {
             &"",
             Some(0),
             Some(0),
-            format!("Type {} not found", returns)
+            format!("Type '{}' not found", returns)
           ));
         }
       },
     };
     let function = self.module.add_function(&name.0, func_type, None);
 
+    // Store function context
+    let fun_ctx = FunctionCtx {
+      llvm_fun: function,
+      parameters: parameter_stack.clone(),
+      _ret_type: returns.clone(),
+      variadic,
+    };
+    self.functions.insert(name.0.clone(), fun_ctx);
+
     // Create a new block for function body
     let mut func_block = self.context.append_basic_block(function, format!("{}-entry", name.0).as_str());
     self.builder.position_at_end(func_block);
 
-    // Set up function parameters
-    for (i, param) in function.get_params().iter().enumerate() {
+    // Variadic call will pass hidden count as first argument for va_list
+    let mut hidden_argument_offset = 0;
 
-      // Get name
-      let name: String = match params.clone().unwrap()[i].clone().expr {
-        Expr::FunctionParam(_, _, Literals::Identifier(Name(name)), _, _) => name,
-        _ => panic!("Invalid function parameter"),
+    // Get variadic count and build array if needed
+    let mut var_array_ptr: Option<PointerValue<'ctx>> = None;
+    let mut var_array_type: Option<BasicTypeEnum<'ctx>> = None;
+    if variadic {
+      hidden_argument_offset = 1;
+
+      // Get count from hidden first param
+      let var_arg_count = function.get_nth_param(0).unwrap().into_int_value();
+
+      // Get types
+      let var_llvm_type = self.jtype_to_basic_type(
+        variadic_param_type.expect("Variadic parameter missing type")
+      )?;
+
+      // Allocate for array to store variadic arguments
+      let array_ptr = self.builder.build_array_alloca(
+        var_llvm_type,
+        var_arg_count,
+        &format!("{}-args", name.0).as_str(),
+      ).unwrap();
+      var_array_ptr = Some(array_ptr);
+      var_array_type = Some(var_llvm_type);
+
+      // Define the target-specific va_list type
+      // In the x86-64 System V ABI, va_list should be:
+      // [1 x struct {
+      //   gp_offset:         i32, -- offset to next general-purpose register
+      //   fp_offset:         i32, -- offset to next floating-point register
+      //   overflow_arg_area: ptr, -- ptr to C stack area for args passed
+      //   reg_save_area:     ptr  -- ptr to area where registers are saved
+      // }]
+      // In Windows x64, va_list is char* -- pointer to the first argument
+
+      let ptr_type = self.context.ptr_type(AddressSpace::default());
+
+      #[cfg(not(target_os = "windows"))]
+      let va_list_type = {
+        let i32_type = self.context.i32_type();
+        let va_list_struct_fields: [BasicTypeEnum<'ctx>; 4] = [
+          i32_type.into(), // gp_offset
+          i32_type.into(), // fp_offset
+          ptr_type.into(), // overflow_arg_area
+          ptr_type.into(), // reg_save_area
+        ];
+        let va_list_struct_type = self.context.struct_type(&va_list_struct_fields, false);
+        // va_list = array of the single struct
+        va_list_struct_type.array_type(1)
       };
+      #[cfg(target_os = "windows")]
+      let va_list_type = ptr_type;
 
-      // Set parameter name
-      param.set_name(&name);
+      // Allocate for va_list object itself
+      let va_list_ptr = self.builder.build_alloca(va_list_type, "va_list_storage").unwrap();
 
-      // if in defaults
-      if let Some((_, _, default)) = defaults.iter().find(|(index, _, _)| *index == i) {
-        let val = self.visit(&default, func_block)?;
-        self.builder.build_store(param.into_pointer_value(), val).unwrap();
-        self.set_symbol(name, Some(param.into_pointer_value()), val.get_type(), val);
+      // llvm.va_start
+      let va_start_fn_name = "llvm.va_start";
+      let va_start_fn = self.module.get_function(va_start_fn_name).unwrap_or_else(|| {
+        let fn_type = self.context.void_type().fn_type(&[ptr_type.into()], false);
+        self.module.add_function(va_start_fn_name, fn_type, None)
+      });
+      self.builder.build_call(va_start_fn, &[va_list_ptr.into()], "call_va_start").unwrap();
 
-      // Not in defaults
-      } else {
-        // param.set_name(&params.clone().unwrap()[i].clone().expr.0);
-        // If not typed
-        if param.get_type().is_pointer_type() {
-          // let var = self.builder.build_alloca(param.get_type(), &param.get_name().to_str().unwrap()).unwrap();
-          // self.builder.build_store(var, param.into()).unwrap();
-          // self.set_symbol(name, Some(param.into_pointer_value()), *param);
+      // Loop and fill array using va_arg
+      let loop_block = self.context.append_basic_block(function, "va_arg_loop");
+      let after_loop_block = self.context.append_basic_block(function, "after_va_arg_loop");
 
-          // TODO: Load the variable to the correct type
-          // let (_, tag) = self.extract_tag(param.into_pointer_value());
-          // let t = self.get_tag_by_type(param.get_type().as_basic_type_enum());
-          // println!("{:?} {:?}", tag, t);
-        } else {
-          // let var = self.builder.build_alloca(param.get_type(), &param.get_name().to_str().unwrap()).unwrap();
-          // self.builder.build_store(var, param.into()).unwrap();
+      let index_ptr = self.builder.build_alloca(self.context.i64_type(), "var_idx").unwrap();
+      self.builder.build_store(index_ptr, self.context.i64_type().const_int(0, false)).unwrap();
+      self.builder.build_unconditional_branch(loop_block).unwrap();
+      self.builder.position_at_end(loop_block);
 
-          // self.builder.build_load(param.into(), param).unwrap();
-          // self.builder.build_store(param.into_pointer_value(), param.into()).unwrap();
+      let current_index = self.builder.build_load(self.context.i64_type(), index_ptr, "idx").unwrap().into_int_value();
+      let loop_cond = self.builder.build_int_compare(inkwell::IntPredicate::ULT, current_index, var_arg_count, "var_loop_cond").unwrap();
 
-          self.set_symbol(name, None, param.get_type(), *param);
-        }
-        // self.set_symbol(param.get_name().to_str().unwrap().to_string(), param.into_pointer_value(), *param);
+      let body_block = self.context.append_basic_block(function, "va_arg_body");
+      self.builder.build_conditional_branch(loop_cond, body_block, after_loop_block).unwrap();
+      self.builder.position_at_end(body_block);
+
+      {
+        // Build va_arg
+        // va_list pointer and the type to extract
+        let arg_val = self.builder.build_va_arg(va_list_ptr, var_llvm_type, "va_arg_val").unwrap();
+
+        // Get pointer to the array element
+        let element_ptr = unsafe {
+          self.builder.build_gep(var_llvm_type, array_ptr, &[current_index], "var_elem_ptr").unwrap()
+        };
+        // Store the retrieved value
+        self.builder.build_store(element_ptr, arg_val).unwrap();
+
+        // Increment index
+        let next_index = self.builder.build_int_add(current_index, self.context.i64_type().const_int(1, false), "next_idx").unwrap();
+        self.builder.build_store(index_ptr, next_index).unwrap();
+        self.builder.build_unconditional_branch(loop_block).unwrap(); // Branch back to loop condition
       }
+
+      // Position at the end of the loop
+      self.builder.position_at_end(after_loop_block);
+
+      // llvm.va_end
+      let va_end_fn_name = "llvm.va_end";
+      let va_end_fn = self.module.get_function(va_end_fn_name).unwrap_or_else(|| {
+        let fn_type = self.context.void_type().fn_type(&[ptr_type.into()], false);
+        self.module.add_function(va_end_fn_name, fn_type, None)
+      });
+      self.builder.build_call(va_end_fn, &[va_list_ptr.into()], "call_va_end").unwrap();
+
+      func_block = after_loop_block;
     }
 
-    // Add parameter defaults to the function
-    // for (i, n, default) in defaults.iter() {
-    //   let val = self.visit(&default, func_block)?;
-    //   let arg = function.get_nth_param(*i as u32).unwrap();
-    //   arg.set_name(&n);
-    //   self.builder.build_store(arg.into_pointer_value(), val).unwrap();
-    //   self.set_symbol(n.clone(), arg.into_pointer_value(), val);
-    // }
+    // Set up function parameters
+    for (i, llvm_param_val) in function.get_params().iter().enumerate() {
+      // Skip hidden arg count
+      if variadic && i == 0 { continue; }
 
-    // Add parameter placeholders to symbol table
-    // for (i, n, t) in placeholders.iter() {
-    //   let arg = function.get_nth_param(*i as u32).unwrap();
-    //   arg.set_name(&n);
-    //   let var = self.builder.build_alloca(t.clone(), &n).unwrap();
-    //   self.builder.build_store(var, arg).unwrap();
-    //   self.set_symbol(n.clone(), var, arg.into());
-    // }
+      // Get param info
+      let param_info = parameter_stack[i - hidden_argument_offset].clone();
+      if param_info.is_spread { continue; }
 
-    // Enter the function scope
-    self.enter_scope(true);
+      // Set parameter name
+      llvm_param_val.set_name(&param_info.name);
+
+      let jtype = param_info.jtype.clone();
+      match jtype {
+        // TODO: Handle when type is unknown at compile time
+        JType::Unknown => {
+          todo!("Handle unknown JType for parameter {} during code generation", param_info.name);
+        },
+        _ => {}
+      }
+
+      let alloca = self.builder.build_alloca(llvm_param_val.get_type(), &param_info.name).unwrap();
+      self.builder.build_store(alloca, *llvm_param_val).unwrap();
+      self.set_symbol(param_info.name, Some(alloca), llvm_param_val.get_type(), *llvm_param_val);
+    }
+
+    // If variadic, set the array pointer in the function context
+    if let (Some(name), Some(array_ptr), Some(array_type)) = (variadic_param_name, var_array_ptr, var_array_type) {
+      self.set_symbol(name, Some(array_ptr), array_type.array_type(0).as_basic_type_enum(), array_ptr.as_basic_value_enum());
+    }
 
     // Fill the function body
     for ex in body.as_ref().unwrap().iter() {
@@ -1659,24 +1919,6 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Exit the function scope
     self.exit_scope();
-
-    // Build the function params
-    // let mut items = vec![];
-    // for (i, param) in params.unwrap().iter().enumerate() {
-    //   let name = match param.clone().expr {
-    //     Expr::FunctionParam(_, name, _, _) => {
-    //       match name {
-    //         Literals::Identifier(name, _) => name,
-    //         _ => panic!("Invalid function parameter"),
-    //       }
-    //     },
-    //     _ => panic!("Invalid function parameter"),
-    //   };
-
-    //   let arg = function.get_nth_param(i as u32).unwrap();
-    //   arg.set_name(&name.0);
-    //   items.push(arg);
-    // }
 
     // Ignore if there is already a return
     if function.get_last_basic_block().unwrap().get_last_instruction().is_none() {
@@ -2206,9 +2448,9 @@ impl<'ctx> CodeGen<'ctx> {
     ));
   }
 
-  fn visit_array(&mut self, expr: Expression, block: BasicBlock<'ctx>) -> Result<(PointerValue<'ctx>, ArrayType<'ctx>, BasicValueEnum<'ctx>), Error> {
-    let a = match expr.expr {
-      Expr::Array(a) => a,
+  fn build_array(&mut self, expr: Expression, block: BasicBlock<'ctx>) -> Result<(PointerValue<'ctx>, ArrayType<'ctx>, BasicValueEnum<'ctx>), Error> {
+    let arr_exprs = match expr.expr {
+      Expr::Array(exprs) => exprs,
       _ => {
         return Err(Error::new(
           Error::ParserError,
@@ -2221,30 +2463,76 @@ impl<'ctx> CodeGen<'ctx> {
       }
     };
 
-    let mut values = Vec::new();
-    for v in a.iter() {
-      values.push(self.visit(&v, block)?.into_int_value());
+    // Get array element type
+    let elem_jtype = match expr.inferred_type.clone() {
+      Some(JType::Array(typ)) => *typ,
+      _ => {
+        // Fallback to the first element type if available
+        if let Some(elem) = arr_exprs.first() {
+          if let Some(typ) = elem.inferred_type.clone() {
+            typ
+          } else {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
+              expr.first_pos,
+              expr.last_line,
+              "Array type missing".to_string()
+            ));
+          }
+
+        // Array is empty
+        } else {
+          JType::Unknown
+        }
+      }
+    };
+
+    let llvm_elem_type = self.jtype_to_basic_type(elem_jtype.clone())?;
+    let array_len = arr_exprs.len() as u32;
+    let final_array_type = llvm_elem_type.array_type(array_len);
+
+    // Allocate memory for array
+    let array_alloca = self.builder.build_alloca(final_array_type, "arr_data").unwrap();
+
+    // Populate array memory
+    for (i, elem_expr) in arr_exprs.iter().enumerate() {
+      let elem_val = self.visit(elem_expr, block)?;
+      if elem_val.get_type() != llvm_elem_type {
+        return Err(Error::new(
+          Error::CompilerError,
+          None,
+          &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
+          expr.first_pos,
+          expr.last_line,
+          format!("Array element type mismatch: expected {:?}, got {:?}", llvm_elem_type, elem_val.get_type())
+        ));
+      }
+
+      let idx = self.context.i64_type().const_int(i as u64, false);
+      let elem_ptr = unsafe { self.builder.build_gep(final_array_type, array_alloca, &[self.context.i64_type().const_zero(), idx], "arr_elem") }.unwrap();
+      self.builder.build_store(elem_ptr, elem_val).unwrap();
     }
 
-    let struct_type = self.context.struct_type(&[
+    // Create the array object ({ len, arr_ptr })
+    let array_struct_type = self.context.struct_type(&[
       self.context.i64_type().into(),                        // len
       self.context.ptr_type(AddressSpace::default()).into(), // arr ptr
     ], false);
 
-    let array = self.context.i64_type().const_array(&values);
-    let arr_alloca = self.builder.build_alloca(array.get_type(), "arr").unwrap();
-    self.builder.build_store(arr_alloca, array).unwrap();
+    let array_struct_alloca = self.builder.build_alloca(array_struct_type, "array_alloc").unwrap();
 
-    let array_struct_alloca = self.builder.build_alloca(struct_type, "array_set").unwrap();
-
-    let length = self.context.i64_type().const_int(values.len() as u64, false);
-    let length_field_ptr = self.builder.build_struct_gep(struct_type, array_struct_alloca, 0, "arr_len").unwrap();
+    // Store pointer to length
+    let length = self.context.i64_type().const_int(array_len as u64, false);
+    let length_field_ptr = self.builder.build_struct_gep(array_struct_type, array_struct_alloca, 0, "arr_len_ptr").unwrap();
     self.builder.build_store(length_field_ptr, length).unwrap();
 
-    let array_field_ptr = self.builder.build_struct_gep(struct_type, array_struct_alloca, 1, "arr_ptr").unwrap();
-    self.builder.build_store(array_field_ptr, arr_alloca).unwrap();
+    // Store pointer to array
+    let array_field_ptr = self.builder.build_struct_gep(array_struct_type, array_struct_alloca, 1, "arr_data_ptr").unwrap();
+    self.builder.build_store(array_field_ptr, array_alloca).unwrap();
 
-    return Ok((arr_alloca, array.get_type(), array_struct_alloca.as_basic_value_enum()));
+    return Ok((array_alloca, final_array_type, array_struct_alloca.as_basic_value_enum()));
   }
 
   fn visit(&mut self, expr: &Expression, block: BasicBlock<'ctx>) -> Result<BasicValueEnum<'ctx>, Error> {
@@ -2254,7 +2542,7 @@ impl<'ctx> CodeGen<'ctx> {
 
     match expr.clone().expr {
       Expr::Literal(literal) => self.handle_literal(literal, expr),
-      Expr::BinaryOperator(op, lhs, rhs) => self.handle_binop(op, lhs, rhs, block),
+      Expr::BinaryOperator(op, lhs, rhs) => self.handle_binop(op, lhs, rhs, expr.clone().inferred_type.unwrap(), block),
       Expr::UnaryOperator(op, value) => self.handle_unop(op, value, block),
       Expr::Array(_) => panic!("Array not allowed in visit(), has its own visitor"),
       Expr::ArrayIndex(_, _) => {
@@ -2264,129 +2552,128 @@ impl<'ctx> CodeGen<'ctx> {
       Expr::TypeDef(_, _) => todo!(),
       Expr::Conditional(_, _, _, _) => panic!("Conditional not allowed here"),
       Expr::Call(name, args) => {
-        let function = self.module.get_function(&name.0);
-        if function.is_none() {
-          return Err(Error::new(
-            Error::CompilerError,
-            None,
-            &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-            expr.first_pos,
-            Some(expr.first_pos.unwrap() + name.0.len() as i32),
-            format!("Unknown function: {}", name.0)
-          ));
-        }
 
-        // If args don't match func params and func is not variadic
-        if args.len() != function.unwrap().get_params().len() && !function.unwrap().get_type().is_var_arg() {
-          return Err(Error::new(
-            Error::CompilerError,
-            None,
-            &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-            expr.first_pos,
-            expr.last_line,
-            format!("Function \"{}\" expected {} arguments, got {}", name.0, function.unwrap().get_params().len(), args.len())
-          ));
-        }
+        // Attempt to find function mapping
+        if let Some(fun_ctx) = self.functions.get(&name.0) {
 
-        // Old arg map
-        // let arg_values: Vec<BasicMetadataValueEnum> = args.iter().map(|arg| self.visit(&arg, block).unwrap().into()).collect();
+          // Collect function info
+          let llvm_fun = fun_ctx.llvm_fun;
+          let num_args_provided = args.len();
+          let num_args_required = self.get_required_function_param_count(&fun_ctx.parameters);
+          let num_params_total = fun_ctx.parameters.len();
+          let num_params_fixed = if fun_ctx.variadic { num_params_total - 1 } else { num_params_total };
+          let variadic = fun_ctx.variadic;
+          let param_names: Vec<String> = fun_ctx.parameters.iter().map(|p| p.name.clone()).collect();
+          let param_defaults: Vec<Option<Box<Expression>>> = fun_ctx.parameters.iter().map(|p| p.default_value_expr.clone()).collect();
 
-        let mut values: Vec<BasicValueEnum> = vec![];
-        let mut meta: Vec<BasicMetadataValueEnum> = vec![];
-        let mut ptrs: IndexMap<usize, Option<PointerValue<'ctx>>> = IndexMap::new();
-
-        // Build args
-        for (i, arg) in args.iter().enumerate() {
-          let mut val: BasicValueEnum<'ctx>;
-
-          // If arg is an identifier (variable) get the pointer and value if possible
-          if let Expr::Literal(Literals::Identifier(Name(name))) = arg.expr.clone() {
-            let (ptr, _, value) = self.var_from_ident(name, arg)?;
-            val = value;
-            if ptr.is_some() {
-              ptrs.insert(i, ptr);
-            }
-
-          // Get the value
-          } else {
-            val = self.visit(&arg, block)?;
+          // Check args count
+          if num_args_provided < num_args_required || (!variadic && num_args_provided > num_params_fixed) {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+              expr.first_pos,
+              expr.last_line,
+              format!("Function \"{}\" expected {} arguments, got {}", name.0, num_args_required, args.len())
+            ));
           }
 
-          // Convert bool to int when passing (for now)
-          if val.get_type() == self.context.bool_type().as_basic_type_enum() {
-            val = self.builder.build_int_z_extend(val.into_int_value(), self.context.i64_type(), "bool_to_int").unwrap().as_basic_value_enum();
+          // Build args list
+          let mut llvm_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(num_params_fixed + num_args_provided.saturating_sub(num_params_fixed));
+
+          // Add hidden count for variadic functions
+          if variadic {
+            let count = num_args_provided as i64 - num_params_fixed as i64;
+            let var_arg_count = if count > 0 { count } else { 0 };
+            llvm_args.push(self.context.i64_type().const_int(var_arg_count as u64, false).into());
           }
 
-          match val.into() {
-            BasicMetadataValueEnum::IntValue(int_value) => {
-              let int_type = int_value.get_type();
-              if int_type.get_bit_width() == 64 {
-                values.push(int_value.into());
-                meta.push(BasicMetadataValueEnum::IntValue(int_value));
-              } else {
-                values.push(val.into());
-                meta.push(val.into());
-              }
-            },
-            BasicMetadataValueEnum::PointerValue(ptr_value) => {
-              values.push(ptr_value.into());
-              meta.push(BasicMetadataValueEnum::PointerValue(ptr_value));
-            },
-            BasicMetadataValueEnum::ArrayValue(array_value) => {
-              let array_type = array_value.get_type();
-              let element_type = array_type.get_element_type();
-              if let BasicTypeEnum::IntType(int_type) = element_type {
-                // If string
-                if int_type.get_bit_width() == 8 {
-                  let global = self.module.add_global(array_type, None, "global");
-                  global.set_initializer(&array_value);
-                  let ptr = global.as_pointer_value();
-                  values.push(ptr.into());
-                  meta.push(BasicMetadataValueEnum::PointerValue(ptr));
-                } else {
-                  values.push(val.into());
-                  meta.push(val.into());
-                }
-              } else {
-                values.push(val.into());
-                meta.push(val.into());
-              }
-            },
-            _ => {
-              values.push(val.into());
-              meta.push(val.into());
-            },
-          }
-        }
+          for i in 0..num_params_fixed {
 
-        for (i, param) in function.unwrap().get_params().iter().enumerate() {
-          let param_type = param.get_type();
-          if param_type.is_pointer_type() {
-            if !values[i].is_pointer_value() {
-              // If we can get original pointer of value
-              if ptrs.get(&i).is_some() {
-                meta[i] = ptrs.get(&i).unwrap().unwrap().into();
-              // Build new pointer
+            // Argument was provided
+            let arg_val = if i < num_args_provided {
+              self.visit(&args[i], block)?
+
+            // Argument missing, confirm the function has a default to replace it
+            } else {
+              if param_defaults[i].is_some() {
+                // Get default value from function context
+                self.visit(param_defaults[i].as_ref().unwrap(), block)?
+
               } else {
-                let ptr = self.builder.build_alloca(param_type, "ptr").unwrap();
-                // self.tag_ptr(ptr, self.get_tag_by_type(values[i].get_type()));
-                self.builder.build_store(ptr, values[i]).unwrap();
-                meta[i] = ptr.into();
+                // Should be caught by earlier check
+                return Err(Error::new(
+                  Error::CompilerError,
+                  None,
+                  &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+                  expr.first_pos,
+                  expr.last_line,
+                  format!("Missing argument for parameter \"{}\"", param_names[i])
+                ));
               }
+            };
+
+            // TODO: Type checking against the LLVM type
+            // Example: if param_info.llvm_type is float and arg_val is int, build conversion
+            // let coerced_val = self.coerce_value(arg_val, param_info.llvm_type)?;
+            llvm_args.push(arg_val.into()); // Push coerced_val eventually
+          }
+
+          if variadic {
+            for i in num_params_fixed..num_args_provided {
+              let arg_val = self.visit(&args[i], block)?;
+              llvm_args.push(arg_val.into());
             }
           }
-        }
 
-        // Build call and extract value
-        let call = self.builder.build_call(function.unwrap(), &meta, &name.0).unwrap();
-        match call.try_as_basic_value().left() {
-          Some(val) => {
-            return Ok(val);
-          },
-          None => {
-            // Return null ptr if no value is returned
-            return Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum());
-          },
+          let call = self.builder.build_call(llvm_fun, &llvm_args, &name.0).unwrap();
+          match call.try_as_basic_value().basic() {
+            Some(val) => Ok(val),
+            None => Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum()),
+          }
+
+        // Our mapping was not found, check for built-in functions
+        } else {
+
+          let llvm_function = self.module.get_function(&name.0);
+          if llvm_function.is_none() {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+              expr.first_pos,
+              expr.last_line,
+              format!("Function \"{}\" not found", name.0)
+            ));
+          }
+
+          // Check args
+          let num_expected = llvm_function.unwrap().get_params().len() as usize;
+          let num_provided = args.len();
+          let is_llvm_variadic = llvm_function.unwrap().get_type().is_var_arg();
+          if !is_llvm_variadic && num_provided != num_expected {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+              expr.first_pos,
+              expr.last_line,
+              format!("Function \"{}\" expected {} arguments, got {}", name.0, num_expected, num_provided)
+            ));
+          }
+
+          // Visit provided args
+          let llvm_args: Vec<_> = args.iter().map(|arg| -> Result<_, Error> {
+            let val = self.visit(arg, block)?;
+            // TODO: Conversion (bool to int etc.)
+            Ok(val.into())
+          }).collect::<Result<Vec<_>, _>>()?;
+
+          let call = self.builder.build_call(llvm_function.unwrap(), &llvm_args, &name.0).unwrap();
+          return match call.try_as_basic_value().basic() {
+            Some(val) => Ok(val),
+            None => Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum()),
+          };
         }
       },
       Expr::Return(r) => {
@@ -2432,7 +2719,8 @@ impl<'ctx> CodeGen<'ctx> {
         return Ok(self.context.f64_type().const_float(f).as_basic_value_enum());
       },
       Literals::String(s) => {
-        return Ok(self.context.const_string(s.as_bytes(), true).as_basic_value_enum());
+        let ptr = self.builder.build_global_string_ptr(s.as_str(), "str").unwrap();
+        return Ok(ptr.as_basic_value_enum());
       },
       Literals::Boolean(b) => {
         return Ok(self.context.bool_type().const_int(b as u64, false).as_basic_value_enum());
@@ -2454,9 +2742,7 @@ impl<'ctx> CodeGen<'ctx> {
       // },
       Literals::Object(_) => panic!("Object literal not allowed here"),
       Literals::ObjectProperty(_, _) => todo!(),
-      Literals::Null => {
-        return Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum());
-      },
+      Literals::Null => Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum()),
       Literals::Identifier(n) => Ok(self.var_from_ident(n.0, expr)?.2),
       Literals::EOF => todo!(),
     }
@@ -2485,453 +2771,430 @@ impl<'ctx> CodeGen<'ctx> {
   }
 
   fn handle_unop(&mut self, op: Operator, value: Box<Expression>, block: BasicBlock<'ctx>) -> Result<BasicValueEnum<'ctx>, Error> {
-    let val: BasicValueEnum<'ctx>;
-    let mut name: Option<String> = None;
-    if let Expr::Literal(Literals::Identifier(n)) = value.clone().expr {
-      val = self.get_symbol(&n.0)?.unwrap().3;
-      name = Some(n.0);
-      // val = self.builder.build_load(val.into_pointer_value(), val.into_pointer_value(), &name.0).unwrap().as_basic_value_enum();
-    } else {
-      val = self.visit(&value, block)?;
-    }
+    let op_type = value.inferred_type.as_ref().ok_or_else(|| Error::new(
+      Error::CompilerError,
+      None,
+      &self.code.lines().nth((value.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+      value.first_pos,
+      value.last_line,
+      "Invalid unary operation".to_string()
+    ))?;
+    let val = self.visit(&value, block)?;
 
-    match op {
-      Operator(op) => {
-        match op.as_str() {
-          "-" => {
-            if name.is_some() {
-              // Reassign the identifier with the new value
-              let a = self.get_symbol(&name.unwrap())?.unwrap().1.unwrap();
-              if a.is_const() {
-                panic!("Cannot assign to a constant");
-              } else {
-                let val = self.builder.build_int_neg(val.into_int_value(), "negtmp").unwrap();
-                self.builder.build_store(a, val).unwrap();
-                return Ok(val.as_basic_value_enum());
-              }
-            } else {
-              return Ok(self.builder.build_int_neg(val.into_int_value(), "negtmp").unwrap().as_basic_value_enum());
-            }
-          },
-          "!" => {
-            if val.is_pointer_value() {
-              let null = self.context.ptr_type(AddressSpace::default()).const_null();
-              let cmp = self.builder.build_int_compare(inkwell::IntPredicate::EQ, val.into_pointer_value(), null, "notcmp").unwrap();
-              return Ok(self.builder.build_int_z_extend(cmp, self.context.i64_type(), "nottmp").unwrap().as_basic_value_enum());
-            }
-            return Ok(self.builder.build_not(val.into_int_value(), "nottmp").unwrap().as_basic_value_enum());
-          },
-          // Pre-increment (return the new value)
-          "++:pre" => {
-            if name.is_some() {
-              // Reassign the identifier with the new value
-              let a = self.get_symbol(&name.as_ref().unwrap())?.unwrap().1.unwrap();
-              if a.is_const() {
-                panic!("Cannot assign to a constant");
-              } else {
-                let v = self.builder.build_int_add(val.into_int_value(), self.context.i64_type().const_int(1, false), "addtmp").unwrap();
-                self.builder.build_store(a, v).unwrap();
-                self.set_symbol(name.unwrap(), Some(a), v.get_type().as_basic_type_enum(), v.as_basic_value_enum());
-                return Ok(v.as_basic_value_enum());
-              }
-            } else {
-              // Return the new value
-              return Ok(self.builder.build_int_add(val.into_int_value(), self.context.i64_type().const_int(1, false), "addtmp").unwrap().as_basic_value_enum());
-            }
-          },
-          // Post-increment (return the original value)
-          "++:post" => {
-            if name.is_some() {
-              // Reassign the identifier with the new value
-              let a = self.get_symbol(&name.as_ref().unwrap())?.unwrap().1.unwrap();
-              if a.is_const() {
-                panic!("Cannot assign to a constant");
-              } else {
-                let v = self.builder.build_int_add(val.into_int_value(), self.context.i64_type().const_int(1, false), "addtmp").unwrap();
-                self.builder.build_store(a, v).unwrap();
-                self.set_symbol(name.unwrap(), Some(a), v.get_type().as_basic_type_enum(), v.as_basic_value_enum());
-                return Ok(val);
-              }
-            } else {
-              // Return the original value
-              return Ok(val);
-            }
-          },
-          // Pre-decrement
-          "--:pre" => {
-            if name.is_some() {
-              // Reassign the identifier with the new value
-              let a = self.get_symbol(&name.as_ref().unwrap())?.unwrap().1.unwrap();
-              if a.is_const() {
-                panic!("Cannot assign to a constant");
-              } else {
-                let v = self.builder.build_int_sub(val.into_int_value(), self.context.i64_type().const_int(1, false), "subtmp").unwrap();
-                self.builder.build_store(a, v).unwrap();
-                self.set_symbol(name.unwrap(), Some(a), v.get_type().as_basic_type_enum(), v.as_basic_value_enum());
-                return Ok(v.as_basic_value_enum());
-              }
-            } else {
-              return Ok(self.builder.build_int_sub(val.into_int_value(), self.context.i64_type().const_int(1, false), "subtmp").unwrap().as_basic_value_enum());
-            }
-          },
-          // Post-decrement
-          "--:post" => {
-            if name.is_some() {
-              // Reassign the identifier with the new value
-              let a = self.get_symbol(&name.as_ref().unwrap())?.unwrap().1.unwrap();
-              if a.is_const() {
-                panic!("Cannot assign to a constant");
-              } else {
-                let v = self.builder.build_int_sub(val.into_int_value(), self.context.i64_type().const_int(1, false), "subtmp").unwrap();
-                self.builder.build_store(a, v).unwrap();
-                self.set_symbol(name.unwrap(), Some(a), v.get_type().as_basic_type_enum(), v.as_basic_value_enum());
-                return Ok(val);
-              }
-            } else {
-              return Ok(val);
-            }
-          },
-          _ => panic!("Unknown operator: {}", op),
+    match op.0.as_str() {
+      "-" => {
+        match op_type {
+          JType::Integer => Ok(self.builder.build_int_neg(val.into_int_value(), "negtmp").unwrap().as_basic_value_enum()),
+          JType::FloatingPoint => Ok(self.builder.build_float_neg(val.into_float_value(), "negtmp").unwrap().as_basic_value_enum()),
+          _ => unreachable!()
         }
       },
+      "!" => {
+        if val.is_pointer_value() {
+          let null = self.context.ptr_type(AddressSpace::default()).const_null();
+          let cmp = self.builder.build_int_compare(inkwell::IntPredicate::EQ, val.into_pointer_value(), null, "notcmp").unwrap();
+          return Ok(self.builder.build_int_z_extend(cmp, self.context.i64_type(), "nottmp").unwrap().as_basic_value_enum());
+        }
+        return Ok(self.builder.build_not(val.into_int_value(), "nottmp").unwrap().as_basic_value_enum());
+      },
+      "++:pre" | "++:post" | "--:pre" | "--:post" => {
+        // Get the identifier
+        let name = if let Expr::Literal(Literals::Identifier(ref n)) = value.expr {
+          n.0.clone()
+        } else {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth((value.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+            value.first_pos,
+            value.last_line,
+            "Invalid unary operation".to_string()
+          ));
+        };
+
+        // Get previous value info
+        let (ptr, typ, val) = self.var_from_ident(name.clone(), value.as_ref())?;
+        if ptr.is_none() {
+          return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth((value.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+            value.first_pos,
+            value.last_line,
+            "Invalid use of value in unary operation".to_string()
+          ));
+        }
+        let ptr = ptr.unwrap();
+
+        // Build new value
+        let new_val = match op_type {
+          JType::Integer => {
+            let one = self.context.i64_type().const_int(1, false);
+            if op.0.starts_with("++") {
+              self.builder.build_int_add(val.into_int_value(), one, "inc").unwrap().as_basic_value_enum()
+            } else {
+              self.builder.build_int_sub(val.into_int_value(), one, "dec").unwrap().as_basic_value_enum()
+            }
+          },
+          JType::FloatingPoint => {
+            let one = self.context.f64_type().const_float(1.0);
+            if op.0.starts_with("++") {
+              self.builder.build_float_add(val.into_float_value(), one, "inc").unwrap().as_basic_value_enum()
+            } else {
+              self.builder.build_float_sub(val.into_float_value(), one, "dec").unwrap().as_basic_value_enum()
+            }
+          },
+          _ => return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth((value.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+            value.first_pos,
+            value.last_line,
+            "Invalid unary operation".to_string()
+          )),
+        };
+
+        // Store the new value
+        self.builder.build_store(ptr, new_val).unwrap();
+        // Update the symbol table
+        self.set_symbol(name, Some(ptr), typ, new_val);
+
+        // Return one of the values
+        if op.0.ends_with(":pre") {
+          return Ok(new_val);
+        } else {
+          return Ok(val);
+        }
+      }
+      _ => panic!("Unknown operator: {}", op.0.as_str()),
     }
   }
 
   // Handle binary operators
-  // TODO: Improve / rewrite entirely
-  // Will either need more comprehensive type inference or an entire type analysis / check step before IR building
-  // Consider this entire function a temporary solution or broken
-  fn handle_binop(&mut self, op: Operator, lhs: Box<Expression>, rhs: Box<Expression>, block: BasicBlock<'ctx>) -> Result<BasicValueEnum<'ctx>, Error> {
+  fn handle_binop(&mut self, op: Operator, lhs: Box<Expression>, rhs: Box<Expression>, expected_type: JType, block: BasicBlock<'ctx>) -> Result<BasicValueEnum<'ctx>, Error> {
     let mut left = self.visit(&lhs, block)?;
     let mut right = self.visit(&rhs, block)?;
+    let lhs_type = lhs.inferred_type.as_ref().expect("Type checker should set this");
+    let rhs_type = rhs.inferred_type.as_ref().expect("Type checker should set this");
 
-    // Based on the left and right types, determine the correct operation to perform
-    let typ = match (left, right) {
-      // One of the values is a float
-      (BasicValueEnum::FloatValue(_), _) => "float".to_string(),
-      (_, BasicValueEnum::FloatValue(_)) => "float".to_string(),
-      // Both values are integers
-      (BasicValueEnum::IntValue(a), BasicValueEnum::IntValue(b)) => {
+    match op.0.as_str() {
+      "+" => {
+        match expected_type {
+          JType::FloatingPoint => {
+            if left.is_int_value() {
+              left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
+            }
+            if right.is_int_value() {
+              right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
+            }
 
-        // If only one of the values is a bool, convert it to an int
-        if a.get_type().get_bit_width() == 1 && b.get_type().get_bit_width() == 64 {
-          left = self.builder.build_int_z_extend(a, self.context.i64_type(), "left_int").unwrap().as_basic_value_enum();
-        } else if a.get_type().get_bit_width() == 64 && b.get_type().get_bit_width() == 1 {
-          right = self.builder.build_int_z_extend(b, self.context.i64_type(), "right_int").unwrap().as_basic_value_enum();
-        }
-
-        "int".to_string()
-      },
-      (BasicValueEnum::PointerValue(a), BasicValueEnum::PointerValue(b)) => {
-        // Get symbols from pointer names
-        println!("a: {:?}\nb: {:?}", a, b);
-        let (_, a_inst, a_type, _a_val, _) = self.get_symbol(&a.get_name().to_string_lossy())?.unwrap();
-        let (_, b_inst, b_type, _b_val, _) = self.get_symbol(&b.get_name().to_string_lossy())?.unwrap();
-
-        // panic!("Pointer arithmetic not yet implemented");
-        let a_value = self.builder.build_load(a_type, a_inst.unwrap(), "lhs_val").unwrap();
-        let b_value = self.builder.build_load(b_type, b_inst.unwrap(), "rhs_val").unwrap();
-
-        left = a_value.as_basic_value_enum();
-        right = b_value.as_basic_value_enum();
-
-        if a_value.is_int_value() && b_value.is_int_value() {
-          "int".to_string()
-        } else if a_value.is_float_value() && b_value.is_float_value() {
-          "float".to_string()
-        } else if a_value.is_int_value() && b_value.is_float_value() {
-          "float".to_string()
-        } else if a_value.is_float_value() && b_value.is_int_value() {
-          "float".to_string()
-        } else {
-          panic!("Invalid types for operation");
+            Ok(self.builder.build_float_add(
+              left.into_float_value(),
+              right.into_float_value(),
+              "addtmp"
+            ).unwrap().as_basic_value_enum())
+          },
+          JType::Integer => Ok(self.builder.build_int_add(
+            left.into_int_value(),
+            right.into_int_value(),
+            "addtmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for addition"), // TODO: pretty up errors
         }
       },
-      (BasicValueEnum::PointerValue(a), BasicValueEnum::IntValue(_)) => {
-        let (_, a_inst, _, _a_val, _) = self.get_symbol(&a.get_name().to_string_lossy())?.unwrap();
-        let a_value = self.builder.build_load(self.context.i64_type(), a_inst.unwrap(), "lhs_val").unwrap();
-        left = a_value.as_basic_value_enum();
-        "int".to_string()
-      },
-      (BasicValueEnum::IntValue(_), BasicValueEnum::PointerValue(b)) => {
-        let (_, b_inst, _, _b_val, _) = self.get_symbol(&b.get_name().to_string_lossy())?.unwrap();
-        let b_value = self.builder.build_load(self.context.i64_type(), b_inst.unwrap(), "rhs_val").unwrap();
-        left = b_value.as_basic_value_enum();
-        "int".to_string()
-      },
-      (BasicValueEnum::StructValue(a), BasicValueEnum::StructValue(b)) => {
-        // Get fields from struct values
-        let a_value = self.builder.build_extract_value(a, 0, "lhs_val").unwrap();
-        let b_value = self.builder.build_extract_value(b, 0, "rhs_val").unwrap();
+      "-" => {
+        match expected_type {
+          JType::FloatingPoint => {
+            if left.is_int_value() {
+              left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
+            }
+            if right.is_int_value() {
+              right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
+            }
 
-        left = a_value.as_basic_value_enum();
-        right = b_value.as_basic_value_enum();
-
-        if a_value.is_int_value() && b_value.is_int_value() {
-          "int".to_string()
-        } else if a_value.is_float_value() && b_value.is_float_value() {
-          "float".to_string()
-        } else if a_value.is_int_value() && b_value.is_float_value() {
-          "float".to_string()
-        } else if a_value.is_float_value() && b_value.is_int_value() {
-          "float".to_string()
-        } else if a_value.is_struct_value() && b_value.is_struct_value() {
-          // println!("{:?} {:?}", a_value, b_value);
-          todo!()
-        } else if a_value.is_pointer_value() && b_value.is_pointer_value() {
-          "int".to_string()
-        } else {
-          // println!("{:?} {:?}", a_value, b_value);
-          panic!("Invalid types for operation");
+            Ok(self.builder.build_float_sub(
+              left.into_float_value(),
+              right.into_float_value(),
+              "subtmp"
+            ).unwrap().as_basic_value_enum())
+          },
+          JType::Integer => Ok(self.builder.build_int_sub(
+            left.into_int_value(),
+            right.into_int_value(),
+            "subtmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for subtraction"), // TODO: pretty up errors
         }
       },
-      (BasicValueEnum::StructValue(a), b) => {
-        // Get fields from struct values
-        let a_value = self.builder.build_extract_value(a, 0, "lhs_val").unwrap();
+      "*" => {
+        match expected_type {
+          JType::FloatingPoint => {
+            if left.is_int_value() {
+              left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
+            }
+            if right.is_int_value() {
+              right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
+            }
 
-        left = a_value.as_basic_value_enum();
-
-        if a_value.is_int_value() && b.is_int_value() {
-          "int".to_string()
-        } else if a_value.is_float_value() && b.is_float_value() {
-          "float".to_string()
-        } else {
-          panic!("Invalid types for operation");
+            Ok(self.builder.build_float_mul(
+              left.into_float_value(),
+              right.into_float_value(),
+              "multmp"
+            ).unwrap().as_basic_value_enum())
+          },
+          JType::Integer =>  Ok(self.builder.build_int_mul(
+            left.into_int_value(),
+            right.into_int_value(),
+            "multmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for multiplication"),
         }
       },
-      (a, BasicValueEnum::StructValue(b)) => {
-        // Get fields from struct values
-        let b_value = self.builder.build_extract_value(b, 0, "rhs_val").unwrap();
+      "/" => {
+        match expected_type {
+          JType::FloatingPoint => {
+            if left.is_int_value() {
+              left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
+            }
+            if right.is_int_value() {
+              right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
+            }
 
-        right = b_value.as_basic_value_enum();
-
-        if a.is_int_value() && b_value.is_int_value() {
-          "int".to_string()
-        } else if a.is_float_value() && b_value.is_float_value() {
-          "float".to_string()
-        } else {
-          panic!("Invalid types for operation");
+            Ok(self.builder.build_float_div(
+              left.into_float_value(),
+              right.into_float_value(),
+              "divtmp"
+            ).unwrap().as_basic_value_enum())
+          },
+          JType::Integer => Ok(self.builder.build_int_unsigned_div(
+            left.into_int_value(),
+            right.into_int_value(),
+            "divtmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for division"),
         }
       },
-      // Default to bool
-      _ => "bool".to_string(),
-    };
+      "//" => {
+        todo!();
+      },
+      "%" => {
+        match expected_type {
+          JType::FloatingPoint => {
+            if left.is_int_value() {
+              left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
+            }
+            if right.is_int_value() {
+              right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
+            }
 
-    match op {
-      Operator(op) => {
-        match op.as_str() {
-          "+" => {
-            match typ.as_str() {
-              "float" => {
-                if left.is_int_value() {
-                  left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
-                }
-                if right.is_int_value() {
-                  right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
-                }
-                return Ok(self.builder.build_float_add(left.into_float_value(), right.into_float_value(), "addtmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_add(left.into_int_value(), right.into_int_value(), "addtmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for addition: {}", typ), // TODO: pretty up errors
-            }
+            Ok(self.builder.build_float_rem(
+              left.into_float_value(),
+              right.into_float_value(),
+              "remtmp"
+            ).unwrap().as_basic_value_enum())
           },
-          "-" => {
-            match typ.as_str() {
-              "float" => {
-                if left.is_int_value() {
-                  left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
-                }
-                if right.is_int_value() {
-                  right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
-                }
-                return Ok(self.builder.build_float_sub(left.into_float_value(), right.into_float_value(), "subtmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_sub(left.into_int_value(), right.into_int_value(), "subtmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for subtraction"), // TODO: pretty up errors
-            }
-          },
-          "*" => {
-            match typ.as_str() {
-              "float" => {
-                if left.is_int_value() {
-                  left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
-                }
-                if right.is_int_value() {
-                  right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
-                }
-                return Ok(self.builder.build_float_mul(left.into_float_value(), right.into_float_value(), "multmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_mul(left.into_int_value(), right.into_int_value(), "multmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for multiplication"),
-            }
-          },
-          "/" => {
-            match typ.as_str() {
-              "float" => {
-                if left.is_int_value() {
-                  left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
-                }
-                if right.is_int_value() {
-                  right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
-                }
-                return Ok(self.builder.build_float_div(left.into_float_value(), right.into_float_value(), "divtmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_unsigned_div(left.into_int_value(), right.into_int_value(), "divtmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for division"),
-            }
-          },
-          "//" => {
-            todo!();
-          },
-          "%" => {
-            match typ.as_str() {
-              "float" => {
-                if left.is_int_value() {
-                  left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
-                }
-                if right.is_int_value() {
-                  right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
-                }
-                return Ok(self.builder.build_float_rem(left.into_float_value(), right.into_float_value(), "remtmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_unsigned_rem(left.into_int_value(), right.into_int_value(), "remtmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for modulus"),
-            }
-          },
-          "^" => {
-            todo!();
-          },
-          "<<" => {
-            return Ok(self.builder.build_left_shift(left.into_int_value(), right.into_int_value(), "shltmp").unwrap().as_basic_value_enum());
-          },
-          ">>" => {
-            return Ok(self.builder.build_right_shift(left.into_int_value(), right.into_int_value(), false, "shrtmp").unwrap().as_basic_value_enum());
-          },
-          "&&" => {
-            return Ok(self.builder.build_and(left.into_int_value(), right.into_int_value(), "andtmp").unwrap().as_basic_value_enum());
-          },
-          "||" => {
-            return Ok(self.builder.build_or(left.into_int_value(), right.into_int_value(), "ortmp").unwrap().as_basic_value_enum());
-          },
-          "==" => {
-            match typ.as_str() {
-              "float" => {
-                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OEQ, left.into_float_value(), right.into_float_value(), "eqtmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::EQ, left.into_int_value(), right.into_int_value(), "eqtmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for equality"), // TODO: pretty up errors
-            }
-          },
-          "!=" => {
-            match typ.as_str() {
-              "float" => {
-                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::ONE, left.into_float_value(), right.into_float_value(), "netmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::NE, left.into_int_value(), right.into_int_value(), "netmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for inequality"), // TODO: pretty up errors
-            }
-          },
-          ">" => {
-            match typ.as_str() {
-              "float" => {
-                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OGT, left.into_float_value(), right.into_float_value(), "gttmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::SGT, left.into_int_value(), right.into_int_value(), "gttmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for greater than"), // TODO: pretty up errors
-            }
-          },
-          "<" => {
-            match typ.as_str() {
-              "float" => {
-                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OLT, left.into_float_value(), right.into_float_value(), "lttmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::SLT, left.into_int_value(), right.into_int_value(), "lttmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for less than"), // TODO: pretty up errors
-            }
-          },
-          ">=" => {
-            match typ.as_str() {
-              "float" => {
-                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OGE, left.into_float_value(), right.into_float_value(), "getmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::SGE, left.into_int_value(), right.into_int_value(), "getmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for greater than or equal"), // TODO: pretty up errors
-            }
-          },
-          "<=" => {
-            match typ.as_str() {
-              "float" => {
-                return Ok(self.builder.build_float_compare(inkwell::FloatPredicate::OLE, left.into_float_value(), right.into_float_value(), "letmp").unwrap().as_basic_value_enum());
-              },
-              "int" => {
-                return Ok(self.builder.build_int_compare(inkwell::IntPredicate::SLE, left.into_int_value(), right.into_int_value(), "letmp").unwrap().as_basic_value_enum());
-              },
-              _ => panic!("Invalid types for less than or equal"), // TODO: pretty up errors
-            }
-          },
-          "+=" => {
-            match typ.as_str() {
-              "float" => {
-                if let Expr::Literal(Literals::Identifier(n)) = lhs.clone().expr {
-                  let a = self.get_symbol(&n.0)?.unwrap().1.unwrap();
-                  if a.is_const() {
-                    panic!("Cannot assign to a constant");
-                  } else {
-                    let val = self.builder.build_float_add(left.into_float_value(), right.into_float_value(), "addtmp").unwrap();
-                    self.builder.build_store(a, val).unwrap();
-                    self.set_symbol(n.0, Some(a), val.get_type().as_basic_type_enum(), val.as_basic_value_enum());
-                    return Ok(val.as_basic_value_enum());
-                  }
-                } else {
-                  return Ok(self.builder.build_float_add(left.into_float_value(), right.into_float_value(), "addtmp").unwrap().as_basic_value_enum());
-                }
-              },
-              "int" => {
-                if let Expr::Literal(Literals::Identifier(n)) = lhs.clone().expr {
-                  let a = self.get_symbol(&n.0)?.unwrap().1.unwrap();
-                  if a.is_const() {
-                    panic!("Cannot assign to a constant");
-                  } else {
-                    let val = self.builder.build_int_add(left.into_int_value(), right.into_int_value(), "addtmp").unwrap();
-                    self.builder.build_store(a, val).unwrap();
-                    self.set_symbol(n.0, Some(a), val.get_type().as_basic_type_enum(), val.as_basic_value_enum());
-                    return Ok(val.as_basic_value_enum());
-                  }
-                } else {
-                  return Ok(self.builder.build_int_add(left.into_int_value(), right.into_int_value(), "addtmp").unwrap().as_basic_value_enum());
-                }
-              },
-              _ => panic!("Invalid types for addition"), // TODO: pretty up errors
-            }
-          },
-          "-=" => todo!(),
-          "*=" => todo!(),
-          "/=" => todo!(),
-          "//=" => todo!(),
-          "%=" => todo!(),
-          _ => panic!("Unknown operator: {}", op),
+          JType::Integer => Ok(self.builder.build_int_unsigned_rem(
+            left.into_int_value(),
+            right.into_int_value(),
+            "remtmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for modulus"),
         }
       },
+      "^" => {
+        todo!();
+      },
+      "<<" => Ok(self.builder.build_left_shift(
+        left.into_int_value(),
+        right.into_int_value(),
+        "shltmp"
+      ).unwrap().as_basic_value_enum()),
+      ">>" => Ok(self.builder.build_right_shift(
+        left.into_int_value(),
+        right.into_int_value(),
+        false,
+        "shrtmp"
+      ).unwrap().as_basic_value_enum()),
+      "&&" | "&" => Ok(self.builder.build_and(
+        left.into_int_value(),
+        right.into_int_value(),
+        "andtmp"
+      ).unwrap().as_basic_value_enum()),
+      "||" | "|" => Ok(self.builder.build_or(
+        left.into_int_value(),
+        right.into_int_value(),
+        "ortmp"
+      ).unwrap().as_basic_value_enum()),
+      "==" => {
+        match (lhs_type, rhs_type) {
+          (JType::FloatingPoint, JType::FloatingPoint) => Ok(self.builder.build_float_compare(
+            inkwell::FloatPredicate::OEQ,
+            left.into_float_value(),
+            right.into_float_value(),
+            "eqtmp"
+          ).unwrap().as_basic_value_enum()),
+          (JType::Integer, JType::Integer) => Ok(self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ,
+            left.into_int_value(),
+            right.into_int_value(),
+            "eqtmp"
+          ).unwrap().as_basic_value_enum()),
+          (JType::FloatingPoint, JType::Integer) | (JType::Integer, JType::FloatingPoint) => {
+            if left.is_int_value() {
+              left = self.builder.build_unsigned_int_to_float(left.into_int_value(), self.context.f64_type(), "left_float").unwrap().as_basic_value_enum();
+            }
+            if right.is_int_value() {
+              right = self.builder.build_unsigned_int_to_float(right.into_int_value(), self.context.f64_type(), "right_float").unwrap().as_basic_value_enum();
+            }
+            Ok(self.builder.build_float_compare(
+              inkwell::FloatPredicate::OEQ,
+              left.into_float_value(),
+              right.into_float_value(),
+              "eqtmp"
+            ).unwrap().as_basic_value_enum())
+          },
+          (JType::Enum(a_members), JType::Enum(b_members)) if a_members == b_members => Ok(self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ,
+            left.into_int_value(),
+            right.into_int_value(),
+            "eqtmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth((lhs.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+            lhs.first_pos,
+            lhs.last_line,
+            format!("Invalid types for equality: {} and {}", lhs_type, rhs_type)
+          ))
+        }
+      },
+      "!=" => {
+        match (lhs_type, rhs_type) {
+          (JType::FloatingPoint, JType::FloatingPoint) => Ok(self.builder.build_float_compare(
+            inkwell::FloatPredicate::ONE,
+            left.into_float_value(),
+            right.into_float_value(),
+            "netmp"
+          ).unwrap().as_basic_value_enum()),
+          (JType::Integer, JType::Integer) => Ok(self.builder.build_int_compare(
+            inkwell::IntPredicate::NE,
+            left.into_int_value(),
+            right.into_int_value(),
+            "netmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for inequality"), // TODO: pretty up errors
+        }
+      },
+      ">" => {
+        match (lhs_type, rhs_type) {
+          (JType::FloatingPoint, JType::FloatingPoint) => Ok(self.builder.build_float_compare(
+            inkwell::FloatPredicate::OGT,
+            left.into_float_value(),
+            right.into_float_value(),
+            "gttmp"
+          ).unwrap().as_basic_value_enum()),
+          (JType::Integer, JType::Integer) => Ok(self.builder.build_int_compare(
+            inkwell::IntPredicate::SGT,
+            left.into_int_value(),
+            right.into_int_value(),
+            "gttmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for greater than"), // TODO: pretty up errors
+        }
+      },
+      "<" => {
+        match (lhs_type, rhs_type) {
+          (JType::FloatingPoint, JType::FloatingPoint) => Ok(self.builder.build_float_compare(
+            inkwell::FloatPredicate::OLT,
+            left.into_float_value(),
+            right.into_float_value(),
+            "lttmp"
+          ).unwrap().as_basic_value_enum()),
+          (JType::Integer, JType::Integer) => Ok(self.builder.build_int_compare(
+            inkwell::IntPredicate::SLT,
+            left.into_int_value(),
+            right.into_int_value(),
+            "lttmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for less than"), // TODO: pretty up errors
+        }
+      },
+      ">=" => {
+        match (lhs_type, rhs_type) {
+          (JType::FloatingPoint, JType::FloatingPoint) => Ok(self.builder.build_float_compare(
+            inkwell::FloatPredicate::OGE,
+            left.into_float_value(),
+            right.into_float_value(),
+            "getmp"
+          ).unwrap().as_basic_value_enum()),
+          (JType::Integer, JType::Integer) => Ok(self.builder.build_int_compare(
+            inkwell::IntPredicate::SGE,
+            left.into_int_value(),
+            right.into_int_value(),
+            "getmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for greater than or equal"), // TODO: pretty up errors
+        }
+      },
+      "<=" => {
+        match (lhs_type, rhs_type) {
+          (JType::FloatingPoint, JType::FloatingPoint) => Ok(self.builder.build_float_compare(
+            inkwell::FloatPredicate::OLE,
+            left.into_float_value(),
+            right.into_float_value(),
+            "letmp"
+          ).unwrap().as_basic_value_enum()),
+          (JType::Integer, JType::Integer) => Ok(self.builder.build_int_compare(
+            inkwell::IntPredicate::SLE,
+            left.into_int_value(),
+            right.into_int_value(),
+            "letmp"
+          ).unwrap().as_basic_value_enum()),
+          _ => panic!("Invalid types for less than or equal"), // TODO: pretty up errors
+        }
+      },
+      "+=" => {
+        match lhs_type {
+          JType::FloatingPoint => {
+            if let Expr::Literal(Literals::Identifier(n)) = lhs.clone().expr {
+              let a = self.get_symbol(&n.0)?.unwrap().1.unwrap();
+              if a.is_const() {
+                panic!("Cannot assign to a constant");
+              } else {
+                let val = self.builder.build_float_add(left.into_float_value(), right.into_float_value(), "addtmp").unwrap();
+                self.builder.build_store(a, val).unwrap();
+                self.set_symbol(n.0, Some(a), val.get_type().as_basic_type_enum(), val.as_basic_value_enum());
+                return Ok(val.as_basic_value_enum());
+              }
+            } else {
+              return Ok(self.builder.build_float_add(left.into_float_value(), right.into_float_value(), "addtmp").unwrap().as_basic_value_enum());
+            }
+          },
+          JType::Integer => {
+            if let Expr::Literal(Literals::Identifier(n)) = lhs.clone().expr {
+              let a = self.get_symbol(&n.0)?.unwrap().1.unwrap();
+              if a.is_const() {
+                panic!("Cannot assign to a constant");
+              } else {
+                let val = self.builder.build_int_add(left.into_int_value(), right.into_int_value(), "addtmp").unwrap();
+                self.builder.build_store(a, val).unwrap();
+                self.set_symbol(n.0, Some(a), val.get_type().as_basic_type_enum(), val.as_basic_value_enum());
+                return Ok(val.as_basic_value_enum());
+              }
+            } else {
+              return Ok(self.builder.build_int_add(left.into_int_value(), right.into_int_value(), "addtmp").unwrap().as_basic_value_enum());
+            }
+          },
+          _ => panic!("Invalid types for addition"), // TODO: pretty up errors
+        }
+      },
+      "-=" => todo!(),
+      "*=" => todo!(),
+      "/=" => todo!(),
+      "//=" => todo!(),
+      "%=" => todo!(),
+      _ => panic!("Unknown operator: {}", op.0.as_str()),
     }
   }
 }
@@ -2939,6 +3202,7 @@ impl<'ctx> CodeGen<'ctx> {
 // Tests
 #[cfg(test)]
 mod tests {
+  use core::panic;
   use std::fs;
   use std::fs::File;
   use std::io::Write;
@@ -2949,45 +3213,68 @@ mod tests {
   // Compile the IR and assert the output matches
   fn build_and_assert(ir: LLVMString, output: &str) {
     let test_count = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let llvm_ir_name = format!("test{}.ll", test_count);
-    let executable_name = format!("test{}", test_count);
+    let llvm_ir_file = format!("./test{}.ll", test_count);
+    let executable_file = if cfg!(target_os = "windows") {
+      format!("./test{}.exe", test_count)
+    } else {
+      format!("./test{}", test_count)
+    };
 
     // Generate LLVM IR file
-    let mut file = File::create(format!("./{}", &llvm_ir_name)).unwrap();
+    let mut file = File::create(&llvm_ir_file).unwrap();
     file.write_all(ir.to_bytes()).unwrap();
 
-    // Compile and execute the binary
-    #[cfg(target_os = "windows")]
-    std::process::Command::new("clang")
-      .arg("-o")
-      .arg(format!("{}.exe", &executable_name)) // `test1.exe`
-      .arg(&llvm_ir_name)                      // `test1.ll`
-      .output()
-      .expect("Failed to compile LLVM IR");
-    #[cfg(not(target_os = "windows"))]
-    std::process::Command::new("clang")
-      .arg("-o")
-      .arg(&executable_name) // `test1`
-      .arg(&llvm_ir_name)   // `test1.ll`
-      .output()
-      .expect("Failed to compile LLVM IR");
-    #[cfg(target_os = "windows")]
-    let test = std::process::Command::new(format!("./{}.exe", &executable_name))
-      .output()
-      .expect("Failed to run executable");
-    #[cfg(not(target_os = "windows"))]
-    let test = std::process::Command::new(format!("./{}", &executable_name))
+    // Compile the executable
+    let clang_output = if cfg!(target_os = "windows") {
+      std::process::Command::new("clang")
+        .arg("-o")
+        .arg(&executable_file) // `test1.exe`
+        .arg(&llvm_ir_file)    // `test1.ll`
+        .output()
+        .expect(format!("Failed to execute clang for file {}", llvm_ir_file).as_str())
+    } else {
+      // If running in GitHub build tests workflow use clang-18
+      let clang_cmd = if std::env::var("GH_WORKFLOW").is_ok() {
+        std::process::Command::new("clang-18")
+        .arg("--version")
+        .output()
+        .expect("clang-18 is not available in the workflow environment");
+
+        "clang-18"
+      } else {
+        "clang"
+      };
+
+      std::process::Command::new(clang_cmd)
+        .arg("-o")
+        .arg(&executable_file) // `test1`
+        .arg("-no-pie")
+        .arg(&llvm_ir_file)    // `test1.ll`
+        .output()
+        .expect(format!("Failed to execute clang for file {}", llvm_ir_file).as_str())
+    };
+
+    // Check for clang errors
+    if !clang_output.status.success() {
+      panic!(
+        "clang compilation failed for '{}' (exit code: {:?}):\nStdout: {}\nStderr: {}",
+        llvm_ir_file,
+        clang_output.status.code(),
+        String::from_utf8_lossy(&clang_output.stdout),
+        String::from_utf8_lossy(&clang_output.stderr)
+      );
+    }
+
+    // Run the executable
+    let test = std::process::Command::new(&executable_file)
       .output()
       .expect("Failed to run executable");
 
     // Delete the test execution files
-    fs::remove_file(llvm_ir_name).unwrap();
-    #[cfg(target_os = "windows")]
-    fs::remove_file(format!("{}.exe", executable_name)).unwrap();
-    #[cfg(not(target_os = "windows"))]
-    fs::remove_file(executable_name).unwrap();
+    fs::remove_file(llvm_ir_file).unwrap();
+    fs::remove_file(executable_file).unwrap();
 
-    // Assert the output is correct
+    // Assert the output matches
     if !test.status.success() && String::from_utf8_lossy(&test.stderr) != "" {
       eprintln!("Error: {}", String::from_utf8_lossy(&test.stderr));
       assert!(false);
@@ -2996,173 +3283,193 @@ mod tests {
     }
   }
 
-  #[test]
-  fn test_compile_assignment_reassignment() -> Result<(), Error> {
+  // Test helper function
+  fn run_test(code: &str, expected: &str) -> Result<(), Error> {
     let context = Context::create();
     let mut codegen = CodeGen::new(&context);
-    let code = "let a = 1;
-    let b = 2;
-    a = 3;
-    let c = a + b;
-    printf(\"%d\", c);".to_string();
     let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "5");
-    return Ok(());
+    parser.set_source(code.to_string());
+    let mut ast = parser.parse(String::new(), false, true).unwrap();
+    let mut typer = crate::TypeChecker::new();
+    typer.set_source(code.to_string());
+    typer.check(&mut ast)?;
+    let ir = codegen.build(code.to_string(), ast, IndexMap::new(), false, false).unwrap();
+    build_and_assert(ir, expected);
+    Ok(())
   }
 
   #[test]
-  fn test_compile_multi_binop() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "let a = (1 + 2) * 3;
-    let b = 3;
-    printf(\"%d\", a / b);".to_string();
-    let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "3");
-    return Ok(());
+  fn test_build_assignment_reassignment() -> Result<(), Error> {
+    run_test("
+      let a = 1;
+      let b = 2;
+      a = 3;
+      let c = a + b;
+      printf(\"%d\", c);
+    ",
+    "5")
   }
 
   #[test]
-  fn test_assign_array_and_indexing() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "let a = [1, 2, 3];
-    let b = a[2];
-    printf(\"%d\", b);".to_string();
-    let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "3");
-    return Ok(());
+  fn test_build_multi_binop() -> Result<(), Error> {
+    run_test("
+      let a = (1 + 2) * 3;
+      let b = 3;
+      printf(\"%d\", a / b);
+    ",
+    "3")
   }
 
   #[test]
-  fn test_array_reassign_index() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "let a = [1, 2, 3];
-    a[0] = 4;
-    let b = a[0];
-    printf(\"%d\", b);".to_string();
-    let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "4");
-    return Ok(());
+  fn test_build_assign_array_and_indexing() -> Result<(), Error> {
+    run_test("
+      let a = [1, 2, 3];
+      let b = a[2];
+      printf(\"%d\", b);
+    ",
+    "3")
   }
 
   #[test]
-  fn test_for_loop() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "let array = [1, 2, 3, 4, 5];
-    for (let i in array) {
-      printf(\"%d\", array[i]);
-    }".to_string();
-    let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "12345");
-    return Ok(());
+  fn test_build_array_reassign_index() -> Result<(), Error> {
+    run_test("
+      let a = [1, 2, 3];
+      a[0] = 4;
+      let b = a[0];
+      printf(\"%d\", b);
+    ",
+    "4")
   }
 
   #[test]
-  fn test_while_loop() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "let i = 0;
-    while (i < 5) {
-      printf(\"%d\", i);
-      i = i + 1;
-    }".to_string();
-    let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "01234");
-    return Ok(());
+  fn test_build_for_loop() -> Result<(), Error> {
+    run_test("
+      let array = [1, 2, 3, 4, 5];
+      for (let i in array) {
+        printf(\"%d\", array[i]);
+      }
+    ",
+    "12345")
   }
 
   #[test]
-  fn test_conditional_phi() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "let a = 1;
-    if (a == 1) {
-      a = 5;
-    } else {
-      a = 10;
-    }
-    printf(\"%d\", a);".to_string();
-    let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "5");
-    return Ok(());
+  fn test_build_while_loop() -> Result<(), Error> {
+    run_test("
+      let i = 0;
+      while (i < 5) {
+        printf(\"%d\", i);
+        i = i + 1;
+      }
+    ",
+    "01234")
   }
 
   #[test]
-  fn test_type_struct_index() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "type Test = {
-      a: int,
-      b: int,
-    }
-    Test test = { a: 1, b: 2 };
-    printf(\"%d\", test.b);".to_string();
-    let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "2");
-    return Ok(());
+  fn test_build_continue_break() -> Result<(), Error> {
+    run_test("
+      let i = 0;
+      while (i < 5) {
+        if (i == 2) {
+          i = i + 1;
+          continue;
+        }
+        printf(\"%d\", i);
+        i = i + 1;
+      }
+    ",
+    "0134")
   }
 
   #[test]
-  fn test_deep_type_struct_index() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "// types
-    type TestType = { a: int, b: int, c: int, d: int, };
-    type TestTypeTwo = { test_one: TestType, };
-    type TestTypeThree = { test_two: TestTypeTwo, };
-    type TestTypeFour = { test_three: TestTypeThree, };
-    // vars
-    TestType test_var = { a: 1, b: 2, c: 3, d: 4 };
-    TestTypeTwo test_var_two = { test_one: test_var };
-    TestTypeThree test_var_three = { test_two: test_var_two };
-    TestTypeFour test_var_four = { test_three: test_var_three };
-    printf(\"%d, %d, %d, %d\",
-      test_var_four.test_three.test_two.test_one.a,
-      test_var_three.test_two.test_one.b,
-      test_var_two.test_one.c,
-      test_var.d
-    );".to_string();
-    let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "1, 2, 3, 4");
-    return Ok(());
+  fn test_build_function() -> Result<(), Error> {
+    run_test("
+      fun add(int a, int b) -> int {
+        return a + b;
+      }
+      let result = add(1, 2);
+      printf(\"%d\", result);
+    ",
+    "3")
   }
 
   #[test]
-  fn test_enum_type() -> Result<(), Error> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context);
-    let code = "enum TestEnum = {
-      TestOne,
-      TestTwo,
-      TestThree,
-    }
-    let test_var = TestEnum.TestThree;
-    printf(\"%d\", test_var);".to_string();
-    let mut parser = crate::Parser::new();
-    let ast = parser.parse(code.clone(), String::new(), false, false)?;
-    let ir = codegen.build(code, ast, IndexMap::new(), false, false)?;
-    build_and_assert(ir, "2");
-    return Ok(());
+  fn test_build_variadic_function() -> Result<(), Error> {
+    run_test("
+      fun add(int a, int b, int ...nums) -> int {
+        let sum = a + b;
+        for (let i in nums) {
+          sum += nums[i];
+        }
+        return sum;
+      }
+
+      let result = add(1, 2, 3, 4, 5);
+      printf(\"%d\", result);
+    ",
+    "15")
+  }
+
+  #[test]
+  fn test_build_conditional_phi() -> Result<(), Error> {
+    run_test("
+      let a = 1;
+      if (a == 1) {
+        a = 5;
+      } else {
+        a = 10;
+      }
+      printf(\"%d\", a);
+    ",
+    "5")
+  }
+
+  #[test]
+  fn test_build_type_struct_index() -> Result<(), Error> {
+    run_test("
+      type Test = {
+        a: int,
+        b: int,
+      }
+      Test test = { a: 1, b: 2 };
+      printf(\"%d\", test.b);
+    ",
+    "2")
+  }
+
+  #[test]
+  fn test_build_deep_type_struct_index() -> Result<(), Error> {
+    run_test("
+      // types
+      type TestType = { a: int, b: int, c: int, d: int, };
+      type TestTypeTwo = { test_one: TestType, };
+      type TestTypeThree = { test_two: TestTypeTwo, };
+      type TestTypeFour = { test_three: TestTypeThree, };
+      // vars
+      TestType test_var = { a: 1, b: 2, c: 3, d: 4 };
+      TestTypeTwo test_var_two = { test_one: test_var };
+      TestTypeThree test_var_three = { test_two: test_var_two };
+      TestTypeFour test_var_four = { test_three: test_var_three };
+      printf(\"%d, %d, %d, %d\",
+        test_var_four.test_three.test_two.test_one.a,
+        test_var_three.test_two.test_one.b,
+        test_var_two.test_one.c,
+        test_var.d
+      );
+    ",
+    "1, 2, 3, 4")
+  }
+
+  #[test]
+  fn test_build_enum_type() -> Result<(), Error> {
+    run_test("
+      enum TestEnum = {
+        TestOne,
+        TestTwo,
+        TestThree,
+      }
+      let test_var = TestEnum.TestThree;
+      printf(\"%d\", test_var);
+    ",
+    "2")
   }
 }

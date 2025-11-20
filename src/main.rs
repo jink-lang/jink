@@ -8,6 +8,7 @@ mod compiler;
 mod interpreter;
 use compiler::builder::CodeGen;
 use compiler::parser::Parser;
+use compiler::typer::TypeChecker;
 use interpreter::simulator::Simulator;
 
 fn main() {
@@ -44,8 +45,8 @@ fn main() {
     .expect("Failed to read file.");
 
   let mut parser = Parser::new();
+  parser.set_source(code.clone());
   let parsed = parser.parse(
-    code.clone(),
     fs::canonicalize(args[1].clone()).unwrap().to_str().unwrap().to_string(),
     verbose,
     false
@@ -79,14 +80,27 @@ fn main() {
     return;
   }
 
-  // if verbose {
-  //   println!("AST:");
-  //   println!("{:?}", parsed.as_ref().unwrap());
-  // }
+  let mut ast = parsed.unwrap();
+
+  // Type checking phase
+  if !interpret {
+    let mut type_checker = TypeChecker::new();
+    type_checker.set_source(code.clone());
+    let type_check_result = type_checker.check(&mut ast);
+
+    if let Err(err) = type_check_result {
+      println!("Type error: {}", err);
+      return;
+    }
+
+    if verbose {
+      println!("Type checking passed!");
+    }
+  }
 
   if interpret {
     let mut simulator = Simulator::new();
-    let simulated = simulator.simulate(code.clone(), parsed.unwrap(), verbose);
+    let simulated = simulator.simulate(code.clone(), ast, verbose);
     if let Err(err) = simulated {
       println!("{}", err);
       return;
@@ -100,7 +114,7 @@ fn main() {
 
     let ir = builder.build(
       code.clone(),
-      parsed.unwrap(),
+      ast,
       parser.namespaces,
       verbose,
       do_execute
