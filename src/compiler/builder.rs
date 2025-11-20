@@ -452,7 +452,7 @@ impl<'ctx> CodeGen<'ctx> {
         self.build_function(name, ret_typ, params, body, block)?;
       },
       Expr::Class(name, parents, body) => {
-        self.build_class(expr, name, parents, body, block)?;
+        self.build_class(expr, name, parents, body)?;
       },
       Expr::ModuleParsed(path, _, opts, ast) => {
         self.build_module(expr, path, opts, ast, main_fn)?;
@@ -462,12 +462,12 @@ impl<'ctx> CodeGen<'ctx> {
       },
       Expr::Delete(expr) => {
         println!("Delete: {:?}", expr);
-      }
+      },
       // When we add top level index expressions
       // i.e. hello[0].bye() or hello.bye() or module.property and module.method()
-      // Expr::Index(parent, child) => {
-      //   self.build_index_extract(parent, child, block)?;
-      // },
+      Expr::Index(parent, child) => {
+        self.build_index_extract(true, false, None, parent, child, block)?;
+      },
       // Expr::ArrayIndex(arr, index) => {
       //   println!("ArrayIndex: {:?} {:?}\n", arr, index);
       // },
@@ -537,6 +537,8 @@ impl<'ctx> CodeGen<'ctx> {
       // LLVM type name can get loaded with a number for multiple enum references
       if let Expr::Literal(Literals::Identifier(Name(ref name))) = parent.expr {
         (Some(parent_val), name.to_owned())
+      } else if let Expr::SelfRef = parent.expr {
+        (Some(parent_val), "self".to_string())
       } else {
         (Some(parent_val), parent_val.get_name().to_str().unwrap().to_owned())
       }
@@ -633,6 +635,54 @@ impl<'ctx> CodeGen<'ctx> {
       } else {
         return self.build_index_extract(false, true, None, Box::new(parent_expr), inner_child, block);
       }
+
+    // Method call
+    } else if let Expr::Call(Name(method_name), args) = child.expr {
+      let struct_name = struct_type_name.unwrap();
+      let full_method_name = format!("{}_{}", struct_name, method_name);
+
+      // Find function
+      let llvm_function = self.module.get_function(&full_method_name);
+      if llvm_function.is_none() {
+        return Err(Error::new(
+          Error::NameError,
+          None,
+          &self.code.lines().nth((child.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+          child.first_pos,
+          Some(child.first_pos.unwrap() + method_name.len() as i32),
+          format!("Method '{}' not found on type '{}'", method_name, struct_name)
+        ));
+      }
+      let llvm_fun = llvm_function.unwrap();
+
+      // Prepare args: self + args
+      let mut llvm_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len() + 1);
+
+      // Add self
+      if parent_val.unwrap().is_pointer_value() {
+        llvm_args.push(parent_val.unwrap().into_pointer_value().into());
+      } else {
+        let alloca = self.builder.build_alloca(parent_val.unwrap().get_type(), "self_tmp").unwrap();
+        self.builder.build_store(alloca, parent_val.unwrap()).unwrap();
+        llvm_args.push(alloca.into());
+      }
+
+      // Add other args
+      for arg in args.iter() {
+        let val = self.visit(&arg, block)?;
+        llvm_args.push(val.into());
+      }
+
+      let call = self.builder.build_call(llvm_fun, &llvm_args, &method_name).unwrap();
+
+      // Return result
+      let result = match call.try_as_basic_value().basic() {
+        Some(val) => val,
+        None => self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum(),
+      };
+
+      return Ok((result, None));
+
     } else {
       // Invalid index at child
       return Err(Error::new(
@@ -1004,6 +1054,7 @@ impl<'ctx> CodeGen<'ctx> {
           "int" => return Ok((self.context.i64_type().as_basic_type_enum(), None)),
           "float" => return Ok((self.context.f64_type().as_basic_type_enum(), None)),
           "bool" => return Ok((self.context.bool_type().as_basic_type_enum(), None)),
+          "string" => return Ok((self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(), None)),
           _ => {
             // Check for enum
             if let Some(enum_type) = self.get_enum_mapping(&name) {
@@ -1471,7 +1522,12 @@ impl<'ctx> CodeGen<'ctx> {
           self.set_symbol(name, Some(ptr), set.get_type(), set);
         },
         // Custom type (we know exists from builder)
-        _ => self.set_symbol(name, None, set.get_type(), set),
+        _ => {
+          self.set_symbol(name.clone(), None, set.get_type(), set);
+          if self.get_struct(ty.as_str()).is_some() || self.class_table.contains_key(ty.as_str()) {
+            self.set_struct_mapping(name, ty);
+          }
+        },
       }
     } else {
       // Setting existing variable
@@ -1644,7 +1700,7 @@ impl<'ctx> CodeGen<'ctx> {
                 None,
                 &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
                 param.first_pos,
-                Some(typ.0.len() as i32),
+                Some(param.first_pos.unwrap() + typ.0.len() as i32),
                 format!("Type {} not found", typ.0)
               ));
             }
@@ -1912,7 +1968,7 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(());
   }
 
-  fn build_class(&mut self, exp: Expression, Name(name): Name, parents: Option<Vec<Name>>, body: Option<Box<Vec<Expression>>>, block: BasicBlock<'ctx>) -> Result<(), Error> {
+  fn build_class(&mut self, exp: Expression, Name(name): Name, parents: Option<Vec<Name>>, body: Option<Box<Vec<Expression>>>) -> Result<(), Error> {
     // Get parents if any
     let mut parent_classes = vec![];
     if let Some(parents) = parents {
@@ -1942,6 +1998,7 @@ impl<'ctx> CodeGen<'ctx> {
     let mut methods: IndexMap<String, FunctionValue<'ctx>> = IndexMap::new();
     let mut method_params: IndexMap<String, IndexMap<String, BasicTypeEnum>> = IndexMap::new();
     let mut method_bodies: IndexMap<String, Option<Box<Vec<Expression>>>> = IndexMap::new();
+    let mut method_param_exprs: IndexMap<String, Option<Box<Vec<Expression>>>> = IndexMap::new();
 
     // Add parent class props and methods to class
     for parent in &parent_classes {
@@ -1965,8 +2022,14 @@ impl<'ctx> CodeGen<'ctx> {
       for expr in body.iter() {
 
         // Check for class methods
-        if let Expr::Function(Name(func_name), ret_typ, params, body) = expr.expr.clone() {
-          let (signature, mparams) = self.build_class_method_signature(expr.clone(), func_name.clone(), ret_typ, params)?;
+        let func_expr = if let Expr::Public(inner) = expr.expr.clone() {
+          inner.expr
+        } else {
+          expr.expr.clone()
+        };
+
+        if let Expr::Function(Name(func_name), ret_typ, params, body) = func_expr {
+          let (signature, mparams) = self.build_class_method_signature(expr.clone(), func_name.clone(), ret_typ, params.clone())?;
           let method_name = if func_name == "new" {
             if body.is_none() {
               return Err(Error::new(
@@ -1986,7 +2049,8 @@ impl<'ctx> CodeGen<'ctx> {
           let value = self.module.add_function(&method_name, signature, None);
           methods.insert(func_name.clone(), value);
           method_params.insert(func_name.clone(), mparams);
-          method_bodies.insert(func_name, body);
+          method_bodies.insert(func_name.clone(), body);
+          method_param_exprs.insert(func_name, params);
         }
       }
     }
@@ -2007,9 +2071,7 @@ impl<'ctx> CodeGen<'ctx> {
     // Add class to the known class information
     self.set_struct(name.clone(), vec![]);
     self.set_struct_mapping(name.clone(), name.clone());
-    // self.struct_table.insert(name.clone(), vec![]);
-    // self.struct_stack.insert(format!("{}_ptr", name), name.clone());
-    self.class_table.insert(name.clone(), (Some(parent_classes), types_as_fields.clone(), vec![]));
+    self.class_table.insert(name.clone(), (Some(parent_classes), types_as_fields.clone(), methods.clone().into_iter().collect()));
 
     // Set up the constructor
     let constructor = self.module.get_function(&format!("{}_constructor", name)).unwrap();
@@ -2018,6 +2080,7 @@ impl<'ctx> CodeGen<'ctx> {
     self.enter_scope(true);
 
     // Set up the class fields
+    let mut struct_fields: Vec<(String, BasicTypeEnum<'ctx>, Option<String>)> = vec![];
     for expr in body.unwrap().into_iter() {
       if let Expr::Assignment(typ, idx_or_ident, opt_var) = expr.expr.clone() {
         if let Expr::Index(parent, child) = expr.expr.clone() {
@@ -2059,6 +2122,7 @@ impl<'ctx> CodeGen<'ctx> {
           "int" => self.context.i64_type().as_basic_type_enum(),
           "float" => self.context.f64_type().as_basic_type_enum(),
           "bool" => self.context.bool_type().as_basic_type_enum(),
+          "string" => self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(),
           _ => {
 
             // Check for enum definition
@@ -2074,11 +2138,11 @@ impl<'ctx> CodeGen<'ctx> {
                   None,
                   &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
                   expr.first_pos,
-                  Some(typ.as_ref().unwrap().0.len() as i32),
+                  Some(expr.first_pos.unwrap() + typ.as_ref().unwrap().0.len() as i32),
                   format!("Type '{}' not found", typ.as_ref().unwrap().0)
                 ));
               } else {
-                self.context.get_struct_type(&typ.unwrap().0).unwrap().as_basic_type_enum()
+                self.context.get_struct_type(&typ.as_ref().unwrap().0).unwrap().as_basic_type_enum()
               }
             }
           },
@@ -2101,26 +2165,40 @@ impl<'ctx> CodeGen<'ctx> {
 
           types.push(set.get_type());
           let (_, field_name) = match idx_or_ident.expr {
-            Expr::Literal(Literals::Identifier(Name(name))) => (idx_or_ident.first_pos.unwrap(), name),
+            Expr::Literal(Literals::Identifier(Name(name))) => (idx_or_ident.first_pos.unwrap_or(0), name),
             _ => unreachable!(),
           };
           types_as_fields.push((field_name.clone(), field_type));
           defaults.push((field_name.clone(), set));
 
-          // Update the struct and class tables with the new fields
+          let type_name = typ.as_ref().unwrap().0.clone();
+          let struct_type_name = if self.get_struct(&type_name).is_some() {
+            Some(type_name)
+          } else {
+            None
+          };
+          struct_fields.push((field_name.clone(), field_type, struct_type_name));
+
+          // Update the class table with the new fields
           let (_, class_fields, _) = self.class_table.get_mut(&name).unwrap();
           class_fields.push((field_name.clone(), set.get_type()));
-          // TODO: Fix struct_table dead code:
-          // self.struct_table.get_mut(&name).unwrap().push((field_name, set.get_type(), None));
 
         // Field without default
         } else {
           let (_, field_name) = match idx_or_ident.expr {
-            Expr::Literal(Literals::Identifier(Name(name))) => (idx_or_ident.first_pos.unwrap(), name),
+            Expr::Literal(Literals::Identifier(Name(name))) => (idx_or_ident.first_pos.unwrap_or(0), name),
             _ => unreachable!(),
           };
           types.push(field_type);
           types_as_fields.push((field_name.clone(), field_type));
+
+          let type_name = typ.as_ref().unwrap().0.clone();
+          let struct_type_name = if self.get_struct(&type_name).is_some() {
+            Some(type_name)
+          } else {
+            None
+          };
+          struct_fields.push((field_name.clone(), field_type, struct_type_name));
 
           // Update the struct and class tables with the new fields
           let (_, class_fields, _) = self.class_table.get_mut(&name).unwrap();
@@ -2136,13 +2214,15 @@ impl<'ctx> CodeGen<'ctx> {
     class_struct.set_body(&types, false);
 
     // Build the class struct pointer to operate on in the constructor
-    let class_ptr = self.builder.build_alloca(class_struct, &format!("{}_ptr", name)).unwrap();
+    let class_ptr = constructor.get_nth_param(0).unwrap().into_pointer_value();
     self.current_class = Some(class_ptr);
 
-    // TODO: Build the class functions
-
+    let new_params_exprs = method_param_exprs.get("new").unwrap();
     // Build the constructor parameters
     for (i, param) in constructor.get_params().iter().enumerate() {
+      if i == 0 { continue; } // Skip self
+      let i = i - 1;
+
       // Get the nth parameter name
       let field_name = method_params.get("new").unwrap().into_iter().nth(i).unwrap().0.clone();
       // Store parameter
@@ -2150,25 +2230,29 @@ impl<'ctx> CodeGen<'ctx> {
       self.builder.build_store(var, *param).unwrap();
       // Ensure the constructor block is aware of the parameter
       self.set_symbol(field_name.clone(), Some(var), param.get_type(), *param);
+
+      // Set struct mapping if it is a struct
+      if let Some(params) = new_params_exprs {
+        let p = &params[i];
+        if let Expr::FunctionParam(Some(Type(type_name)), _, _, _, _) = &p.expr {
+          if self.get_struct(type_name).is_some() {
+            self.set_struct_mapping(field_name.clone(), type_name.clone());
+          }
+        }
+      }
     }
+
+    // Map self to class name
+    self.set_struct_mapping("self".to_string(), name.clone());
 
     // Build the constructor body
     let mut initialized_values: Vec<(String, BasicValueEnum<'ctx>)> = vec![];
     // We know constructor exists
     for ex in method_bodies.get("new").unwrap().to_owned().unwrap().into_iter() {
-      if let Expr::Index(parent, child) = ex.expr.clone() {
-        if let Expr::Index(_, _) = child.expr {
-          return Err(Error::new(
-            Error::CompilerError,
-            None,
-            &self.code.lines().nth((ex.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-            ex.first_pos,
-            ex.first_pos,
-            "Nested indexing is not supported in constructor definition.".to_string()
-          ));
-        } else if let Expr::SelfRef = parent.expr {
-          if let Expr::Assignment(_, lhs_expr, val) = child.expr {
-            if let Expr::Literal(Literals::Identifier(Name(field_name))) = lhs_expr.expr {
+      if let Expr::Assignment(_, lhs, val) = ex.expr.clone() {
+        if let Expr::Index(parent, child) = lhs.expr.clone() {
+          if let Expr::SelfRef = parent.expr {
+            if let Expr::Literal(Literals::Identifier(Name(field_name))) = child.expr {
               let set = self.visit(&val.unwrap(), constructor_entry_block)?;
 
               if set.get_type().as_basic_type_enum() != types_as_fields.iter().filter(|(name, _)| name == &field_name).nth(0).unwrap().1 {
@@ -2188,30 +2272,17 @@ impl<'ctx> CodeGen<'ctx> {
               }
 
               initialized_values.push((field_name, set));
-            } else { unreachable!(); }
-          } else if let Expr::Literal(Literals::Identifier(Name(field_name))) = child.expr {
-            return Err(Error::new(
-              Error::CompilerError,
-              None,
-              &self.code.lines().nth((ex.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-              ex.first_pos,
-              ex.first_pos,
-              format!("Field '{}' must be assigned a value", field_name)
-            ));
-          } else {
-            self.visit(&child, constructor_entry_block)?;
+              continue;
+            }
           }
-        } else {
-          self.visit(&ex, constructor_entry_block)?;
         }
+        self.build_assignment(ex, constructor_entry_block, false)?;
       } else if let Expr::Function(_, _, _, _) = ex.expr.clone() {
         continue;
       } else {
         self.visit(&ex, constructor_entry_block)?;
       }
     }
-
-    // self.builder.position_at_end(constructor_entry_block);
 
     // Set the initialized values
     for (i, (n, _)) in types_as_fields.iter().enumerate() {
@@ -2231,6 +2302,63 @@ impl<'ctx> CodeGen<'ctx> {
 
     self.exit_scope();
 
+    // Update struct table in the parent scope
+    self.set_struct(name.clone(), struct_fields);
+
+    // Build the other class methods
+    for (method_name, body) in method_bodies.iter() {
+      if method_name == "new" {
+        continue;
+      }
+
+      if let Some(body_exprs) = body {
+        let function = self.module.get_function(&format!("{}_{}", name, method_name)).unwrap();
+        let entry_block = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry_block);
+        self.enter_scope(true);
+
+        // Handle self parameter
+        let self_param = function.get_nth_param(0).unwrap();
+        // We treat self as a pointer to the struct
+        self.current_class = Some(self_param.into_pointer_value());
+        self.set_struct_mapping("self".to_string(), name.clone());
+
+        // Handle other parameters
+        if let Some(params) = method_param_exprs.get(method_name).unwrap() {
+          for (i, param) in params.iter().enumerate() {
+            let (param_name, Type(type_name)) = match &param.expr {
+              Expr::FunctionParam(ty, _, Literals::Identifier(Name(ident)), _, _) => (ident, ty.as_ref().unwrap()),
+              _ => panic!("Invalid function parameter"),
+            };
+
+            let val = function.get_nth_param((i + 1) as u32).unwrap();
+            let ptr = self.builder.build_alloca(val.get_type(), param_name).unwrap();
+            self.builder.build_store(ptr, val).unwrap();
+
+            self.set_symbol(param_name.clone(), Some(ptr), val.get_type(), val);
+
+            if self.get_struct(type_name).is_some() {
+              self.set_struct_mapping(param_name.clone(), type_name.clone());
+            }
+          }
+        }
+
+        // Build body
+        for expr in body_exprs.iter() {
+           self.visit(expr, entry_block)?;
+        }
+
+        // Handle void return if needed
+        if function.get_type().get_return_type().is_none() {
+           if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+              self.builder.build_return(None).unwrap();
+           }
+        }
+
+        self.exit_scope();
+      }
+    }
+
     self.current_class = None;
     return Ok(());
   }
@@ -2239,6 +2367,11 @@ impl<'ctx> CodeGen<'ctx> {
     // Collect the parameter types
     let mut fields: IndexMap<String, BasicTypeEnum<'ctx>> = IndexMap::new();
     let mut types: Vec<BasicMetadataTypeEnum<'ctx>> = vec![];
+
+    // Add self parameter
+    let self_ptr_type = self.context.ptr_type(AddressSpace::default());
+    types.push(self_ptr_type.into());
+
     if params.is_some() {
       for param in params.unwrap().into_iter() {
         let (param_name, Type(typ)) = match param.clone().expr {
@@ -2264,15 +2397,15 @@ impl<'ctx> CodeGen<'ctx> {
           "float" => self.context.f64_type().into(),
           "bool" => self.context.bool_type().into(),
           _ => {
-            if self.get_struct_mapping(&typ).is_some() {
-              self.context.get_struct_type(&typ).unwrap().into()
+            if self.get_struct(&typ).is_some() {
+              self.context.ptr_type(AddressSpace::default()).into()
             } else {
               return Err(Error::new(
                 Error::NameError,
                 None,
                 &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
                 param.first_pos,
-                Some(typ.len() as i32),
+                Some(param.first_pos.unwrap() + typ.len() as i32),
                 format!("Type '{}' not found", typ)
               ));
             }
@@ -2295,10 +2428,11 @@ impl<'ctx> CodeGen<'ctx> {
             "int" => self.context.i64_type().fn_type(&types, false),
             "float" => self.context.f64_type().fn_type(&types, false),
             "bool" => self.context.bool_type().fn_type(&types, false),
+            "string" => self.context.ptr_type(AddressSpace::default()).fn_type(&types, false),
             "void" => self.context.void_type().fn_type(&types, false),
             _ => {
-              if self.get_struct_mapping(&name).is_some() {
-                self.context.get_struct_type(&name).unwrap().fn_type(&types, false)
+              if self.get_struct(&name).is_some() {
+                self.context.ptr_type(AddressSpace::default()).fn_type(&types, false)
               } else {
                 return Err(Error::new(
                   Error::NameError,
@@ -2350,7 +2484,7 @@ impl<'ctx> CodeGen<'ctx> {
           None,
           &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
           expr.first_pos,
-          expr.last_line,
+          Some(expr.first_pos.unwrap() + n.len() as i32),
           format!("Variable {} not found", n)
         ));
       }
@@ -2537,9 +2671,14 @@ impl<'ctx> CodeGen<'ctx> {
       Expr::TypeDef(_, _) => todo!(),
       Expr::Conditional(_, _, _, _) => panic!("Conditional not allowed here"),
       Expr::Call(name, args) => {
+        let func_name = if self.class_table.contains_key(&name.0) {
+          format!("{}_constructor", name.0)
+        } else {
+          name.0.clone()
+        };
 
         // Attempt to find function mapping
-        if let Some(fun_ctx) = self.functions.get(&name.0) {
+        if let Some(fun_ctx) = self.functions.get(&func_name) {
 
           // Collect function info
           let llvm_fun = fun_ctx.llvm_fun;
@@ -2565,6 +2704,14 @@ impl<'ctx> CodeGen<'ctx> {
 
           // Build args list
           let mut llvm_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(num_params_fixed + num_args_provided.saturating_sub(num_params_fixed));
+
+          // Check if this is a constructor call
+          if self.class_table.contains_key(&name.0) {
+            // Allocate memory for the struct in the caller's stack
+            let struct_type = self.context.get_struct_type(&name.0).unwrap();
+            let struct_alloca = self.builder.build_alloca(struct_type, &format!("{}_inst", name.0)).unwrap();
+            llvm_args.push(struct_alloca.into());
+          }
 
           // Add hidden count for variadic functions
           if variadic {
@@ -2611,7 +2758,7 @@ impl<'ctx> CodeGen<'ctx> {
             }
           }
 
-          let call = self.builder.build_call(llvm_fun, &llvm_args, &name.0).unwrap();
+          let call = self.builder.build_call(llvm_fun, &llvm_args, &func_name).unwrap();
           match call.try_as_basic_value().basic() {
             Some(val) => Ok(val),
             None => Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum()),
@@ -2620,7 +2767,7 @@ impl<'ctx> CodeGen<'ctx> {
         // Our mapping was not found, check for built-in functions
         } else {
 
-          let llvm_function = self.module.get_function(&name.0);
+          let llvm_function = self.module.get_function(&func_name);
           if llvm_function.is_none() {
             return Err(Error::new(
               Error::CompilerError,
@@ -2636,25 +2783,44 @@ impl<'ctx> CodeGen<'ctx> {
           let num_expected = llvm_function.unwrap().get_params().len() as usize;
           let num_provided = args.len();
           let is_llvm_variadic = llvm_function.unwrap().get_type().is_var_arg();
-          if !is_llvm_variadic && num_provided != num_expected {
+
+          // Adjust for constructor call
+          let is_constructor = self.class_table.contains_key(&name.0);
+          let num_provided_adjusted = if is_constructor { num_provided + 1 } else { num_provided };
+
+          if !is_llvm_variadic && num_provided_adjusted != num_expected {
             return Err(Error::new(
               Error::CompilerError,
               None,
               &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
               expr.first_pos,
               expr.last_line,
-              format!("Function \"{}\" expected {} arguments, got {}", name.0, num_expected, num_provided)
+              format!("Function \"{}\" expected {} arguments, got {}", name.0, num_expected, num_provided_adjusted)
             ));
           }
 
           // Visit provided args
-          let llvm_args: Vec<_> = args.iter().map(|arg| -> Result<_, Error> {
-            let val = self.visit(arg, block)?;
-            // TODO: Conversion (bool to int etc.)
-            Ok(val.into())
-          }).collect::<Result<Vec<_>, _>>()?;
+          let mut llvm_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(num_provided_adjusted);
 
-          let call = self.builder.build_call(llvm_function.unwrap(), &llvm_args, &name.0).unwrap();
+          if is_constructor {
+             // Allocate memory for the struct in the caller's stack
+             let struct_type = self.context.get_struct_type(&name.0).unwrap();
+             let struct_alloca = self.builder.build_alloca(struct_type, &format!("{}_inst", name.0)).unwrap();
+             llvm_args.push(struct_alloca.into());
+          }
+
+          for arg in args.iter() {
+            let val = self.visit(arg, block)?;
+            llvm_args.push(val.into());
+          }
+
+          let call = self.builder.build_call(llvm_function.unwrap(), &llvm_args, &func_name).unwrap();
+
+          // If constructor, return the struct pointer (first arg)
+          if is_constructor {
+             return Ok(llvm_args[0].into_pointer_value().as_basic_value_enum());
+          }
+
           return match call.try_as_basic_value().basic() {
             Some(val) => Ok(val),
             None => Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum()),
@@ -3350,7 +3516,7 @@ mod tests {
   }
 
   #[test]
-  fn test_build_continue_break() -> Result<(), Error> {
+  fn test_build_continue() -> Result<(), Error> {
     run_test("
       let i = 0;
       while (i < 5) {
@@ -3363,6 +3529,21 @@ mod tests {
       }
     ",
     "0134")
+  }
+
+  #[test]
+  fn test_build_break() -> Result<(), Error> {
+    run_test("
+      let i = 0;
+      while (i < 5) {
+        if (i == 3) {
+          break;
+        }
+        printf(\"%d\", i);
+        i = i + 1;
+      }
+    ",
+    "012")
   }
 
   #[test]
@@ -3456,5 +3637,26 @@ mod tests {
       printf(\"%d\", test_var);
     ",
     "2")
+  }
+
+  #[test]
+  fn test_build_class_self() -> Result<(), Error> {
+    run_test("
+      cls TestClass = {
+        int a;
+
+        fun new(int a) -> self {
+          self.a = a;
+        }
+
+        fun print_self() -> void {
+          printf(\"%d\", self.a);
+        }
+      }
+
+      TestClass obj = TestClass(42);
+      obj.print_self();
+    ",
+    "42")
   }
 }
