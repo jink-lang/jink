@@ -149,32 +149,35 @@ import from module.abc.def {
 
 ##### Classes
 ```js
-type address = {
+type Address = {
   street: string,
   city: string,
   state: string,
   zip: int
-};
+}
 
 pub cls Business = {
-  fun new(string name, address addr) -> self {
-    self.name = name;
-    self.address = addr;
-  };
+  string name
+  Address address
 
-  pub fun get_address() -> address {
-    return self.address;
-  };
-};
+  fun new(string name, Address addr) -> self {
+    self.name = name
+    self.address = addr
+  }
+
+  pub fun get_address() -> Address {
+    return self.address
+  }
+}
 
 const business = Business("Jink", {
   street: "1234 Jink St.",
   city: "Jinkville",
   state: "Jinkland",
   zip: 12345
-});
+})
 
-print(business.get_address().city); // Jinkville
+print(business.get_address().city) // Jinkville
 ```
 
 ## Installation
