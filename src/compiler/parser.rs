@@ -1353,8 +1353,24 @@ impl Parser {
     if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator
       && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "->" {
       self.iter.next();
-      // Identifier for now
-      return_type = Some(self.consume(&[TokenTypes::Identifier], false)?);
+      // Self keyword or identifier
+      if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Keyword
+        && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "self" {
+        // Not class or constructor
+        if !self.is_parsing_class_body || identifier.value.as_ref().unwrap() != "new" {
+          return Err(Error::new(
+            Error::UnexpectedToken,
+            Some(self.iter.current.as_ref().unwrap().clone()),
+            self.code.lines().nth((self.iter.current.as_ref().unwrap().line - 1) as usize).unwrap(),
+            self.iter.current.as_ref().unwrap().start_pos,
+            self.iter.current.as_ref().unwrap().end_pos,
+            "Unexpected token".to_string()
+          ));
+        }
+        return_type = Some(self.consume(&[TokenTypes::Keyword], false)?);
+      } else {
+        return_type = Some(self.consume(&[TokenTypes::Identifier], false)?);
+      }
     }
 
     self.enter_scope(identifier.value.as_ref().unwrap().to_owned());
