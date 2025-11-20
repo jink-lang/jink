@@ -1,5 +1,5 @@
 use jink::{Error, ErrorCtx, Expr, Expression, Literals, Name, Operator, Type, JType};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 struct VariableInfo {
@@ -14,6 +14,9 @@ struct Scope {
 pub struct TypeChecker {
   source: String,
   scopes: Vec<Scope>,
+  classes: HashSet<String>,
+  class_definitions: HashMap<String, JType>,
+  class_methods: HashMap<String, HashMap<String, JType>>,
   // Flag for when we're in a function and expecting a return
   in_function: bool,
   // The expected return type of the current function
@@ -25,6 +28,9 @@ impl TypeChecker {
   pub fn new() -> Self {
     TypeChecker {
       scopes: vec![Scope { variables: HashMap::new() }], // Global scope
+      classes: HashSet::new(),
+      class_definitions: HashMap::new(),
+      class_methods: HashMap::new(),
       in_function: false,
       current_return_type: None,
       in_loop: false,
@@ -109,6 +115,10 @@ impl TypeChecker {
       "bool" => Ok(JType::Boolean),
       "void" => Ok(JType::Void),
       _ => {
+        if self.classes.contains(type_name) {
+          return Ok(JType::TypeName(type_name.to_string()));
+        }
+
         // Check if it's a user-defined type (class, enum, etc.)
         let var = self.lookup_variable(type_name);
         match var {
@@ -134,6 +144,11 @@ impl TypeChecker {
   // Check an expression and return its type
   fn check_expression(&mut self, expr: &mut Expression) -> Result<JType, String> {
     let typ = match &mut expr.expr {
+      Expr::SelfRef => {
+        Ok(self.lookup_variable("self")
+          .ok_or_else(|| "Variable 'self' not found.".to_string())?
+          .jtype)
+      },
       Expr::Literal(literal) => match literal {
         Literals::Integer(_) => Ok(JType::Integer),
         Literals::UnsignedInteger(_) => Ok(JType::UnsignedInteger),
@@ -257,6 +272,24 @@ impl TypeChecker {
               JType::Object(_) => {
                 // For objects, allow any assignment for now (TODO: check property type)
                 Ok(JType::Null)
+              }
+              JType::TypeName(type_name) => {
+                if let Some(JType::StructDef(fields)) = self.class_definitions.get(&type_name) {
+                  if let Expr::Literal(Literals::Identifier(Name(field_name))) = &idx_expr.expr {
+                    if let Some(field_type) = fields.get(field_name) {
+                      if !self.check_type_compatibility(field_type, &rhs_type) {
+                        return Err(format!("Type mismatch for field '{}'. Expected {}, got {}.", field_name, field_type, rhs_type));
+                      }
+                      Ok(JType::Null)
+                    } else {
+                      Err(format!("Property '{}' not found on type '{}'.", field_name, type_name))
+                    }
+                  } else {
+                    Err("Index expression must be identifier for object property assignment.".to_string())
+                  }
+                } else {
+                  Err(format!("Type definition for '{}' not found.", type_name))
+                }
               }
               _ => Err("Left-hand side of indexed assignment must be array or object.".to_string()),
             }
@@ -559,6 +592,95 @@ impl TypeChecker {
         Ok(JType::Null) // Function definition itself doesn't have a value type
       }
 
+      Expr::Class(Name(name), _parents, body) => {
+        self.classes.insert(name.clone());
+
+        // Find constructor to register it
+        let mut constructor_params = Vec::new();
+        if let Some(body_exprs) = body {
+          for expr in body_exprs.iter() {
+            if let Expr::Function(Name(func_name), _, params, _) = &expr.expr {
+              if func_name == "new" {
+                if let Some(param_items) = params {
+                  for param in param_items.iter() {
+                    if let Expr::FunctionParam(Some(Type(ptype)), _, _, _, is_spread) = &param.expr {
+                       let param_type = self.string_to_jtype(ptype)?;
+                       constructor_params.push(JType::FunctionParam(Box::new(param_type), None, *is_spread));
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // Extract fields
+        let mut fields = HashMap::new();
+        if let Some(body_exprs) = body {
+          for expr in body_exprs.iter() {
+            if let Expr::Assignment(Some(Type(type_name)), ident_expr, _) = &expr.expr {
+               if let Expr::Literal(Literals::Identifier(Name(field_name))) = &ident_expr.expr {
+                 let field_type = self.string_to_jtype(type_name)?;
+                 fields.insert(field_name.clone(), field_type);
+               }
+            }
+          }
+        }
+        self.class_definitions.insert(name.clone(), JType::StructDef(fields));
+
+        // Extract methods
+        let mut methods = HashMap::new();
+        if let Some(body_exprs) = body {
+          for expr in body_exprs.iter() {
+            let mut func_expr = &expr.expr;
+            if let Expr::Public(inner) = &expr.expr {
+               func_expr = &inner.expr;
+            }
+
+            if let Expr::Function(Name(func_name), return_type, params, _) = func_expr {
+               if func_name != "new" {
+                 let mut method_params = Vec::new();
+                 if let Some(param_items) = params {
+                   for param in param_items.iter() {
+                     if let Expr::FunctionParam(Some(Type(ptype)), _, _, _, is_spread) = &param.expr {
+                        let param_type = self.string_to_jtype(ptype)?;
+                        method_params.push(JType::FunctionParam(Box::new(param_type), None, *is_spread));
+                     }
+                   }
+                 }
+                 
+                 let ret_type = match return_type {
+                    Some(Literals::Identifier(Name(rt_name))) => self.string_to_jtype(rt_name)?,
+                    None => JType::Void,
+                    _ => JType::Unknown
+                 };
+                 
+                 let method_type = JType::Function(method_params, Box::new(ret_type));
+                 methods.insert(func_name.clone(), method_type);
+               }
+            }
+          }
+        }
+        self.class_methods.insert(name.clone(), methods);
+
+        // Register constructor function
+        let constructor_type = JType::Function(constructor_params, Box::new(JType::TypeName(name.clone())));
+        self.add_variable(name, constructor_type, false)?;
+
+        // Check body
+        if let Some(body_exprs) = body {
+          self.enter_scope();
+          self.add_variable("self", JType::TypeName(name.clone()), false)?;
+
+          for expr in body_exprs.iter_mut() {
+            self.check_expression(expr)?;
+          }
+          self.exit_scope();
+        }
+
+        Ok(JType::Void)
+      }
+
       Expr::Return(expr_opt) => {
         if !self.in_function {
           return Err("Return statement outside of function.".to_string());
@@ -785,6 +907,18 @@ impl TypeChecker {
                     return Err(format!("Property '{}' not found on type '{}'.", member_name, cur_lhs_type));
                   }
                 },
+                JType::TypeName(type_name) => {
+                  if let Some(JType::StructDef(fields)) = self.class_definitions.get(&type_name) {
+                    if let Some(field_type) = fields.get(member_name) {
+                      cur_lhs_type = field_type.clone();
+                      cur_chain_node.inferred_type = Some(cur_lhs_type.clone());
+                    } else {
+                      return Err(format!("Property '{}' not found on type '{}'.", member_name, type_name));
+                    }
+                  } else {
+                     return Err(format!("Type definition for '{}' not found.", type_name));
+                  }
+                },
                 JType::Enum(enum_members_list) => {
                   // Accessing MyEnum.MEMBER
                   if enum_members_list.contains(member_name) {
@@ -818,6 +952,19 @@ impl TypeChecker {
                     return Err(format!("Property '{}' not found on type '{}'.", member_name_to_access, cur_lhs_type));
                   }
                 },
+                JType::TypeName(type_name) => {
+                  if let Some(JType::StructDef(fields)) = self.class_definitions.get(&type_name) {
+                    if let Some(field_type) = fields.get(member_name_to_access) {
+                      cur_lhs_type = field_type.clone();
+                      next_rhs.inferred_type = Some(cur_lhs_type.clone());
+                      cur_chain_node = next_rhs;
+                    } else {
+                      return Err(format!("Property '{}' not found on type '{}'.", member_name_to_access, type_name));
+                    }
+                  } else {
+                     return Err(format!("Type definition for '{}' not found.", type_name));
+                  }
+                },
                 _ => return Err(format!("Type '{}' does not support '.' accessor for member '{}'.", cur_lhs_type, member_name_to_access)),
               }
             },
@@ -826,6 +973,13 @@ impl TypeChecker {
             Expr::Call(Name(method_name), args_expr_vec) => {
               let method_type = match cur_lhs_type.clone() {
                 JType::Object(object_fields) => object_fields.get(method_name).cloned(),
+                JType::TypeName(type_name) => {
+                  if let Some(methods) = self.class_methods.get(&type_name) {
+                    methods.get(method_name).cloned()
+                  } else {
+                    None
+                  }
+                },
                 _ => None,
               };
 
