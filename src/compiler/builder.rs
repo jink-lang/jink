@@ -2396,6 +2396,7 @@ impl<'ctx> CodeGen<'ctx> {
           "int" => self.context.i64_type().into(),
           "float" => self.context.f64_type().into(),
           "bool" => self.context.bool_type().into(),
+          "string" => self.context.ptr_type(AddressSpace::default()).into(),
           _ => {
             if self.get_struct(&typ).is_some() {
               self.context.ptr_type(AddressSpace::default()).into()
