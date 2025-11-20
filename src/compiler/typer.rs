@@ -14,8 +14,8 @@ struct Scope {
 pub struct TypeChecker {
   source: String,
   scopes: Vec<Scope>,
-  classes: HashSet<String>,
-  class_definitions: HashMap<String, JType>,
+  types: HashSet<String>,
+  type_definitions: HashMap<String, JType>,
   class_methods: HashMap<String, HashMap<String, JType>>,
   // Flag for when we're in a function and expecting a return
   in_function: bool,
@@ -28,8 +28,8 @@ impl TypeChecker {
   pub fn new() -> Self {
     TypeChecker {
       scopes: vec![Scope { variables: HashMap::new() }], // Global scope
-      classes: HashSet::new(),
-      class_definitions: HashMap::new(),
+      types: HashSet::new(),
+      type_definitions: HashMap::new(),
       class_methods: HashMap::new(),
       in_function: false,
       current_return_type: None,
@@ -115,7 +115,7 @@ impl TypeChecker {
       "bool" => Ok(JType::Boolean),
       "void" => Ok(JType::Void),
       _ => {
-        if self.classes.contains(type_name) {
+        if self.types.contains(type_name) {
           return Ok(JType::TypeName(type_name.to_string()));
         }
 
@@ -135,10 +135,32 @@ impl TypeChecker {
       return true;
     }
 
-    // TODO: Handle TypeName comparison (lookup definition)
+    // TODO: Handle other TypeName definition comparisons and inheritance
     // TODO: Generics? Not sure how we'll do this in Jink yet
     // TODO: Handle Null compatibility (like assigning null to nullables and objects)
-    expected == actual
+    if expected == actual {
+      return true;
+    }
+
+    match (expected, actual) {
+      (JType::TypeName(name), JType::Object(obj_fields)) => {
+        if let Some(JType::StructDef(struct_fields)) = self.type_definitions.get(name) {
+          // Check if all struct fields are present in object and have compatible types
+          for (field_name, field_type) in struct_fields {
+            if let Some(obj_field_type) = obj_fields.get(field_name) {
+              if !self.check_type_compatibility(field_type, obj_field_type) {
+                return false;
+              }
+            } else {
+              return false; // Missing field
+            }
+          }
+          return true;
+        }
+        false
+      },
+      _ => false
+    }
   }
 
   // Check an expression and return its type
@@ -278,7 +300,7 @@ impl TypeChecker {
                 Ok(JType::Null)
               }
               JType::TypeName(type_name) => {
-                if let Some(JType::StructDef(fields)) = self.class_definitions.get(&type_name) {
+                if let Some(JType::StructDef(fields)) = self.type_definitions.get(&type_name) {
                   if let Expr::Literal(Literals::Identifier(Name(field_name))) = &idx_expr.expr {
                     if let Some(field_type) = fields.get(field_name) {
                       if !self.check_type_compatibility(field_type, &rhs_type) {
@@ -471,6 +493,13 @@ impl TypeChecker {
                     "Type mismatch for argument {} in call to '{}'. Expected {}, got {}.",
                     i + 1, func_name, param_type, provided_arg_types[i]
                   ));
+                } else {
+                  // If we have TypeName expected and Object provided, update the expression's inferred type
+                  if matches!(**param_type, JType::TypeName(_)) && matches!(provided_arg_types[i], JType::Object(_)) {
+                    if i < args_expr.len() {
+                      args_expr[i].inferred_type = Some(*param_type.clone());
+                    }
+                  }
                 }
               },
               _ => {},
@@ -597,7 +626,7 @@ impl TypeChecker {
       }
 
       Expr::Class(Name(name), _parents, body) => {
-        self.classes.insert(name.clone());
+        self.types.insert(name.clone());
 
         // Find constructor to register it
         let mut constructor_params = Vec::new();
@@ -630,7 +659,7 @@ impl TypeChecker {
             }
           }
         }
-        self.class_definitions.insert(name.clone(), JType::StructDef(fields));
+        self.type_definitions.insert(name.clone(), JType::StructDef(fields));
 
         // Extract methods
         let mut methods = HashMap::new();
@@ -851,7 +880,9 @@ impl TypeChecker {
           // type MyType = { a: int, b: string };
           Literals::Object(inner) => {
             let props = self.check_object(inner, true)?;
-            self.add_variable(&name.0, JType::Object(props.clone()), false)?;
+            self.types.insert(name.0.clone());
+            self.type_definitions.insert(name.0.clone(), JType::StructDef(props.clone()));
+            self.add_variable(&name.0, JType::Object(props), false)?;
           },
           _ => {
             return Err(format!("Invalid type definition for '{}'.", name.0));
@@ -912,7 +943,7 @@ impl TypeChecker {
                   }
                 },
                 JType::TypeName(type_name) => {
-                  if let Some(JType::StructDef(fields)) = self.class_definitions.get(&type_name) {
+                  if let Some(JType::StructDef(fields)) = self.type_definitions.get(&type_name) {
                     if let Some(field_type) = fields.get(member_name) {
                       cur_lhs_type = field_type.clone();
                       cur_chain_node.inferred_type = Some(cur_lhs_type.clone());
@@ -957,7 +988,7 @@ impl TypeChecker {
                   }
                 },
                 JType::TypeName(type_name) => {
-                  if let Some(JType::StructDef(fields)) = self.class_definitions.get(&type_name) {
+                  if let Some(JType::StructDef(fields)) = self.type_definitions.get(&type_name) {
                     if let Some(field_type) = fields.get(member_name_to_access) {
                       cur_lhs_type = field_type.clone();
                       next_rhs.inferred_type = Some(cur_lhs_type.clone());

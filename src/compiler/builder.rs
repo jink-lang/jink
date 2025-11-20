@@ -2877,22 +2877,61 @@ impl<'ctx> CodeGen<'ctx> {
       Literals::Boolean(b) => {
         return Ok(self.context.bool_type().const_int(b as u64, false).as_basic_value_enum());
       },
-      // Literals::Object(obj) => {
+      Literals::Object(obj) => {
+        let struct_name = match expr.inferred_type.clone() {
+          Some(JType::TypeName(name)) => name,
+          _ => panic!("Object literal must be typed (inferred as {:?})", expr.inferred_type),
+        };
 
-      //   println!("{:?}", expr);
-      //   panic!("Testing");
-      //   let mut values: Vec<BasicValueEnum> = vec![];
-      //   for literal in obj.iter() {
-      //     let prop = match literal.to_owned() {
-      //       Literals::ObjectProperty(name, val) => (name, val),
-      //       _ => panic!("Invalid object property"),
-      //     };
-      //     values.push(self.visit(&prop.1, self.builder.get_insert_block().unwrap()).unwrap());
-      //   }
+        // Get struct definition to know field order
+        let fields: Vec<(String, BasicTypeEnum)> = if let Some((_, fields_ref, _)) = self.class_table.get(&struct_name) {
+          fields_ref.clone()
+        } else if let Some(fields_ref) = self.get_struct(&struct_name) {
+          fields_ref.iter().map(|(n, t, _)| (n.clone(), *t)).collect()
+        } else {
+          panic!("Struct definition not found: {}", struct_name);
+        };
 
-      //   return Ok(self.context.struct_type(&values.iter().map(|v| v.get_type()).collect::<Vec<BasicTypeEnum>>(), false).const_named_struct(&values).as_basic_value_enum());
-      // },
-      Literals::Object(_) => panic!("Object literal not allowed here"),
+        let mut values: Vec<BasicValueEnum> = vec![];
+
+        // Iterate over fields in order
+        for (field_name, field_type) in fields {
+          // Find property in object literal
+          let mut found = false;
+          for literal in obj.iter() {
+            if let Literals::ObjectProperty(Name(prop_name), val) = literal {
+              if *prop_name == field_name {
+                let val_compiled = self.visit(val, self.builder.get_insert_block().unwrap())?;
+
+                // If field is a struct, we need to load it if we have a pointer
+                if field_type.is_struct_type() && val_compiled.is_pointer_value() {
+                   let loaded = self.builder.build_load(field_type, val_compiled.into_pointer_value(), "load_struct_field").unwrap();
+                   values.push(loaded);
+                } else {
+                   values.push(val_compiled);
+                }
+                found = true;
+                break;
+              }
+            }
+          }
+          if !found {
+            panic!("Missing field '{}' in object literal for type '{}'", field_name, struct_name);
+          }
+        }
+
+        // Allocate memory for the struct
+        let struct_type = self.context.get_struct_type(&struct_name).unwrap();
+        let alloca = self.builder.build_alloca(struct_type, "anon_struct").unwrap();
+
+        // Store values
+        for (i, val) in values.iter().enumerate() {
+          let field_ptr = self.builder.build_struct_gep(struct_type, alloca, i as u32, "field_ptr").unwrap();
+          self.builder.build_store(field_ptr, *val).unwrap();
+        }
+
+        return Ok(alloca.as_basic_value_enum());
+      },
       Literals::ObjectProperty(_, _) => todo!(),
       Literals::Null => Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum()),
       Literals::Identifier(n) => Ok(self.var_from_ident(n.0, expr)?.2),
@@ -3601,6 +3640,26 @@ mod tests {
       printf(\"%d\", test.b);
     ",
     "2")
+  }
+
+  #[test]
+  fn test_build_anonymous_struct_mapping() -> Result<(), Error> {
+    run_test("
+      type Person = {
+        name: string,
+        age: int
+      }
+
+      fun print_person(Person p) {
+        printf(\"%s is %d years old.\", p.name, p.age);
+      }
+
+      print_person({
+        name: \"Marceline\",
+        age: 1000
+      });
+    ",
+    "Marceline is 1000 years old.")
   }
 
   #[test]
