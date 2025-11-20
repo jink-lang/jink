@@ -43,7 +43,7 @@ If you are interested in and new to contributing to the project, TODOs here mark
 - [x] Build struct indexing
 - [x] Build nested struct indexing
 - [x] Build break and continue in loops
-- [ ] Build classes
+- [x] Build classes
 - [ ] Build class inheritance
 - [x] Build enums
 - [ ] Build external statements
@@ -55,14 +55,14 @@ If you are interested in and new to contributing to the project, TODOs here mark
 - [x] Write struct tests
 - [ ] Write (more) function tests (`N`)
 - [ ] Write recursive function test (`N`)
-- [ ] Write class tests
+- [x] Write class tests
 - [ ] Write module tests
 ##### Type checker
 - [x] Add object type handling
 - [ ] Add heterogeneous array type handling
 - [ ] Add nested array type handling
 - [x] Refactor to add handling for constants
-- [ ] Add class handling
+- [x] Add class handling
 - [ ] Add class inheritance handling
 ##### Lexer
 - [ ] Lex string interpolation (Dart/Haxe/Kotlin/Scala style "\$apples apples of ${apples + bananas} fruits") (`N`)
