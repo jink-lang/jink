@@ -129,6 +129,7 @@ pub enum Expr {
 
   /// class name; parent classes; body
   Class(Name, Option<Vec<Name>>, Option<Box<Vec<Expression>>>),
+  SelfRef,
 
   /// expr
   Public(Box<Expression>),
