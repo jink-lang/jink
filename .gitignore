@@ -1,7 +1,6 @@
 # Rust/cargo
 debug/
 target/
-Cargo.lock
 **/*.rs.bk
 
 # Code
