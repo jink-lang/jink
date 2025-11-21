@@ -139,7 +139,7 @@ impl Lexer {
     let mut identifier: String = init.to_string();
   
     // Build identifier
-    while iter.peek().is_some() && (iter.peek().unwrap().is_alphabetic() || iter.peek().unwrap() == &&'_') {
+    while iter.peek().is_some() && (iter.peek().unwrap().is_alphanumeric() || iter.peek().unwrap() == &&'_') {
       identifier.push(*iter.next().unwrap());
       self.pos += 1;
       self.line_pos += 1;
