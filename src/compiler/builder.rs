@@ -2018,6 +2018,10 @@ impl<'ctx> CodeGen<'ctx> {
       }
     }
 
+    // Register class early so methods can reference it
+    self.set_struct(name.clone(), vec![]);
+    self.set_struct_mapping(name.clone(), name.clone());
+
     if let Some(body) = body.as_ref() {
       for expr in body.iter() {
 
@@ -2069,8 +2073,6 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     // Add class to the known class information
-    self.set_struct(name.clone(), vec![]);
-    self.set_struct_mapping(name.clone(), name.clone());
     self.class_table.insert(name.clone(), (Some(parent_classes), types_as_fields.clone(), methods.clone().into_iter().collect()));
 
     // Set up the constructor
@@ -2344,8 +2346,27 @@ impl<'ctx> CodeGen<'ctx> {
         }
 
         // Build body
+        let mut current_block = entry_block;
         for expr in body_exprs.iter() {
-           self.visit(expr, entry_block)?;
+          if let Expr::Return(ret) = expr.expr.clone() {
+            let val = self.visit(&ret, current_block)?;
+            if val != self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum() {
+              self.builder.build_return(Some(&val)).unwrap();
+            } else {
+              self.builder.build_return(None).unwrap();
+            }
+          } else if let Expr::Conditional(typ, exp, body, ebody) = expr.expr.clone() {
+             let merge_block = self.context.append_basic_block(function, "merge");
+             (_, _, current_block) = self.build_if(true, typ, exp, body, ebody, function, current_block, merge_block, None, None)?;
+          } else if let Expr::ForLoop(val, exp, body) = expr.expr.clone() {
+             current_block = self.build_for_loop(val, exp, body, function, current_block)?;
+          } else if let Expr::WhileLoop(cond, body) = expr.expr.clone() {
+             current_block = self.build_while_loop(cond, body, function, current_block)?;
+          } else if let Expr::Assignment(_, _, _) = expr.expr.clone() {
+             self.build_assignment(expr.clone(), current_block, false)?;
+          } else {
+             self.visit(expr, current_block)?;
+          }
         }
 
         // Handle void return if needed
@@ -2475,6 +2496,30 @@ impl<'ctx> CodeGen<'ctx> {
     // TODO: Think about how to handle other types of indexing & recursive indexing
     if let Expr::Index(_, _) = parent.expr {
       return self.build_index(&parent);
+    }
+
+    if let Expr::SelfRef = parent.expr {
+      let self_ptr = self.current_class.unwrap();
+      let class_name = self.get_struct_mapping("self").unwrap().clone();
+
+      if let Expr::Literal(Literals::Identifier(Name(field_name))) = index.expr {
+        let struct_fields = self.get_struct(&class_name).unwrap();
+        for (i, (name, typ, _)) in struct_fields.iter().enumerate() {
+          if name == &field_name {
+             let ptr = self.builder.build_struct_gep(self.context.get_struct_type(&class_name).unwrap(), self_ptr, i as u32, "field_ptr").unwrap();
+             let val = self.builder.build_load(*typ, ptr, "field_val").unwrap();
+             return Ok((ptr, val));
+          }
+        }
+        return Err(Error::new(
+          Error::NameError,
+          None,
+          &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
+          expr.first_pos,
+          Some(expr.first_pos.unwrap() + field_name.len() as i32),
+          format!("Field '{}' not found on class '{}'", field_name, class_name)
+        ));
+      }
     }
 
     if let Expr::Literal(Literals::Identifier(Name(n))) = parent.expr {
