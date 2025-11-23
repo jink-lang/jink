@@ -8,7 +8,7 @@ use inkwell::context::Context;
 use inkwell::execution_engine::ExecutionEngine;
 use inkwell::module::{Linkage, Module};
 use inkwell::types::{ArrayType, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
-use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue};
+use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue, ValueKind};
 use inkwell::AddressSpace;
 use inkwell::support::LLVMString;
 
@@ -292,7 +292,7 @@ impl<'ctx> CodeGen<'ctx> {
     let strlen_type = self.context.i64_type().fn_type(&[ptr_type.into()], false);
     self.module.add_function("strlen", strlen_type, Some(Linkage::External));
 
-    let malloc_type = self.context.i8_type().fn_type(&[self.context.i64_type().into()], false);
+    let malloc_type = ptr_type.fn_type(&[self.context.i64_type().into()], false);
     self.module.add_function("malloc", malloc_type, Some(Linkage::External));
 
     let free_type = self.context.void_type().fn_type(&[ptr_type.into()], false);
@@ -705,7 +705,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         if let Expr::Conditional(typ, expr, body, ebody) = expr.expr.clone() {
           let merge_block = self.context.append_basic_block(body_block.get_parent().unwrap(), "merge");
-          (_, _, current_block) = self.build_if(true, typ, expr, body, ebody, body_block.get_parent().unwrap(), body_block, merge_block, Some(continue_block_target), Some(break_block_target))?;
+          (_, _, current_block) = self.build_if(true, typ, expr, body, ebody, body_block.get_parent().unwrap(), current_block, merge_block, Some(continue_block_target), Some(break_block_target))?;
 
         } else if let Expr::Return(ret) = expr.expr.clone() {
           let val = self.visit(&ret, current_block)?;
@@ -769,7 +769,7 @@ impl<'ctx> CodeGen<'ctx> {
     // Initialize loop index variable to 0
     let i64_type = self.context.i64_type();
     let init_value = i64_type.const_int(0, false);
-    let loop_index_ptr = self.builder.build_alloca(init_value.get_type(), &loop_index_name).unwrap();
+    let loop_index_ptr = self.create_entry_block_alloca(&loop_index_name, init_value.get_type().as_basic_type_enum());
     self.builder.build_store(loop_index_ptr, init_value).unwrap();
 
     let end_condition_val: IntValue<'ctx>;
@@ -1342,13 +1342,17 @@ impl<'ctx> CodeGen<'ctx> {
     // Now position the builder at the merge block and create all PHI nodes
     self.builder.position_at_end(merge_block);
 
-    for (name, phi_type, incoming_for_phi) in phi_nodes_to_create {
-      let phi = self.builder.build_phi(phi_type, &name).unwrap();
+    let mut created_phis = vec![];
+    for (name, phi_type, incoming_for_phi) in &phi_nodes_to_create {
+      let phi = self.builder.build_phi(*phi_type, name).unwrap();
       let incoming_refs: Vec<(&dyn BasicValue<'ctx>, BasicBlock<'ctx>)> = incoming_for_phi.iter().map(|(v, b)| (v as &dyn BasicValue<'ctx>, *b)).collect();
       phi.add_incoming(&incoming_refs);
+      created_phis.push((name, phi, *phi_type));
+    }
 
+    for (name, phi, phi_type) in created_phis {
       // Check if the symbol exists in the symbol table
-      if let Some(symbol) = self.get_symbol(&name)? {
+      if let Some(symbol) = self.get_symbol(name)? {
         // Update the existing variable with the new PHI value
         let (_, inst, _, _, exited_func) = symbol;
         if exited_func {
@@ -1365,7 +1369,7 @@ impl<'ctx> CodeGen<'ctx> {
         self.set_symbol(name.to_string(), inst, phi_type, phi.as_basic_value());
       } else {
         // Create a new variable and store the PHI value
-        let var = self.builder.build_alloca(phi_type, &name).unwrap();
+        let var = self.builder.build_alloca(phi_type, name).unwrap();
         self.builder.build_store(var, phi.as_basic_value()).unwrap();
         self.set_symbol(name.to_string(), None, phi_type, phi.as_basic_value());
       }
@@ -1374,6 +1378,7 @@ impl<'ctx> CodeGen<'ctx> {
     // Branch to the final merge block
     if top_level {
       self.builder.build_unconditional_branch(top_level_merge_block).unwrap();
+      self.builder.position_at_end(top_level_merge_block);
     }
 
     // Return then, else and merge blocks
@@ -1423,7 +1428,7 @@ impl<'ctx> CodeGen<'ctx> {
           },
           Expr::ContinueLoop => {
             self.builder.build_unconditional_branch(loop_continue_target.unwrap()).unwrap();
-          }
+          },
           _ => {
             self.visit(expr, current_block)?;
           }
@@ -1432,6 +1437,18 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     return Ok(current_block);
+  }
+
+  fn create_entry_block_alloca(&self, name: &str, typ: BasicTypeEnum<'ctx>) -> PointerValue<'ctx> {
+    let builder = self.context.create_builder();
+    let entry = self.builder.get_insert_block().unwrap().get_parent().unwrap().get_first_basic_block().unwrap();
+
+    match entry.get_first_instruction() {
+      Some(first_instr) => builder.position_before(&first_instr),
+      None => builder.position_at_end(entry),
+    }
+
+    builder.build_alloca(typ, name).unwrap()
   }
 
   fn build_assignment(&mut self, expr: Expression, block: BasicBlock<'ctx>, is_new_scope: bool) -> Result<(), Error> {
@@ -1489,7 +1506,9 @@ impl<'ctx> CodeGen<'ctx> {
         // Case: Array rhs
         // TODO: Handle heterogeneous arrays
         Expr::Array(_) => {
-          let (ptr, typ, val) = self.build_array(*value.clone().unwrap(), block)?;
+          // In the global scope?
+          let is_global = self.symbol_table_stack.len() == 1;
+          let (ptr, typ, val) = self.build_array(*value.clone().unwrap(), block, is_global)?;
           self.set_symbol(name, Some(ptr), typ.as_basic_type_enum(), val);
           return Ok(());
         },
@@ -1516,7 +1535,15 @@ impl<'ctx> CodeGen<'ctx> {
       match ty.as_str() {
         "let" | "const" | "int" | "bool" | "float" | "string" => {
           // Allocate space and store the value
-          let ptr = self.builder.build_alloca(set.get_type(), &name).unwrap();
+          let ptr = if self.symbol_table_stack.len() == 1 {
+            let global = self.module.add_global(set.get_type(), None, &name);
+            global.set_linkage(Linkage::Internal);
+            global.set_initializer(&set.get_type().const_zero());
+            global.as_pointer_value()
+          } else {
+            self.create_entry_block_alloca(&name, set.get_type())
+          };
+
           self.builder.build_store(ptr, set).unwrap();
           // Set the symbol
           self.set_symbol(name, Some(ptr), set.get_type(), set);
@@ -1958,7 +1985,7 @@ impl<'ctx> CodeGen<'ctx> {
     self.exit_scope();
 
     // Ignore if there is already a return
-    if function.get_last_basic_block().unwrap().get_last_instruction().is_none() {
+    if function.get_last_basic_block().unwrap().get_terminator().is_none() {
       self.builder.build_return(Some(&self.context.f64_type().const_float(0.0).as_basic_value_enum())).unwrap();
     }
 
@@ -2019,7 +2046,11 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     // Register class early so methods can reference it
-    self.set_struct(name.clone(), vec![]);
+    let mut initial_struct_fields = vec![];
+    for (n, t) in &types_as_fields {
+       initial_struct_fields.push((n.clone(), *t, None));
+    }
+    self.set_struct(name.clone(), initial_struct_fields);
     self.set_struct_mapping(name.clone(), name.clone());
 
     if let Some(body) = body.as_ref() {
@@ -2033,7 +2064,7 @@ impl<'ctx> CodeGen<'ctx> {
         };
 
         if let Expr::Function(Name(func_name), ret_typ, params, body) = func_expr {
-          let (signature, mparams) = self.build_class_method_signature(expr.clone(), func_name.clone(), ret_typ, params.clone())?;
+          let (signature, mparams) = self.build_class_method_signature(func_name.clone(), ret_typ, params.clone())?;
           let method_name = if func_name == "new" {
             if body.is_none() {
               return Err(Error::new(
@@ -2074,6 +2105,9 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Add class to the known class information
     self.class_table.insert(name.clone(), (Some(parent_classes), types_as_fields.clone(), methods.clone().into_iter().collect()));
+
+    // Create the class struct
+    let class_struct = self.context.opaque_struct_type(&name);
 
     // Set up the constructor
     let constructor = self.module.get_function(&format!("{}_constructor", name)).unwrap();
@@ -2144,7 +2178,18 @@ impl<'ctx> CodeGen<'ctx> {
                   format!("Type '{}' not found", typ.as_ref().unwrap().0)
                 ));
               } else {
-                self.context.get_struct_type(&typ.as_ref().unwrap().0).unwrap().as_basic_type_enum()
+                if let Some(_) = self.context.get_struct_type(&typ.as_ref().unwrap().0) {
+                  self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()
+                } else {
+                  return Err(Error::new(
+                    Error::CompilerError,
+                    None,
+                    &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+                    expr.first_pos,
+                    expr.first_pos,
+                    format!("Unknown type '{}'", typ.as_ref().unwrap().0)
+                  ));
+                }
               }
             }
           },
@@ -2160,7 +2205,7 @@ impl<'ctx> CodeGen<'ctx> {
               None,
               &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
               expr.first_pos,
-              Some(self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string().len() as i32),
+              expr.first_pos,
               format!("Invalid assignment type for field, expected {:?} but got {:?}", field_type.print_to_string(), set.get_type().print_to_string())
             ));
           }
@@ -2200,19 +2245,34 @@ impl<'ctx> CodeGen<'ctx> {
           } else {
             None
           };
-          struct_fields.push((field_name.clone(), field_type, struct_type_name));
+          struct_fields.push((field_name.clone(), field_type, struct_type_name.clone()));
 
           // Update the struct and class tables with the new fields
           let (_, class_fields, _) = self.class_table.get_mut(&name).unwrap();
           class_fields.push((field_name.clone(), field_type));
-          // TODO: Fix struct_table dead code:
-          // self.struct_table.get_mut(&name).unwrap().push((field_name, field_type, None));
+
+          let mut found = false;
+          for scope in self.symbol_table_stack.iter_mut().rev() {
+            if let Some(fields) = scope.struct_enum_types.get_mut(&name) {
+              fields.push((field_name.clone(), field_type, struct_type_name));
+              found = true;
+              break;
+            }
+          }
+          if !found {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth((exp.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+              exp.first_pos,
+              exp.first_pos,
+              format!("Struct '{}' not found in any scope", name)
+            ));
+          }
         }
       }
     }
 
-    // Create the class struct
-    let class_struct = self.context.opaque_struct_type(&name);
     class_struct.set_body(&types, false);
 
     // Build the class struct pointer to operate on in the constructor
@@ -2384,7 +2444,7 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(());
   }
 
-  fn build_class_method_signature(&mut self, expr: Expression, method_name: String, ret_typ: Option<Literals>, params: Option<Box<Vec<Expression>>>) -> Result<(FunctionType<'ctx>, IndexMap<String, BasicTypeEnum<'ctx>>), Error> {
+  fn build_class_method_signature(&mut self, method_name: String, ret_typ: Option<Literals>, params: Option<Box<Vec<Expression>>>) -> Result<(FunctionType<'ctx>, IndexMap<String, BasicTypeEnum<'ctx>>), Error> {
     // Collect the parameter types
     let mut fields: IndexMap<String, BasicTypeEnum<'ctx>> = IndexMap::new();
     let mut types: Vec<BasicMetadataTypeEnum<'ctx>> = vec![];
@@ -2459,9 +2519,9 @@ impl<'ctx> CodeGen<'ctx> {
                 return Err(Error::new(
                   Error::NameError,
                   None,
-                  &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-                  expr.first_pos,
-                  expr.first_pos,
+                  &"",
+                  Some(0),
+                  Some(0),
                   format!("Type '{}' not found", name)
                 ));
               }
@@ -2613,7 +2673,7 @@ impl<'ctx> CodeGen<'ctx> {
     ));
   }
 
-  fn build_array(&mut self, expr: Expression, block: BasicBlock<'ctx>) -> Result<(PointerValue<'ctx>, ArrayType<'ctx>, BasicValueEnum<'ctx>), Error> {
+  fn build_array(&mut self, expr: Expression, block: BasicBlock<'ctx>, is_global: bool) -> Result<(PointerValue<'ctx>, ArrayType<'ctx>, BasicValueEnum<'ctx>), Error> {
     let arr_exprs = match expr.expr {
       Expr::Array(exprs) => exprs,
       _ => {
@@ -2659,7 +2719,14 @@ impl<'ctx> CodeGen<'ctx> {
     let final_array_type = llvm_elem_type.array_type(array_len);
 
     // Allocate memory for array
-    let array_alloca = self.builder.build_alloca(final_array_type, "arr_data").unwrap();
+    let array_alloca = if is_global {
+      let global = self.module.add_global(final_array_type, None, "arr_data");
+      global.set_linkage(Linkage::Internal);
+      global.set_initializer(&final_array_type.const_zero());
+      global.as_pointer_value()
+    } else {
+      self.create_entry_block_alloca("arr_data", final_array_type.as_basic_type_enum())
+    };
 
     // Populate array memory
     for (i, elem_expr) in arr_exprs.iter().enumerate() {
@@ -2686,7 +2753,14 @@ impl<'ctx> CodeGen<'ctx> {
       self.context.ptr_type(AddressSpace::default()).into(), // arr ptr
     ], false);
 
-    let array_struct_alloca = self.builder.build_alloca(array_struct_type, "array_alloc").unwrap();
+    let array_struct_alloca = if is_global {
+      let global = self.module.add_global(array_struct_type, None, "array_alloc");
+      global.set_linkage(Linkage::Internal);
+      global.set_initializer(&array_struct_type.const_zero());
+      global.as_pointer_value()
+    } else {
+      self.create_entry_block_alloca("array_alloc", array_struct_type.as_basic_type_enum())
+    };
 
     // Store pointer to length
     let length = self.context.i64_type().const_int(array_len as u64, false);
@@ -2753,10 +2827,15 @@ impl<'ctx> CodeGen<'ctx> {
 
           // Check if this is a constructor call
           if self.class_table.contains_key(&name.0) {
-            // Allocate memory for the struct in the caller's stack
+            // Allocate memory for the struct on the heap
             let struct_type = self.context.get_struct_type(&name.0).unwrap();
-            let struct_alloca = self.builder.build_alloca(struct_type, &format!("{}_inst", name.0)).unwrap();
-            llvm_args.push(struct_alloca.into());
+            let size = struct_type.size_of().unwrap();
+            let malloc = self.module.get_function("malloc").unwrap();
+            let ptr = match self.builder.build_call(malloc, &[size.into()], "malloc_call").unwrap().try_as_basic_value() {
+              ValueKind::Basic(val) => val.into_pointer_value(),
+              _ => panic!("malloc returned void"),
+            };
+            llvm_args.push(ptr.into());
           }
 
           // Add hidden count for variadic functions
@@ -2849,10 +2928,17 @@ impl<'ctx> CodeGen<'ctx> {
           let mut llvm_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(num_provided_adjusted);
 
           if is_constructor {
-             // Allocate memory for the struct in the caller's stack
+             // Allocate memory for the struct on the heap
              let struct_type = self.context.get_struct_type(&name.0).unwrap();
-             let struct_alloca = self.builder.build_alloca(struct_type, &format!("{}_inst", name.0)).unwrap();
-             llvm_args.push(struct_alloca.into());
+             let size = struct_type.size_of().unwrap();
+             let malloc = self.module.get_function("malloc").unwrap();
+             let ptr = match self.builder.build_call(malloc, &[size.into()], "malloc_call").unwrap().try_as_basic_value() {
+               ValueKind::Basic(val) => val.into_pointer_value(),
+               _ => panic!("malloc returned void"),
+             };
+             // Cast i8* from malloc to struct*
+             let struct_ptr = self.builder.build_pointer_cast(ptr, self.context.ptr_type(AddressSpace::default()), &format!("{}_inst", name.0)).unwrap();
+             llvm_args.push(struct_ptr.into());
           }
 
           for arg in args.iter() {
