@@ -46,7 +46,7 @@ If you are interested in and new to contributing to the project, TODOs here mark
 - [x] Build classes
 - [ ] Build class inheritance
 - [x] Build enums
-- [ ] Build external statements
+- [x] Build external statements
 - [ ] Build del statements
 - [x] Build module/import system
 - [ ] Validate module imports
@@ -56,7 +56,7 @@ If you are interested in and new to contributing to the project, TODOs here mark
 - [ ] Write (more) function tests (`N`)
 - [ ] Write recursive function test (`N`)
 - [x] Write class tests
-- [ ] Write module tests
+- [ ] Write module tests (`N`)
 ##### Type checker
 - [x] Add object type handling
 - [ ] Add heterogeneous array type handling
@@ -75,7 +75,7 @@ If you are interested in and new to contributing to the project, TODOs here mark
 - [ ] Validate against circularly imported modules
 - [ ] Parse string interpolation (see [Lexer](#lexer)) (`N`)
 - [x] Parse indexing (arrays)
-- [ ] Parse recursive indexing (arrays)
+- [x] Parse recursive indexing (arrays)
 - [x] Parse indexing (object properties and methods)
 - [x] Parse recursive indexing (object properties and methods)
 - [x] Parse del statements
@@ -83,7 +83,7 @@ If you are interested in and new to contributing to the project, TODOs here mark
 - [x] Parse for loops
 - [x] Parse break and continue for loops
 - [x] Parse public statements
-- [ ] Parse external statements (`N`)
+- [x] Parse external statements
 - [ ] Parse for loops with different assignment types (`N`)
 
 ## Examples
@@ -115,8 +115,8 @@ fun add(int a, int b) -> int {
   return a + b;
 }
 
-// Recursion (Fibonacci sequencer)
-fun fib(let number) {
+// Fibonacci
+fun fib(int number) {
   if (number <= 1) return number
   return fib(number - 2) + fib(number - 1)
 }

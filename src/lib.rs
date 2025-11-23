@@ -54,7 +54,7 @@ pub const KEYWORDS: &[&str] = &[
   "true", "false", "null",
   "fun", "let", "const", "type", "enum",
   "cls", "self", "pub",
-  "import", "from", "as"
+  "import", "from", "as", "extern"
 ];
 
 #[derive(Debug, PartialEq, Clone)]
@@ -130,6 +130,9 @@ pub enum Expr {
   /// class name; parent classes; body
   Class(Name, Option<Vec<Name>>, Option<Box<Vec<Expression>>>),
   SelfRef,
+
+  /// abi; func name; return type; params; variadic
+  Extern(String, Name, Option<Literals>, Option<Box<Vec<Expression>>>, bool),
 
   /// expr
   Public(Box<Expression>),
@@ -393,32 +396,39 @@ impl std::fmt::Display for Error {
         );
       },
       Error::ParserError(err) => {
-        return write!(f, "Parser error at {}:{}\n  {}\n  {}", err.token.as_ref().unwrap().line,
-          err.start_pos.unwrap() + 1, err.line, err.message
+        let line = if let Some(token) = &err.token { token.line } else { 0 };
+        return write!(f, "Parser error at {}:{}\n  {}\n  {}", line,
+          err.start_pos.unwrap_or(0) + 1, err.line, err.message
         );
       },
       Error::NameError(err) => {
-        let underline = " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat((err.end_pos.unwrap() - err.start_pos.unwrap()) as usize);
-        return write!(f, "Name error at {}:{}\n  {}\n  {}\n\n{}", err.end_pos.unwrap(),
-          err.start_pos.unwrap() + 1, err.line, underline, err.message
+        let end = err.end_pos.unwrap_or(err.start_pos.unwrap_or(0) + 1);
+        let start = err.start_pos.unwrap_or(0);
+        let underline = " ".repeat(start as usize) + &"-".repeat((end - start) as usize);
+        return write!(f, "Name error at {}:{}\n  {}\n  {}\n\n{}", end,
+          start + 1, err.line, underline, err.message
         );
       },
       Error::ImportError(err) => {
-        return write!(f, "Import error at {}:{}\n  {}\n  {}\n\n{}", err.end_pos.unwrap(),
-          err.start_pos.unwrap() + 1, err.line, " ".repeat(err.start_pos.unwrap() as usize) + "^", err.message
+        let end = err.end_pos.unwrap_or(err.start_pos.unwrap_or(0) + 1);
+        let start = err.start_pos.unwrap_or(0);
+        return write!(f, "Import error at {}:{}\n  {}\n  {}\n\n{}", end,
+          start + 1, err.line, " ".repeat(start as usize) + "^", err.message
         );
       },
       Error::CompilerError(err) => {
-        let line = err.line.split("\n").next().unwrap();
-        let mut dashes = if err.end_pos.is_some() {
-          err.end_pos.unwrap() - err.start_pos.unwrap()
+        let line = err.line.split("\n").next().unwrap_or("");
+        let start = err.start_pos.unwrap_or(0);
+        let mut dashes = if let Some(end) = err.end_pos {
+          end - start
         } else {
-          line.trim_start().len() as i32 - err.start_pos.unwrap()
+          line.trim_start().len() as i32 - start
         };
         if dashes <= 0 { dashes = 1; }
-        let underline = " ".repeat(err.start_pos.unwrap() as usize) + &"-".repeat(dashes as usize);
-        return write!(f, "Compilation error at {}:{}\n  {}\n  {}\n\n{}", err.end_pos.unwrap(),
-          err.start_pos.unwrap() + 1, err.line, underline, err.message
+        let underline = " ".repeat(start as usize) + &"-".repeat(dashes as usize);
+        let end = err.end_pos.unwrap_or(start + 1);
+        return write!(f, "Compilation error at {}:{}\n  {}\n  {}\n\n{}", end,
+          start + 1, err.line, underline, err.message
         );
       }
     }

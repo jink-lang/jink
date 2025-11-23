@@ -109,6 +109,7 @@ impl Parser {
           Expr::Public(_) => {},
           Expr::Delete(_) => {},
           Expr::Index(_, _) => {},
+          Expr::Extern(_, _, _, _, _) => {},
           _ => {
             return Err(Error::new(
               Error::UnexpectedExpression,
@@ -142,6 +143,13 @@ impl Parser {
   /// Loads module, attaches AST to expression, builds namespace and returns expression back
   fn process_module(&mut self, expr: Expression) -> Result<Vec<Expression>, Error> {
     if let Expr::Module(path, is_aliased, names) = expr.expr.clone() {
+      // TODO: Check if part of module is already loaded
+      // More sophisticated namespace management will be needed
+      let module = path.iter().map(|n| n.0.to_string()).collect::<Vec<String>>().join("/");
+      if self.namespaces.contains_key(&module) {
+        return Ok(Vec::new());
+      }
+
       let code = module_loader::load_module(path.clone(), self.verbose);
       if code.is_none() {
         return Err(Error::new(
@@ -498,6 +506,9 @@ impl Parser {
     } else if init.unwrap().value.as_ref().unwrap() == "pub" {
       return self.parse_public();
 
+    } else if init.unwrap().value.as_ref().unwrap() == "extern" {
+      return self.parse_extern();
+
     } else if init.unwrap().value.as_ref().unwrap() == "del" {
       return self.parse_delete();
 
@@ -531,6 +542,54 @@ impl Parser {
         "Unexpected token".to_string()
       ));
     }
+  }
+
+  fn parse_extern(&mut self) -> Result<Expression, Error> {
+    let init = self.iter.next(); // "extern"
+
+    // Parse ABI
+    self.consume(&[TokenTypes::LParen], false)?;
+    let abi = self.consume(&[TokenTypes::String], false)?;
+    self.consume(&[TokenTypes::RParen], false)?;
+
+    // Parse function signature
+    let identifier = self.consume(&[TokenTypes::Identifier], false)?;
+    let params = self.parse_args_params("params")?;
+
+    // Get return type
+    let mut return_type: Option<Token> = None;
+    if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator
+      && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "->" {
+      self.iter.next();
+      return_type = Some(self.consume(&[TokenTypes::Identifier], false)?);
+    }
+
+    // Check for variadic
+    let mut variadic = false;
+    for param in &params {
+      if let Expr::FunctionParam(_, _, _, _, spread) = param.expr {
+        if spread {
+          variadic = true;
+          break;
+        }
+      }
+    }
+
+    let func = self.get_expr(
+      Expr::Extern(
+        abi.value.unwrap(),
+        Name(identifier.value.as_ref().unwrap().to_owned()),
+        if let Some(rt) = return_type { Some(Literals::Identifier(Name(rt.value.unwrap()))) } else { None },
+        Some(Box::new(params)),
+        variadic
+      ),
+      Some(init.as_ref().unwrap().line),
+      init.unwrap().start_pos,
+      Some(self.iter.current.as_ref().unwrap().line)
+    );
+
+    self.add_name(identifier.value.as_ref().unwrap().to_owned(), func.clone())?;
+    return Ok(func);
   }
 
   fn parse_expression(&mut self, precedence: i8) -> Result<Expression, Error> {
@@ -765,9 +824,7 @@ impl Parser {
 
   fn is_left_associative(&mut self, operator: Token) -> bool {
     return ![
-      "++", "--", "+=", "-=", "*=", "/=", "//=", "%=",
-      ">", "<", ">=", "<=", "==", "!=",
-      "=", "!", "+", "-", "->", ".", "&&", "||",
+      "=", "+=", "-=", "*=", "/=", "//=", "%="
     ].contains(&operator.value.unwrap().as_str());
   }
 
@@ -794,7 +851,7 @@ impl Parser {
       let expression = self.parse_top()?;
 
       match expression.expr.clone() {
-        Expr::Class(_, _, _) | Expr::Function(_, _, _, _) | Expr::TypeDef(_, _) | Expr::Enum(_, _) => {
+        Expr::Class(_, _, _) | Expr::Function(_, _, _, _) | Expr::TypeDef(_, _) | Expr::Enum(_, _) | Expr::Extern(_, _, _, _, _) => {
           return Ok(self.get_expr(Expr::Public(Box::new(expression)),
             Some(token.line), token.start_pos, token.end_pos
           ));
@@ -1320,7 +1377,12 @@ impl Parser {
 
   fn parse_array_index(&mut self, identifier: Token) -> Result<Expression, Error> {
     self.consume(&[TokenTypes::LBracket], false)?;
+
+    let was_indexing = self.is_indexing;
+    self.is_indexing = false;
     let index = self.parse_expression(0)?;
+    self.is_indexing = was_indexing;
+
     self.consume(&[TokenTypes::RBracket], false)?;
 
     return Ok(self.get_expr(Expr::ArrayIndex(
@@ -1434,6 +1496,22 @@ impl Parser {
 
         // Type identifier, let or const
         let cur = self.iter.next().unwrap();
+
+        // Untyped spread operator (just for externs)
+        if cur.of_type == TokenTypes::Operator && cur.value.as_ref().unwrap() == "..." {
+          list.push(self.get_expr(Expr::FunctionParam(None, false, Literals::Identifier(Name("...".to_string())), None, true),
+            Some(cur.line),
+            cur.start_pos,
+            Some(cur.line)
+          ));
+
+          if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type == TokenTypes::Comma {
+            self.iter.next();
+            self.skip_newlines(Some(1));
+          }
+          continue;
+        }
+
         if cur.of_type == TokenTypes::Identifier || (
           cur.of_type == TokenTypes::Keyword && ["let", "const"].contains(&cur.value.as_ref().unwrap().as_str())
         ) {

@@ -96,18 +96,16 @@ impl TypeChecker {
     None
   }
 
-  // TEMP: Check if a function is a built-in function
+  // Check if a function is a built-in/intrinsic
   fn is_builtin_function(&self, name: &str) -> bool {
     let builtins = [
-      "printf", "puts", "scanf", "strlen",
-      "malloc", "free",
-      "fopen", "fwrite", "fread", "fclose", "fputs",
       "ptr"
     ];
     builtins.contains(&name)
   }
 
   fn string_to_jtype(&self, type_name: &str) -> Result<JType, String> {
+    // println!("Resolving type: {}", type_name);
     match type_name {
       "int" => Ok(JType::Integer),
       "uint" => Ok(JType::UnsignedInteger),
@@ -115,6 +113,8 @@ impl TypeChecker {
       "string" => Ok(JType::String),
       "bool" => Ok(JType::Boolean),
       "void" => Ok(JType::Void),
+      "ptr" => Ok(JType::UnsignedInteger),
+      "int32" => Ok(JType::Integer),
       _ => {
         if self.types.contains(type_name) {
           return Ok(JType::TypeName(type_name.to_string()));
@@ -144,6 +144,8 @@ impl TypeChecker {
     }
 
     match (expected, actual) {
+      (JType::String, JType::UnsignedInteger) => true,
+      (JType::UnsignedInteger, JType::String) => true,
       (JType::TypeName(name), JType::Object(obj_fields)) => {
         if let Some(JType::StructDef(struct_fields)) = self.type_definitions.get(name) {
           // Check if all struct fields are present in object and have compatible types
@@ -287,6 +289,18 @@ impl TypeChecker {
               JType::Array(boxed_elem_type) => {
                 if !self.check_type_compatibility(&boxed_elem_type, &rhs_type) {
                   return Err("Type mismatch for array element assignment.".to_string());
+                }
+                Ok(JType::Null)
+              }
+              JType::String => {
+                if rhs_type != JType::Integer && rhs_type != JType::UnsignedInteger {
+                  return Err(format!("Type mismatch for string assignment. Expected integer (char), got {}.", rhs_type));
+                }
+                Ok(JType::Null)
+              }
+              JType::UnsignedInteger | JType::Integer => {
+                if rhs_type != JType::Integer && rhs_type != JType::UnsignedInteger {
+                  return Err(format!("Type mismatch for pointer assignment. Expected integer, got {}.", rhs_type));
                 }
                 Ok(JType::Null)
               }
@@ -511,11 +525,17 @@ impl TypeChecker {
           if is_variadic {
             // TODO: Determine type of variadic parameter
             if let Some(var_type) = variadic_type {
+              let var_elem_type = if let JType::Array(elem) = &**var_type {
+                elem
+              } else {
+                &**var_type
+              };
+
               for i in num_fixed_params..num_provided_args {
-                if !self.check_type_compatibility(&var_type, &provided_arg_types[i]) {
+                if !self.check_type_compatibility(var_elem_type, &provided_arg_types[i]) {
                   return Err(format!(
                     "Type mismatch for variadic argument {} in call to '{}'. Expected {}, got {}.",
-                    i + 1, func_name, var_type, provided_arg_types[i]
+                    i + 1, func_name, var_elem_type, provided_arg_types[i]
                   ));
                 }
               }
@@ -527,6 +547,42 @@ impl TypeChecker {
         } else {
           Err(format!("'{}' is not a function.", func_name))
         }
+      }
+
+      Expr::Extern(_abi, Name(name), ret_type, params, _variadic) => {
+        let mut expected_param_types = Vec::new();
+
+        if let Some(param_items) = params {
+          for param in param_items.iter_mut() {
+            if let Expr::FunctionParam(Some(Type(ptype)), _, _, _, is_spread) = &mut param.expr {
+              let param_type = self.string_to_jtype(ptype)?;
+              param.inferred_type = Some(param_type.clone());
+
+              if *is_spread {
+                expected_param_types.push(JType::FunctionParam(Box::new(JType::Array(Box::new(param_type))), None, true));
+              } else {
+                expected_param_types.push(JType::FunctionParam(Box::new(param_type), None, false));
+              }
+            } else if let Expr::FunctionParam(None, _, _, _, is_spread) = &mut param.expr {
+              if *is_spread {
+                let param_type = JType::Unknown;
+                param.inferred_type = Some(param_type.clone());
+                expected_param_types.push(JType::FunctionParam(Box::new(JType::Array(Box::new(param_type))), None, true));
+              }
+            }
+          }
+        }
+
+        let expected_return_type = match ret_type {
+          Some(Literals::Identifier(Name(rt_name))) => self.string_to_jtype(rt_name)?,
+          None => JType::Void,
+          _ => return Err("Invalid return type.".to_string()),
+        };
+
+        let func_type = JType::Function(expected_param_types, Box::new(expected_return_type));
+        self.add_variable(name, func_type, false)?;
+
+        Ok(JType::Null)
       }
 
       Expr::Function(Name(name), return_type, params, body) => {
@@ -633,7 +689,12 @@ impl TypeChecker {
         let mut constructor_params = Vec::new();
         if let Some(body_exprs) = body {
           for expr in body_exprs.iter() {
-            if let Expr::Function(Name(func_name), _, params, _) = &expr.expr {
+            let mut func_expr = &expr.expr;
+            if let Expr::Public(inner) = &expr.expr {
+              func_expr = &inner.expr;
+            }
+
+            if let Expr::Function(Name(func_name), _, params, _) = func_expr {
               if func_name == "new" {
                 if let Some(param_items) = params {
                   for param in param_items.iter() {
@@ -652,7 +713,12 @@ impl TypeChecker {
         let mut fields = HashMap::new();
         if let Some(body_exprs) = body {
           for expr in body_exprs.iter() {
-            if let Expr::Assignment(Some(Type(type_name)), ident_expr, _) = &expr.expr {
+            let mut field_expr = &expr.expr;
+            if let Expr::Public(inner) = &expr.expr {
+              field_expr = &inner.expr;
+            }
+
+            if let Expr::Assignment(Some(Type(type_name)), ident_expr, _) = field_expr {
                if let Expr::Literal(Literals::Identifier(Name(field_name))) = &ident_expr.expr {
                  let field_type = self.string_to_jtype(type_name)?;
                  fields.insert(field_name.clone(), field_type);
@@ -1037,6 +1103,47 @@ impl TypeChecker {
               initial_rhs_expr.inferred_type = Some(cur_lhs_type.clone());
               break;
             },
+
+            // Case: Current part of chain is array indexing: cur_lhs_type[index]
+            Expr::ArrayIndex(arr, idx) => {
+              let member_name = match &arr.expr {
+                Expr::Literal(Literals::Identifier(Name(name))) => name,
+                _ => return Err(format!("Invalid AST structure in Index chain: expected identifier as array, got {:?}.", arr.expr)),
+              };
+
+              let member_type = match cur_lhs_type.clone() {
+                JType::Object(fields) => fields.get(member_name).cloned(),
+                JType::TypeName(type_name) => {
+                  if let Some(JType::StructDef(fields)) = self.type_definitions.get(&type_name) {
+                    fields.get(member_name).cloned()
+                  } else {
+                    None
+                  }
+                },
+                _ => None,
+              };
+
+              if let Some(typ) = member_type {
+                arr.inferred_type = Some(typ.clone());
+                let idx_type = self.check_expression(idx)?;
+                if idx_type != JType::Integer {
+                  return Err(format!("Array index must be an integer, got {}.", idx_type));
+                }
+
+                if let JType::Array(elem_type) = typ {
+                  cur_lhs_type = *elem_type;
+                } else if typ == JType::String {
+                  cur_lhs_type = JType::Integer;
+                } else {
+                  return Err(format!("Cannot index into non-array type {}.", typ));
+                }
+              } else {
+                return Err(format!("Property '{}' not found on type '{}'.", member_name, cur_lhs_type));
+              }
+
+              initial_rhs_expr.inferred_type = Some(cur_lhs_type.clone());
+              break;
+            },
             _ => return Err("Invalid expression in Index chain. Expected Identifier, further Index, or Call.".to_string()),
           }
         }
@@ -1057,6 +1164,11 @@ impl TypeChecker {
 
           // Return element type of array
           Ok(*elem_type)
+        } else if arr_type == JType::String {
+          if idx_type != JType::Integer {
+            return Err(format!("String index must be an integer, got {}.", idx_type));
+          }
+          Ok(JType::Integer)
         } else {
           Err(format!("Cannot index into non-array type {}.", arr_type))
         }
@@ -1067,7 +1179,15 @@ impl TypeChecker {
         Ok(self.check_expression(expr)?)
       }
 
-      // TODO: Module, Delete, Index, Class
+      Expr::ModuleParsed(_, _, _, ast) => {
+        for expr in ast.iter_mut() {
+          self.check_expression(expr)?;
+        }
+        Ok(JType::Unknown)
+      },
+
+      // TODO: Delete
+
       _ => Ok(JType::Unknown),
     }?;
 

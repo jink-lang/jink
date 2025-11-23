@@ -43,6 +43,7 @@ struct FunctionCtx<'ctx> {
   parameters: Vec<FunctionParamCtx<'ctx>>,
   _ret_type: String,
   variadic: bool,
+  is_external: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -106,7 +107,7 @@ impl<'ctx> CodeGen<'ctx> {
     let mut types = IndexMap::new();
     types.insert("null".to_string(), 0b01); // null ptr
     types.insert("int".to_string(), 0b10); // i64
-    types.insert("i32".to_string(), 0b11);
+    types.insert("int32".to_string(), 0b11);
     types.insert("float".to_string(), 0b100); // double
     types.insert("bool".to_string(), 0b101);
     types.insert("arr".to_string(), 0b110);
@@ -269,49 +270,21 @@ impl<'ctx> CodeGen<'ctx> {
   }
 
   fn create_main_function(&self) -> FunctionValue<'ctx> {
-    let void_type = self.context.void_type().fn_type(&[], false);
-    let main_fn = self.module.add_function("main", void_type, None);
+    let main_fn_type = self.context.i32_type().fn_type(&[], false);
+    let main_fn = self.module.add_function("main", main_fn_type, None);
     let entry_block = self.context.append_basic_block(main_fn, "entry");
     self.builder.position_at_end(entry_block);
     return main_fn;
   }
 
-  // TODO: Narrow this down to intrinsics
-  fn build_external_functions(&self) {
+  fn build_intrinsics(&self) {
     let ptr_type = self.context.ptr_type(AddressSpace::default());
-
-    let printf_type = self.context.i32_type().fn_type(&[ptr_type.into()], true);
-    self.module.add_function("printf", printf_type, Some(Linkage::External));
-
-    let puts_type = self.context.i32_type().fn_type(&[ptr_type.into()], true);
-    self.module.add_function("puts", puts_type, Some(Linkage::External));
-
-    let scanf_type = self.context.i32_type().fn_type(&[ptr_type.into(), ptr_type.into()], true);
-    self.module.add_function("scanf", scanf_type, Some(Linkage::External));
-
-    let strlen_type = self.context.i64_type().fn_type(&[ptr_type.into()], false);
-    self.module.add_function("strlen", strlen_type, Some(Linkage::External));
 
     let malloc_type = ptr_type.fn_type(&[self.context.i64_type().into()], false);
     self.module.add_function("malloc", malloc_type, Some(Linkage::External));
 
     let free_type = self.context.void_type().fn_type(&[ptr_type.into()], false);
     self.module.add_function("free", free_type, Some(Linkage::External));
-
-    let fopen_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
-    self.module.add_function("fopen", fopen_type, Some(Linkage::External));
-
-    let fwrite_type = self.context.i64_type().fn_type(&[ptr_type.into(), self.context.i64_type().into(), self.context.i64_type().into(), ptr_type.into()], false);
-    self.module.add_function("fwrite", fwrite_type, Some(Linkage::External));
-
-    let fread_type = self.context.i64_type().fn_type(&[ptr_type.into(), self.context.i64_type().into(), self.context.i64_type().into(), ptr_type.into()], false);
-    self.module.add_function("fread", fread_type, Some(Linkage::External));
-
-    let fclose_type = self.context.i64_type().fn_type(&[ptr_type.into()], false);
-    self.module.add_function("fclose", fclose_type, Some(Linkage::External));
-
-    let fputs_type = self.context.i32_type().fn_type(&[ptr_type.into(), ptr_type.into()], true);
-    self.module.add_function("fputs", fputs_type, Some(Linkage::External));
 
     // declare void @llvm.va_start(ptr) - va_list i8* / ptr
     let va_start_type = self.context.void_type().fn_type(&[ptr_type.into()], false);
@@ -356,7 +329,7 @@ impl<'ctx> CodeGen<'ctx> {
     // Enter the main application scope
     self.enter_scope(false);
 
-    self.build_external_functions();
+    self.build_intrinsics();
 
     // Process the AST
     let merge_block = self.process_ast(ast, main_fn)?;
@@ -365,7 +338,8 @@ impl<'ctx> CodeGen<'ctx> {
     self.builder.position_at_end(merge_block);
 
     // Exit the main block
-    self.builder.build_return(None).unwrap();
+    let ret_val = self.context.i32_type().const_int(0, false);
+    self.builder.build_return(Some(&ret_val)).unwrap();
 
     // Print LLVM IR
     if verbose {
@@ -414,9 +388,8 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(block);
   }
 
-  fn process_top(&mut self, expr: Expression, main_fn: FunctionValue<'ctx>, block: BasicBlock<'ctx>) -> Result<BasicBlock<'ctx>, Error> {
-    let mut block = block;
-    match expr.clone().expr {
+  fn process_top(&mut self, expr: Expression, main_fn: FunctionValue<'ctx>, mut block: BasicBlock<'ctx>) -> Result<BasicBlock<'ctx>, Error> {
+    match expr.expr.clone() {
       // TODO: Validate for allowed top level op expressions
       // (Possibly move to parsing since we already validate for top level expressions there)
       Expr::BinaryOperator(_, _, _) => {
@@ -460,6 +433,9 @@ impl<'ctx> CodeGen<'ctx> {
       Expr::Public(expr) => {
         block = self.process_top(*expr, main_fn, block)?;
       },
+      Expr::Extern(abi, name, ret_type, params, variadic) => {
+        self.build_extern(abi, name, ret_type, params, variadic)?;
+      },
       Expr::Delete(expr) => {
         println!("Delete: {:?}", expr);
       },
@@ -496,11 +472,69 @@ impl<'ctx> CodeGen<'ctx> {
     let module_name = path.iter().map(|n| n.0.to_string()).collect::<Vec<String>>().join("/");
     let module = self.context.create_module(module_name.as_str());
 
+    // Collect public names
+    let mut public_names = Vec::new();
+    for expr in &ast {
+      if let Expr::Public(inner) = &expr.expr {
+        match &inner.expr {
+          Expr::Class(Name(n), _, _) => public_names.push(n.clone()),
+          Expr::Function(Name(n), _, _, _) => public_names.push(n.clone()),
+          Expr::TypeDef(Name(n), _) => public_names.push(n.clone()),
+          Expr::Enum(Name(n), _) => public_names.push(n.clone()),
+          Expr::Assignment(_, ident, _) => {
+            if let Expr::Literal(Literals::Identifier(Name(n))) = &ident.expr {
+              public_names.push(n.clone());
+            }
+          },
+          _ => {}
+        }
+      }
+    }
+
     // Enter the module scope
     self.enter_scope(false);
 
     // Process the AST
     self.process_ast(ast, _main_fn)?;
+
+    // Capture exported items
+    let mut exported_symbols = Vec::new();
+    let mut exported_structs = Vec::new();
+    let mut exported_struct_maps = Vec::new();
+    let mut exported_enum_maps = Vec::new();
+
+    if let Some(scope) = self.symbol_table_stack.last() {
+      for name in &public_names {
+        if let Some(sym) = scope.symbols.get(name) {
+          exported_symbols.push((name.clone(), sym.clone()));
+        }
+        if let Some(strct) = scope.struct_enum_types.get(name) {
+          exported_structs.push((name.clone(), strct.clone()));
+        }
+        if let Some(map) = scope.struct_map.get(name) {
+          exported_struct_maps.push((name.clone(), map.clone()));
+        }
+        if let Some(map) = scope.enum_map.get(name) {
+          exported_enum_maps.push((name.clone(), map.clone()));
+        }
+      }
+    }
+
+    self.exit_scope();
+
+    // Re-add exported items to parent scope
+    for (name, sym) in exported_symbols {
+      self.set_symbol(name, sym.0, sym.1, sym.2);
+    }
+    for (name, strct) in exported_structs {
+      self.set_struct(name, strct);
+    }
+    for (name, map) in exported_struct_maps {
+      self.set_struct_mapping(name, map);
+    }
+    for (name, map) in exported_enum_maps {
+      self.set_enum_mapping(name, map);
+    }
 
     if let Err(e) = module.verify() {
       return Err(Error::new(
@@ -516,7 +550,7 @@ impl<'ctx> CodeGen<'ctx> {
     return Ok(());
   }
 
-  fn build_index_extract(&mut self, getting_inner_parent: bool, passing_type_name: bool, parent_struct_ptr_if_recursing: Option<PointerValue<'ctx>>, parent: Box<Expression>, child: Box<Expression>, block: BasicBlock<'ctx>) -> Result<(BasicValueEnum<'ctx>, Option<String>), Error> {
+  fn build_index_extract(&mut self, getting_inner_parent: bool, passing_type_name: bool, parent_struct_val_if_recursing: Option<BasicValueEnum<'ctx>>, parent: Box<Expression>, child: Box<Expression>, block: BasicBlock<'ctx>) -> Result<(BasicValueEnum<'ctx>, Option<String>), Error> {
     // Get struct type name from parent
     let (parent_val, parent_name) = if getting_inner_parent && !passing_type_name {
       let parent_val = self.visit(&parent, block)?;
@@ -545,7 +579,7 @@ impl<'ctx> CodeGen<'ctx> {
     } else {
       match parent.expr {
         Expr::Literal(Literals::Identifier(Name(ref name))) => (
-          Some(parent_struct_ptr_if_recursing.unwrap().as_basic_value_enum()),
+          Some(parent_struct_val_if_recursing.unwrap()),
           name.to_owned()
         ),
         _ => unreachable!(),
@@ -613,9 +647,9 @@ impl<'ctx> CodeGen<'ctx> {
     } else if let Expr::Index(inner_parent, inner_child) = child.expr {
       // If we are already getting an inner parent, we can't pass the type name
       let (parent_value, field_struct_type_name) = if getting_inner_parent {
-        self.build_index_extract(true, false, Some(parent_val.unwrap().into_pointer_value()), parent.clone(), inner_parent, block)?
+        self.build_index_extract(true, false, Some(parent_val.unwrap()), parent.clone(), inner_parent, block)?
       } else {
-        self.build_index_extract(true, true, Some(parent_val.unwrap().into_pointer_value()), parent.clone(), inner_parent, block)?
+        self.build_index_extract(true, true, Some(parent_val.unwrap()), parent.clone(), inner_parent, block)?
       };
 
       // Wrap the extracted field type in an expression to use as the new parent expr
@@ -629,12 +663,7 @@ impl<'ctx> CodeGen<'ctx> {
       };
 
       // Recurse to get the inner child
-      if parent_value.is_pointer_value() {
-        return self.build_index_extract(false, true, Some(parent_value.into_pointer_value()), Box::new(parent_expr), inner_child, block);
-      // We are getting the value next
-      } else {
-        return self.build_index_extract(false, true, None, Box::new(parent_expr), inner_child, block);
-      }
+      return self.build_index_extract(false, true, Some(parent_value), Box::new(parent_expr), inner_child, block);
 
     // Method call
     } else if let Expr::Call(Name(method_name), args) = child.expr {
@@ -682,6 +711,35 @@ impl<'ctx> CodeGen<'ctx> {
       };
 
       return Ok((result, None));
+
+    // Array index on field
+    } else if let Expr::ArrayIndex(arr, idx) = child.expr {
+      let (field_val, _) = self.build_index_extract(true, passing_type_name, parent_struct_val_if_recursing, parent.clone(), arr.clone(), block)?;
+      let ptr_val = field_val.into_pointer_value();
+
+      let elem_type = match arr.inferred_type.as_ref().unwrap() {
+        JType::String => self.context.i8_type().as_basic_type_enum(),
+        JType::Array(inner) => match **inner {
+          JType::Integer => self.context.i64_type().as_basic_type_enum(),
+          JType::UnsignedInteger => self.context.i64_type().as_basic_type_enum(),
+          JType::FloatingPoint => self.context.f64_type().as_basic_type_enum(),
+          JType::Boolean => self.context.bool_type().as_basic_type_enum(),
+          JType::String => self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(),
+          _ => self.context.i8_type().as_basic_type_enum(),
+        },
+        JType::UnsignedInteger => self.context.i8_type().as_basic_type_enum(),
+        _ => self.context.i8_type().as_basic_type_enum(),
+      };
+
+      let idx_val = self.visit(&idx, block)?.into_int_value();
+      let idx_ptr = unsafe { self.builder.build_gep(elem_type, ptr_val, &[idx_val], "array_index").unwrap() };
+
+      if getting_inner_parent && (elem_type.is_struct_type() || elem_type.is_array_type()) {
+        return Ok((idx_ptr.as_basic_value_enum(), None));
+      } else {
+        let val = self.builder.build_load(elem_type, idx_ptr, "array_val").unwrap();
+        return Ok((val, None));
+      }
 
     } else {
       // Invalid index at child
@@ -1475,7 +1533,25 @@ impl<'ctx> CodeGen<'ctx> {
     if let Expr::ArrayIndex(_, _) | Expr::Index(_, _) = ident_or_idx.expr.clone() {
       let (ptr, _) = self.build_index(&ident_or_idx)?;
       let set = self.visit(&value.clone().unwrap(), block)?;
-      self.builder.build_store(ptr, set).unwrap();
+
+      // Check if we need to cast (such as i64 to i8 for string/char)
+      let val_to_store = if let Expr::ArrayIndex(parent, _) = ident_or_idx.expr.clone() {
+        if let Some(JType::String) = parent.inferred_type {
+          // Assigning to string char - storage is i8, value is i64
+          let set_int = set.into_int_value();
+          if set_int.get_type().get_bit_width() > 8 {
+            self.builder.build_int_truncate(set_int, self.context.i8_type(), "trunc").unwrap().as_basic_value_enum()
+          } else {
+            set
+          }
+        } else {
+          set
+        }
+      } else {
+        set
+      };
+
+      self.builder.build_store(ptr, val_to_store).unwrap();
       return Ok(());
     }
 
@@ -1535,18 +1611,36 @@ impl<'ctx> CodeGen<'ctx> {
       match ty.as_str() {
         "let" | "const" | "int" | "bool" | "float" | "string" => {
           // Allocate space and store the value
+          // Use entry block stack to avoid reallocation stack overflow in loops
           let ptr = if self.symbol_table_stack.len() == 1 {
             let global = self.module.add_global(set.get_type(), None, &name);
             global.set_linkage(Linkage::Internal);
             global.set_initializer(&set.get_type().const_zero());
             global.as_pointer_value()
           } else {
-            self.create_entry_block_alloca(&name, set.get_type())
+            // If assigning to int, allocate i64
+            if ty.as_str() == "int" {
+              self.create_entry_block_alloca(&name, self.context.i64_type().as_basic_type_enum())
+            } else {
+              self.create_entry_block_alloca(&name, set.get_type())
+            }
           };
 
-          self.builder.build_store(ptr, set).unwrap();
+          // Cast if needed
+          let val_to_store = if ty.as_str() == "int" && set.is_int_value() {
+            let set_int = set.into_int_value();
+            if set_int.get_type().get_bit_width() < 64 {
+              self.builder.build_int_z_extend(set_int, self.context.i64_type(), "zext").unwrap().as_basic_value_enum()
+            } else {
+              set
+            }
+          } else {
+            set
+          };
+
+          self.builder.build_store(ptr, val_to_store).unwrap();
           // Set the symbol
-          self.set_symbol(name, Some(ptr), set.get_type(), set);
+          self.set_symbol(name, Some(ptr), val_to_store.get_type(), val_to_store);
         },
         // Custom type (we know exists from builder)
         _ => {
@@ -1687,6 +1781,11 @@ impl<'ctx> CodeGen<'ctx> {
             parameters.push(t.into());
             t.into()
           },
+          "int32" => {
+            let t = self.context.i32_type();
+            parameters.push(t.into());
+            t.into()
+          },
           "float" => {
             let t = self.context.f64_type();
             parameters.push(t.into());
@@ -1697,7 +1796,7 @@ impl<'ctx> CodeGen<'ctx> {
             parameters.push(t.into());
             t.into()
           },
-          "string" => {
+          "string" | "ptr" => {
             let t = self.context.ptr_type(AddressSpace::default());
             parameters.push(t.into());
             t.into()
@@ -1756,10 +1855,11 @@ impl<'ctx> CodeGen<'ctx> {
     // Build function
     let func_type = match returns.as_str() {
       "int" => self.context.i64_type().fn_type(&parameters, variadic),
+      "int32" => self.context.i32_type().fn_type(&parameters, variadic),
       "float" => self.context.f64_type().fn_type(&parameters, variadic),
       "void" => self.context.void_type().fn_type(&parameters, variadic),
       "bool" => self.context.bool_type().fn_type(&parameters, variadic),
-      "string" => self.context.ptr_type(AddressSpace::default()).fn_type(&parameters, variadic),
+      "string" | "ptr" => self.context.ptr_type(AddressSpace::default()).fn_type(&parameters, variadic),
       _ => {
         // Check for enum
         if self.get_enum_mapping(&returns).is_some() {
@@ -1787,6 +1887,7 @@ impl<'ctx> CodeGen<'ctx> {
       parameters: parameter_stack.clone(),
       _ret_type: returns.clone(),
       variadic,
+      is_external: false,
     };
     self.functions.insert(name.0.clone(), fun_ctx);
 
@@ -1991,6 +2092,120 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Terminate block
     self.builder.position_at_end(block);
+
+    return Ok(());
+  }
+
+  fn build_extern(&mut self, _abi: String, Name(name): Name, ret_type: Option<Literals>, params: Option<Box<Vec<Expression>>>, variadic: bool) -> Result<(), Error> {
+    // Get function parameters
+    let mut parameters: Vec<BasicMetadataTypeEnum> = vec![];
+    let mut parameter_stack: Vec<FunctionParamCtx<'ctx>> = vec![];
+
+    if let Some(params_vec) = params {
+      for param in params_vec.iter() {
+        let (typ, _, name, default_value_expr, is_spread) = match param.clone().expr {
+          Expr::FunctionParam(ty, is_const, name, default_val, spread) => {
+            (
+              ty,
+              is_const,
+              match name {
+                Literals::Identifier(Name(name)) => name,
+                _ => panic!("Invalid function parameter"),
+              },
+              default_val,
+              spread
+            )
+          },
+          _ => panic!("Invalid function parameter"),
+        };
+
+        let t: BasicTypeEnum = if let Some(Type(type_name)) = typ.clone() {
+          match type_name.as_str() {
+            "int" => self.context.i64_type().into(),
+            "int32" => self.context.i32_type().into(),
+            "float" => self.context.f64_type().into(),
+            "bool" => self.context.bool_type().into(),
+            "string" | "ptr" => self.context.ptr_type(AddressSpace::default()).into(),
+            _ => {
+              if self.get_struct(&type_name).is_some() {
+                self.context.ptr_type(AddressSpace::default()).into()
+              } else {
+                return Err(Error::new(
+                  Error::NameError,
+                  None,
+                  &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+                  param.first_pos,
+                  Some(param.first_pos.unwrap() + type_name.len() as i32),
+                  format!("Type '{}' not found", type_name)
+                ));
+              }
+            },
+          }
+        } else {
+          if is_spread {
+            self.context.i8_type().into()
+          } else {
+            panic!("Function parameter must have a type");
+          }
+        };
+
+        if !is_spread {
+          parameters.push(t.into());
+        }
+        parameter_stack.push(FunctionParamCtx {
+          name: name.clone(),
+          jtype: param.clone().inferred_type.unwrap_or(JType::Unknown),
+          _llvm_type: t.into(),
+          default_value_expr,
+          is_spread
+        });
+      }
+    }
+
+    // Get return type
+    let returns: String = ret_type.map_or("void".to_string(), |ty| match ty {
+      Literals::Identifier(name) => name.0,
+      _ => panic!("Invalid return type"),
+    });
+
+    // Build function type
+    let func_type = match returns.as_str() {
+      "int" => self.context.i64_type().fn_type(&parameters, variadic),
+      "int32" => self.context.i32_type().fn_type(&parameters, variadic),
+      "float" => self.context.f64_type().fn_type(&parameters, variadic),
+      "void" => self.context.void_type().fn_type(&parameters, variadic),
+      "bool" => self.context.bool_type().fn_type(&parameters, variadic),
+      "string" | "ptr" => self.context.ptr_type(AddressSpace::default()).fn_type(&parameters, variadic),
+      _ => {
+        if self.get_struct_mapping(&returns).is_some() {
+          self.context.get_struct_type(&returns).unwrap().fn_type(&parameters, variadic)
+        } else {
+          return Err(Error::new(
+            Error::NameError,
+            None,
+            &"",
+            Some(0),
+            Some(0),
+            format!("Type '{}' not found", returns)
+          ));
+        }
+      },
+    };
+
+    // Add function to module
+    let function = self.module.get_function(&name).unwrap_or_else(|| {
+      self.module.add_function(&name, func_type, Some(Linkage::External))
+    });
+
+    // Store function context
+    let fun_ctx = FunctionCtx {
+      llvm_fun: function,
+      parameters: parameter_stack,
+      _ret_type: returns,
+      variadic,
+      is_external: true,
+    };
+    self.functions.insert(name, fun_ctx);
 
     return Ok(());
   }
@@ -2290,7 +2505,6 @@ impl<'ctx> CodeGen<'ctx> {
       // Store parameter
       let var = self.builder.build_alloca(param.get_type(), &field_name).unwrap();
       self.builder.build_store(var, *param).unwrap();
-      // Ensure the constructor block is aware of the parameter
       self.set_symbol(field_name.clone(), Some(var), param.get_type(), *param);
 
       // Set struct mapping if it is a struct
@@ -2431,9 +2645,9 @@ impl<'ctx> CodeGen<'ctx> {
 
         // Handle void return if needed
         if function.get_type().get_return_type().is_none() {
-           if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
-              self.builder.build_return(None).unwrap();
-           }
+          if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+            self.builder.build_return(None).unwrap();
+          }
         }
 
         self.exit_scope();
@@ -2456,28 +2670,16 @@ impl<'ctx> CodeGen<'ctx> {
     if params.is_some() {
       for param in params.unwrap().into_iter() {
         let (param_name, Type(typ)) = match param.clone().expr {
-          Expr::FunctionParam(ty, _, Literals::Identifier(Name(ident)), _, _) => {
-            if ty.is_none() || ty.as_ref().unwrap().0 == "let" {
-              return Err(Error::new(
-                Error::CompilerError,
-                None,
-                &self.code.lines().nth((param.first_line.unwrap() - 1) as usize).unwrap().to_string(),
-                param.first_pos,
-                param.first_pos,
-                "Method parameters must be typed".to_string()
-              ));
-            } else {
-              (ident, ty.unwrap())
-            }
-          },
+          Expr::FunctionParam(ty, _, Literals::Identifier(Name(ident)), _, _) => (ident, ty.unwrap()),
           _ => panic!("Invalid function parameter"),
         };
 
         let t: BasicTypeEnum = match typ.as_str() {
           "int" => self.context.i64_type().into(),
+          "int32" => self.context.i32_type().into(),
           "float" => self.context.f64_type().into(),
           "bool" => self.context.bool_type().into(),
-          "string" => self.context.ptr_type(AddressSpace::default()).into(),
+          "string" | "ptr" => self.context.ptr_type(AddressSpace::default()).into(),
           _ => {
             if self.get_struct(&typ).is_some() {
               self.context.ptr_type(AddressSpace::default()).into()
@@ -2508,6 +2710,7 @@ impl<'ctx> CodeGen<'ctx> {
         Literals::Identifier(Name(name)) => {
           match name.as_str() {
             "int" => self.context.i64_type().fn_type(&types, false),
+            "int32" => self.context.i32_type().fn_type(&types, false),
             "float" => self.context.f64_type().fn_type(&types, false),
             "bool" => self.context.bool_type().fn_type(&types, false),
             "string" => self.context.ptr_type(AddressSpace::default()).fn_type(&types, false),
@@ -2553,9 +2756,50 @@ impl<'ctx> CodeGen<'ctx> {
       }
     };
 
-    // TODO: Think about how to handle other types of indexing & recursive indexing
     if let Expr::Index(_, _) = parent.expr {
-      return self.build_index(&parent);
+      let (parent_ptr, parent_val) = self.build_index(&parent)?;
+
+      if let Expr::ArrayIndex(_, _) = expr.expr {
+        let elem_jtype = match parent.inferred_type.as_ref().unwrap() {
+          JType::String => JType::Integer,
+          JType::Array(inner) => *inner.clone(),
+          JType::UnsignedInteger => JType::Integer,
+          _ => return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
+            expr.first_pos,
+            expr.last_line,
+            format!("Cannot index type {:?}", parent.inferred_type)
+          ))
+        };
+
+        let element_type = if matches!(parent.inferred_type.as_ref().unwrap(), JType::String | JType::UnsignedInteger) {
+          self.context.i8_type().as_basic_type_enum()
+        } else {
+          self.jtype_to_basic_type(elem_jtype)?
+        };
+
+        let idx = self.visit(&index, self.builder.get_insert_block().unwrap())?.into_int_value();
+
+        if !parent_val.is_pointer_value() {
+            return Err(Error::new(
+            Error::CompilerError,
+            None,
+            &self.code.lines().nth(expr.first_line.unwrap() as usize).unwrap().to_string(),
+            expr.first_pos,
+            expr.last_line,
+            "Expected pointer for array indexing".to_string()
+          ));
+        }
+
+        let ptr = parent_val.into_pointer_value();
+        let idx_ptr = unsafe { self.builder.build_gep(element_type, ptr, &[idx], "get_index").unwrap() };
+        let val = self.builder.build_load(element_type, idx_ptr, "array_value").unwrap();
+        return Ok((idx_ptr, val));
+      }
+
+      return Ok((parent_ptr, parent_val));
     }
 
     if let Expr::SelfRef = parent.expr {
@@ -2566,9 +2810,9 @@ impl<'ctx> CodeGen<'ctx> {
         let struct_fields = self.get_struct(&class_name).unwrap();
         for (i, (name, typ, _)) in struct_fields.iter().enumerate() {
           if name == &field_name {
-             let ptr = self.builder.build_struct_gep(self.context.get_struct_type(&class_name).unwrap(), self_ptr, i as u32, "field_ptr").unwrap();
-             let val = self.builder.build_load(*typ, ptr, "field_val").unwrap();
-             return Ok((ptr, val));
+            let ptr = self.builder.build_struct_gep(self.context.get_struct_type(&class_name).unwrap(), self_ptr, i as u32, "field_ptr").unwrap();
+            let val = self.builder.build_load(*typ, ptr, "field_val").unwrap();
+            return Ok((ptr, val));
           }
         }
         return Err(Error::new(
@@ -2631,7 +2875,23 @@ impl<'ctx> CodeGen<'ctx> {
 
       // Get the array's element type
       // TODO: This will have to be modified for nested and dynamic arrays
-      let element_type = typ.into_array_type().get_element_type();
+      let element_type = if let Some(jtype) = &parent.inferred_type {
+        match jtype {
+          JType::String | JType::UnsignedInteger => self.context.i8_type().as_basic_type_enum(),
+          JType::Array(inner) => self.jtype_to_basic_type(*inner.clone())?,
+          _ => if typ.is_array_type() {
+            typ.into_array_type().get_element_type()
+          } else {
+            self.context.i8_type().as_basic_type_enum()
+          }
+        }
+      } else {
+        if typ.is_array_type() {
+          typ.into_array_type().get_element_type()
+        } else {
+          self.context.i8_type().as_basic_type_enum()
+        }
+      };
 
       // Load the value to index with
       let idx = self.visit(&index, self.builder.get_insert_block().unwrap())?.into_int_value();
@@ -2658,7 +2918,14 @@ impl<'ctx> CodeGen<'ctx> {
       // self.builder.position_at_end(continue_block);
 
       // Get the pointer to the index and load its value
-      let idx_ptr = unsafe { self.builder.build_gep(element_type, ptr.unwrap(), &[idx], "get_index").unwrap() };
+      let idx_ptr = if typ.is_array_type() {
+        let indices = vec![self.context.i64_type().const_zero(), idx];
+        unsafe { self.builder.build_gep(typ, ptr.unwrap(), &indices, "get_index").unwrap() }
+      } else {
+        let loaded_ptr = self.builder.build_load(typ, ptr.unwrap(), "load_ptr").unwrap().into_pointer_value();
+        unsafe { self.builder.build_gep(element_type, loaded_ptr, &[idx], "get_index").unwrap() }
+      };
+
       let val = self.builder.build_load(element_type, idx_ptr, "array_value").unwrap();
       return Ok((idx_ptr, val));
     }
@@ -2853,6 +3120,7 @@ impl<'ctx> CodeGen<'ctx> {
           let num_params_total = fun_ctx.parameters.len();
           let num_params_fixed = if fun_ctx.variadic { num_params_total - 1 } else { num_params_total };
           let variadic = fun_ctx.variadic;
+          let is_external = fun_ctx.is_external;
           let param_names: Vec<String> = fun_ctx.parameters.iter().map(|p| p.name.clone()).collect();
           let param_defaults: Vec<Option<Box<Expression>>> = fun_ctx.parameters.iter().map(|p| p.default_value_expr.clone()).collect();
 
@@ -2876,7 +3144,7 @@ impl<'ctx> CodeGen<'ctx> {
             // Allocate memory for the struct on the heap
             let struct_type = self.context.get_struct_type(&name.0).unwrap();
             let size = struct_type.size_of().unwrap();
-            let malloc = self.module.get_function("malloc").unwrap();
+            let malloc: FunctionValue<'_> = self.module.get_function("malloc").unwrap();
             let ptr = match self.builder.build_call(malloc, &[size.into()], "malloc_call").unwrap().try_as_basic_value() {
               ValueKind::Basic(val) => val.into_pointer_value(),
               _ => panic!("malloc returned void"),
@@ -2885,7 +3153,7 @@ impl<'ctx> CodeGen<'ctx> {
           }
 
           // Add hidden count for variadic functions
-          if variadic {
+          if variadic && !is_external {
             let count = num_args_provided as i64 - num_params_fixed as i64;
             let var_arg_count = if count > 0 { count } else { 0 };
             llvm_args.push(self.context.i64_type().const_int(var_arg_count as u64, false).into());
@@ -2924,7 +3192,16 @@ impl<'ctx> CodeGen<'ctx> {
 
           if variadic {
             for i in num_params_fixed..num_args_provided {
-              let arg_val = self.visit(&args[i], block)?;
+              let mut arg_val = self.visit(&args[i], block)?;
+
+              // Promote small ints to i64 for variadic functions
+              if arg_val.is_int_value() {
+                let int_val = arg_val.into_int_value();
+                if int_val.get_type().get_bit_width() < 64 {
+                  arg_val = self.builder.build_int_z_extend(int_val, self.context.i64_type(), "vararg_promote").unwrap().as_basic_value_enum();
+                }
+              }
+
               llvm_args.push(arg_val.into());
             }
           }
@@ -2974,17 +3251,17 @@ impl<'ctx> CodeGen<'ctx> {
           let mut llvm_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(num_provided_adjusted);
 
           if is_constructor {
-             // Allocate memory for the struct on the heap
-             let struct_type = self.context.get_struct_type(&name.0).unwrap();
-             let size = struct_type.size_of().unwrap();
-             let malloc = self.module.get_function("malloc").unwrap();
-             let ptr = match self.builder.build_call(malloc, &[size.into()], "malloc_call").unwrap().try_as_basic_value() {
-               ValueKind::Basic(val) => val.into_pointer_value(),
-               _ => panic!("malloc returned void"),
-             };
-             // Cast i8* from malloc to struct*
-             let struct_ptr = self.builder.build_pointer_cast(ptr, self.context.ptr_type(AddressSpace::default()), &format!("{}_inst", name.0)).unwrap();
-             llvm_args.push(struct_ptr.into());
+            // Allocate memory for the struct on the heap
+            let struct_type = self.context.get_struct_type(&name.0).unwrap();
+            let size = struct_type.size_of().unwrap();
+            let malloc = self.module.get_function("malloc").unwrap();
+            let ptr = match self.builder.build_call(malloc, &[size.into()], "malloc_call").unwrap().try_as_basic_value() {
+              ValueKind::Basic(val) => val.into_pointer_value(),
+              _ => panic!("malloc returned void"),
+            };
+            // Cast i8* from malloc to struct*
+            let struct_ptr = self.builder.build_pointer_cast(ptr, self.context.ptr_type(AddressSpace::default()), &format!("{}_inst", name.0)).unwrap();
+            llvm_args.push(struct_ptr.into());
           }
 
           for arg in args.iter() {
@@ -3244,6 +3521,25 @@ impl<'ctx> CodeGen<'ctx> {
     let mut right = self.visit(&rhs, block)?;
     let lhs_type = lhs.inferred_type.as_ref().expect("Type checker should set this");
     let rhs_type = rhs.inferred_type.as_ref().expect("Type checker should set this");
+
+    // Extend int types if necessary
+    if (JType::Integer, JType::Integer) == (lhs_type.clone(), rhs_type.clone()) {
+      let left_int = left.into_int_value();
+      let right_int = right.into_int_value();
+      let left_width = left_int.get_type().get_bit_width();
+      let right_width = right_int.get_type().get_bit_width();
+
+      let (final_left, final_right) = if left_width == right_width {
+        (left_int, right_int)
+      } else if left_width < right_width {
+        (self.builder.build_int_z_extend(left_int, right_int.get_type(), "zext_left").unwrap(), right_int)
+      } else {
+        (left_int, self.builder.build_int_z_extend(right_int, left_int.get_type(), "zext_right").unwrap())
+      };
+
+      left = final_left.as_basic_value_enum();
+      right = final_right.as_basic_value_enum();
+    }
 
     match op.0.as_str() {
       "+" => {
@@ -3644,10 +3940,93 @@ mod tests {
 
     // Assert the output matches
     if !test.status.success() && String::from_utf8_lossy(&test.stderr) != "" {
-      eprintln!("Error: {}", String::from_utf8_lossy(&test.stderr));
-      assert!(false);
+      panic!("Error: {}", String::from_utf8_lossy(&test.stderr));
     } else {
       assert_eq!(String::from_utf8_lossy(&test.stdout), output);
+    }
+  }
+
+  // Compile the IR and assert the output matches with input
+  fn build_and_assert_with_input(ir: LLVMString, input: &str, output: &str) {
+    let test_count = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let llvm_ir_file = format!("./test{}.ll", test_count);
+    let executable_file = if cfg!(target_os = "windows") {
+      format!("./test{}.exe", test_count)
+    } else {
+      format!("./test{}", test_count)
+    };
+
+    // Generate LLVM IR file
+    let mut file = File::create(&llvm_ir_file).unwrap();
+    file.write_all(ir.to_bytes()).unwrap();
+
+    // Compile the executable
+    let clang_output = if cfg!(target_os = "windows") {
+      std::process::Command::new("clang")
+        .arg("-o")
+        .arg(&executable_file) // `test1.exe`
+        .arg(&llvm_ir_file)    // `test1.ll`
+        .arg("-llegacy_stdio_definitions")
+        .output()
+        .expect(format!("Failed to execute clang for file {}", llvm_ir_file).as_str())
+    } else {
+      // If running in GitHub build tests workflow use clang-18
+      let clang_cmd = if std::env::var("GH_WORKFLOW").is_ok() {
+        std::process::Command::new("clang-18")
+        .arg("--version")
+        .output()
+        .expect("clang-18 is not available in the workflow environment");
+
+        "clang-18"
+      } else {
+        "clang"
+      };
+
+      std::process::Command::new(clang_cmd)
+        .arg("-o")
+        .arg(&executable_file) // `test1`
+        .arg("-no-pie")
+        .arg(&llvm_ir_file)    // `test1.ll`
+        .output()
+        .expect(format!("Failed to execute clang for file {}", llvm_ir_file).as_str())
+    };
+
+    // Check for clang errors
+    if !clang_output.status.success() {
+      panic!(
+        "clang compilation failed for '{}' (exit code: {:?}):\nStdout: {}\nStderr: {}",
+        llvm_ir_file,
+        clang_output.status.code(),
+        String::from_utf8_lossy(&clang_output.stdout),
+        String::from_utf8_lossy(&clang_output.stderr)
+      );
+    }
+
+    // Run the executable with input
+    let mut child = std::process::Command::new(&executable_file)
+      .stdin(std::process::Stdio::piped())
+      .stdout(std::process::Stdio::piped())
+      .stderr(std::process::Stdio::piped())
+      .spawn()
+      .expect("Failed to spawn executable");
+
+    {
+      let stdin = child.stdin.as_mut().expect("Failed to open stdin");
+      stdin.write_all(input.as_bytes()).expect("Failed to write to stdin");
+    }
+
+    let output_res = child.wait_with_output().expect("Failed to read stdout");
+
+    // Delete the test execution files
+    fs::remove_file(llvm_ir_file).unwrap();
+    fs::remove_file(executable_file).unwrap();
+
+    // Assert the output matches
+    if !output_res.status.success() && String::from_utf8_lossy(&output_res.stderr) != "" {
+      eprintln!("Error: {}", String::from_utf8_lossy(&output_res.stderr));
+      assert!(false);
+    } else {
+      assert_eq!(String::from_utf8_lossy(&output_res.stdout), output);
     }
   }
 
@@ -3656,13 +4035,34 @@ mod tests {
     let context = Context::create();
     let mut codegen = CodeGen::new(&context);
     let mut parser = crate::Parser::new();
-    parser.set_source(code.to_string());
+    let test_code = "
+      pub extern(\"C\") printf(string fmt, ...) -> int32;
+    ".to_owned() + code;
+    parser.set_source(test_code.to_string());
     let mut ast = parser.parse(String::new(), false, true).unwrap();
     let mut typer = crate::TypeChecker::new();
     typer.set_source(code.to_string());
     typer.check(&mut ast)?;
-    let ir = codegen.build(code.to_string(), ast, IndexMap::new(), false, false).unwrap();
+    let ir = codegen.build(test_code.to_string(), ast, IndexMap::new(), false, false).unwrap();
     build_and_assert(ir, expected);
+    Ok(())
+  }
+
+  fn run_test_with_input(code: &str, input: &str, expected: &str) -> Result<(), Error> {
+    let context = Context::create();
+    let mut codegen = CodeGen::new(&context);
+    let mut parser = crate::Parser::new();
+    let test_code = "
+      pub extern(\"C\") printf(string fmt, ...) -> int32;
+      pub extern(\"C\") scanf(string fmt, ...) -> int32;
+    ".to_owned() + code;
+    parser.set_source(test_code.to_string());
+    let mut ast = parser.parse(String::new(), false, true).unwrap();
+    let mut typer = crate::TypeChecker::new();
+    typer.set_source(code.to_string());
+    typer.check(&mut ast)?;
+    let ir = codegen.build(test_code.to_string(), ast, IndexMap::new(), false, false).unwrap();
+    build_and_assert_with_input(ir, input, expected);
     Ok(())
   }
 
@@ -3894,6 +4294,17 @@ mod tests {
       TestClass obj = TestClass(42);
       obj.print_self();
     ",
+    "42")
+  }
+
+  #[test]
+  fn test_build_scanf_input() -> Result<(), Error> {
+    run_test_with_input("
+      int y;
+      scanf(\"%d\", ptr(y));
+      printf(\"%d\", y);
+    ",
+    "42",
     "42")
   }
 }
