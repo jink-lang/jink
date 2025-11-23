@@ -778,8 +778,9 @@ impl Parser {
       "&&" => 3,
       "^" => 4,
       "==" | "!=" => 5,
-      "+" | "-" => 6,
-      "*" | "/" | "//" | "%" => 7,
+      "<" | ">" | "<=" | ">=" => 6,
+      "+" | "-" => 7,
+      "*" | "/" | "//" | "%" => 8,
       _ => 0
     }
   }
@@ -1293,9 +1294,11 @@ impl Parser {
   /// Parse index chain (recursive)
   fn parse_index(&mut self, identifier: Token) -> Result<Expression, Error> {
     self.iter.next(); // Consume `.`
+
+    let was_indexing = self.is_indexing;
     self.is_indexing = true;
     let index = self.parse_expression(0)?;
-    self.is_indexing = false;
+    self.is_indexing = was_indexing;
 
     // If indexing `self`, return self initial expression instead of identifier
     if identifier.value.as_ref().unwrap() == "self" {
