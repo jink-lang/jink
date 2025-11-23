@@ -2791,6 +2791,52 @@ impl<'ctx> CodeGen<'ctx> {
       Expr::TypeDef(_, _) => todo!(),
       Expr::Conditional(_, _, _, _) => panic!("Conditional not allowed here"),
       Expr::Call(name, args) => {
+        if name.0 == "ptr" {
+          if args.len() != 1 {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+              expr.first_pos,
+              expr.last_line,
+              format!("ptr() expects 1 argument, got {}", args.len())
+            ));
+          }
+
+          let arg = &args[0];
+          match arg.expr.clone() {
+            Expr::Literal(Literals::Identifier(Name(name))) => {
+              if let Some((_, ptr, _, _, _)) = self.get_symbol(&name)? {
+                if let Some(p) = ptr {
+                  return Ok(p.as_basic_value_enum());
+                }
+              }
+              return Err(Error::new(
+                Error::CompilerError,
+                None,
+                &self.code.lines().nth((arg.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+                arg.first_pos,
+                arg.last_line,
+                format!("Cannot take address of {}", name)
+              ));
+            },
+            Expr::Index(_, _) | Expr::ArrayIndex(_, _) => {
+              let (ptr, _) = self.build_index(arg)?;
+              return Ok(ptr.as_basic_value_enum());
+            },
+            _ => {
+              return Err(Error::new(
+                Error::CompilerError,
+                None,
+                &self.code.lines().nth((arg.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+                arg.first_pos,
+                arg.last_line,
+                "ptr() argument must be an identifier or index expression".to_string()
+              ));
+            }
+          }
+        }
+
         let func_name = if self.class_table.contains_key(&name.0) {
           format!("{}_constructor", name.0)
         } else {

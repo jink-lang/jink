@@ -101,7 +101,8 @@ impl TypeChecker {
     let builtins = [
       "printf", "puts", "scanf", "strlen",
       "malloc", "free",
-      "fopen", "fwrite", "fread", "fclose", "fputs"
+      "fopen", "fwrite", "fread", "fclose", "fputs",
+      "ptr"
     ];
     builtins.contains(&name)
   }
