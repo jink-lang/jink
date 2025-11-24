@@ -4635,23 +4635,33 @@ mod tests {
 
   #[test]
   fn test_build_import_libc() -> Result<(), Error> {
+    let ret = if cfg!(target_os = "windows") {
+      "Hello, World!\r\n"
+    } else {
+      "Hello, World!\n"
+    };
     run_test("
       import from jink.ext.libc { puts };
       let s = \"Hello, World!\";
       puts(s);
     ",
-    "Hello, World!\r\n")
+    ret)
   }
 
   #[test]
   fn test_build_string_class() -> Result<(), Error> {
+    let ret = if cfg!(target_os = "windows") {
+      "hello\r\n"
+    } else {
+      "hello\n"
+    };
     run_test("
       import from std.string { String };
       let s = String(\"  hello  \");
       let trimmed = s.trim();
       trimmed.print();
     ",
-    "hello\r\n")
+    ret)
   }
 
   #[test]
