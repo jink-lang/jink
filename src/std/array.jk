@@ -1,0 +1,84 @@
+import from jink.ext.libc { printf, malloc, realloc, free, exit };
+
+// Temporary until generics are implemented
+pub cls IntArray = {
+  ptr data;
+  int length;
+  int capacity;
+
+  fun new() -> self {
+    self.length = 0;
+    self.capacity = 10;
+    self.data = malloc(self.capacity * 8); // 8 bytes per int (i64)
+  }
+
+  pub fun push(int val) -> void {
+    if (self.length >= self.capacity) {
+      self.capacity = self.capacity * 2;
+      self.data = realloc(self.data, self.capacity * 8);
+    }
+
+    __ptr_write_int(self.data, self.length, val);
+    self.length = self.length + 1;
+  }
+
+  pub fun pop() -> int {
+    if (self.length == 0) {
+      printf("Pop from empty array\n");
+      exit(1);
+    }
+    self.length = self.length - 1;
+    return __ptr_read_int(self.data, self.length);
+  }
+
+  pub fun get(int idx) -> int {
+    if (idx < 0 || idx >= self.length) {
+      printf("Index out of bounds: %d\n", idx);
+      exit(1);
+    }
+    return __ptr_read_int(self.data, idx);
+  }
+
+  pub fun set(int idx, int val) -> void {
+    if (idx < 0 || idx >= self.length) {
+      printf("Index out of bounds: %d\n", idx);
+      exit(1);
+    }
+    __ptr_write_int(self.data, idx, val);
+  }
+
+  pub fun size() -> int {
+    return self.length;
+  }
+
+  // Bubble sort
+  pub fun sort() -> void {
+    int i = 0;
+    while (i < self.length - 1) {
+      int j = 0;
+      while (j < self.length - i - 1) {
+        int a = self.get(j);
+        int b = self.get(j + 1);
+        if (a > b) {
+          self.set(j, b);
+          self.set(j + 1, a);
+        }
+        j = j + 1;
+      }
+      i = i + 1;
+    }
+  }
+
+  pub fun print() -> void {
+    printf("[");
+    int i = 0;
+    while (i < self.length) {
+      printf("%d", self.get(i));
+      if (i < self.length - 1) {
+        printf(", ");
+      }
+      i = i + 1;
+    }
+    printf("]\n");
+  }
+}

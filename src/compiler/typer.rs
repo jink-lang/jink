@@ -17,6 +17,7 @@ pub struct TypeChecker {
   types: HashSet<String>,
   type_definitions: HashMap<String, JType>,
   class_methods: HashMap<String, HashMap<String, JType>>,
+  module_exports_cache: HashMap<String, HashMap<String, JType>>,
   // Flag for when we're in a function and expecting a return
   in_function: bool,
   // The expected return type of the current function
@@ -31,6 +32,7 @@ impl TypeChecker {
       types: HashSet::new(),
       type_definitions: HashMap::new(),
       class_methods: HashMap::new(),
+      module_exports_cache: HashMap::new(),
       in_function: false,
       current_return_type: None,
       in_loop: false,
@@ -103,7 +105,10 @@ impl TypeChecker {
       "__ptr_read_int",
       "__ptr_write_int",
       "__ptr_read_string",
-      "__ptr_write_string"
+      "__ptr_write_string",
+      "type",
+      "int",
+      "float"
     ];
     builtins.contains(&name)
   }
@@ -1191,10 +1196,89 @@ impl TypeChecker {
         Ok(self.check_expression(expr)?)
       }
 
-      Expr::ModuleParsed(_, _, _, ast) => {
-        for expr in ast.iter_mut() {
-          self.check_expression(expr)?;
+      Expr::ModuleParsed(path, is_aliased_module, opts, ast) => {
+        let path_key = path.iter().map(|n| n.0.clone()).collect::<Vec<String>>().join("/");
+        let module_exports = if let Some(cached) = self.module_exports_cache.get(&path_key) {
+          cached.clone()
+        } else {
+          self.enter_scope();
+
+          for expr in ast.iter_mut() {
+            self.check_expression(expr)?;
+          }
+
+          let mut exports = HashMap::new();
+
+          for expr in ast.iter() {
+            if let Expr::Public(inner) = &expr.expr {
+              match &inner.expr {
+                Expr::Assignment(_, ident, _) => {
+                  if let Expr::Literal(Literals::Identifier(Name(name))) = &ident.expr {
+                    if let Some(scope) = self.scopes.last() {
+                      if let Some(var) = scope.variables.get(name) {
+                        exports.insert(name.clone(), var.jtype.clone());
+                      }
+                    }
+                  }
+                },
+                Expr::Function(Name(name), _, _, _) |
+                Expr::Class(Name(name), _, _) |
+                Expr::Enum(Name(name), _) |
+                Expr::TypeDef(Name(name), _) |
+                Expr::Extern(_, Name(name), _, _, _) => {
+                  if let Some(scope) = self.scopes.last() {
+                    if let Some(var) = scope.variables.get(name) {
+                      exports.insert(name.clone(), var.jtype.clone());
+                    }
+                  }
+                },
+                _ => {}
+              }
+            }
+          }
+
+          self.exit_scope();
+          self.module_exports_cache.insert(path_key, exports.clone());
+          exports
+        };
+
+        if let Some(aliases) = opts {
+          if *is_aliased_module {
+            // import module as alias
+            for (Name(name), alias) in aliases {
+              let alias_name = if let Some(Name(a)) = alias { a } else { name };
+              self.add_variable(alias_name, JType::Object(module_exports.clone()), true)?;
+            }
+          } else {
+            // import from module { ... }
+            for (Name(name), alias) in aliases {
+              let alias_name = match alias {
+                Some(Name(a)) => a.clone(),
+                None => name.clone(),
+              };
+
+              if let Some(typ) = module_exports.get(name.as_str()) {
+                self.add_variable(&alias_name, typ.clone(), true)?;
+              } else {
+                return Err(format!("Module does not export '{}'", name));
+              }
+            }
+          }
+        } else {
+          // import module or import module.*
+          let last_path_part = &path.last().unwrap().0;
+
+          if last_path_part == "*" {
+            // import module.* -> import all exports
+            for (name, typ) in module_exports {
+              self.add_variable(&name, typ, true)?;
+            }
+          } else {
+            // import module -> import module object
+            self.add_variable(last_path_part, JType::Object(module_exports.clone()), true)?;
+          }
         }
+
         Ok(JType::Unknown)
       },
 

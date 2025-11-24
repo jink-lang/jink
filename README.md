@@ -28,7 +28,7 @@ If you are interested in and new to contributing to the project, TODOs here mark
 
 ##### General
 - [ ] Design standard for modules
-- [ ] Start writing standard library
+- [x] Start writing standard library
 - [ ] Start writing self-hosted compiler
 - [ ] Add examples
 - [ ] Add documentation / tutorials
@@ -50,13 +50,13 @@ If you are interested in and new to contributing to the project, TODOs here mark
 - [ ] Build del statements
 - [x] Build module/import system
 - [ ] Validate module imports
-- [ ] Handle named module indexing
+- [x] Handle named module indexing
 - [ ] Build string interpolation
 - [x] Write struct tests
 - [ ] Write (more) function tests (`N`)
 - [ ] Write recursive function test (`N`)
 - [x] Write class tests
-- [ ] Write module tests (`N`)
+- [x] Write module tests
 ##### Type checker
 - [x] Add object type handling
 - [ ] Add heterogeneous array type handling

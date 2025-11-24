@@ -18,7 +18,6 @@ use super::module_loader;
 pub struct Namespace {
   // TODO: Maybe wiser to store array index of expression in AST instead of the expression itself here
   // Would need to make AST part of the parser struct and add a flag not to push to it when parsing modules
-  // TODO: Keep track of public names
   pub names: IndexMap<String, Expression>,
   // dependency; dependent
   pub dependencies: IndexMap<String, Vec<String>>,
@@ -191,6 +190,8 @@ impl Parser {
               } else if let Expr::Function(Name(name), _, _, _) = exp.expr.clone() {
                 self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
               } else if let Expr::Class(Name(name), _, _) = exp.expr.clone() {
+                self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
+              } else if let Expr::Extern(_, Name(name), _, _, _) = exp.expr.clone() {
                 self.add_import_dependency(Some(name), None, module.to_string(), *exp.clone())?;
               } else if let Expr::Assignment(ty, lit, _) = exp.expr.clone() {
                 if ty.is_none() { continue; }
@@ -513,6 +514,10 @@ impl Parser {
       return self.parse_delete();
 
     } else if init.unwrap().value.as_ref().unwrap() == "type" {
+      // Check for type intrinsic call
+      if self.iter.peek().is_some() && self.iter.peek().unwrap().of_type == TokenTypes::LParen {
+        return self.parse_expression(0);
+      }
       self.iter.next();
       return self.parse_type();
 
@@ -1462,6 +1467,9 @@ impl Parser {
   }
 
   fn parse_args_params(&mut self, parse_type: &str) -> Result<Vec<Expression>, Error> {
+    let was_indexing = self.is_indexing;
+    self.is_indexing = false;
+
     self.consume(&[TokenTypes::LParen], false)?;
     let mut list: Vec<Expression> = vec![];
 
@@ -1655,6 +1663,7 @@ impl Parser {
       }
     }
 
+    self.is_indexing = was_indexing;
     return Ok(list);
   }
 

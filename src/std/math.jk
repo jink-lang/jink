@@ -1,0 +1,33 @@
+// Implement Babylonian method for computing the square root of a number
+// https://en.wikipedia.org/wiki/Methods_of_computing_square_roots#Babylonian_method
+pub fun sqrt(float x) -> float {
+  let guess = x / 2.0;
+  let prev_guess = 0.0;
+  while (guess != prev_guess) {
+    prev_guess = guess;
+    guess = (guess + x / guess) / 2.0;
+  }
+  return guess;
+}
+
+// Return smallest integer greater than or equal to x
+pub fun ceil(float x) -> float {
+  if (x % 1 == 0) {
+    return x;
+  }
+
+  return x + 1 - (x % 1);
+}
+
+// Return largest integer less than or equal to x
+pub fun floor(float x) -> float {
+  return x - (x % 1);
+}
+
+// Return absolute value of x
+pub fun abs(float x) -> float {
+  if (x < 0.0) {
+    return -x;
+  }
+  return x;
+}

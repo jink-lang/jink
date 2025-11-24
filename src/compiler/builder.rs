@@ -35,6 +35,8 @@ struct Scope<'ctx> {
     String,                // Enum type name
     String                 // Enum variants
   >,
+  /// Map import aliases to their original names
+  import_origins: IndexMap<String, String>,
   is_function: bool,
 }
 
@@ -144,6 +146,7 @@ impl<'ctx> CodeGen<'ctx> {
       struct_enum_types: IndexMap::new(),
       struct_map: IndexMap::new(),
       enum_map: IndexMap::new(),
+      import_origins: IndexMap::new(),
       is_function,
     });
   }
@@ -184,6 +187,15 @@ impl<'ctx> CodeGen<'ctx> {
       }
     }
     return Ok(None);
+  }
+
+  pub fn get_import_origin(&self, name: &str) -> Option<String> {
+    for scope in self.symbol_table_stack.iter().rev() {
+      if let Some(origin) = scope.import_origins.get(name) {
+        return Some(origin.clone());
+      }
+    }
+    None
   }
 
   fn get_all_cur_symbols(&self, get_all_scopes: bool) -> IndexMap<String, (Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool)> {
@@ -433,7 +445,7 @@ impl<'ctx> CodeGen<'ctx> {
         self.build_class(expr, name, parents, body)?;
       },
       Expr::ModuleParsed(path, _, opts, ast) => {
-        self.build_module(expr, path, opts, ast, main_fn)?;
+        self.build_module(expr, path, opts, ast, main_fn, block)?;
       },
       Expr::Public(expr) => {
         block = self.process_top(*expr, main_fn, block)?;
@@ -473,127 +485,211 @@ impl<'ctx> CodeGen<'ctx> {
 
   /// Build imported modules
   // TODO: Ensure that modules are properly contained
-  fn build_module(&mut self, _expr: Expression, path: Vec<Name>, _opts: Option<Vec<(Name, Option<Name>)>>, ast: Vec<Expression>, _main_fn: FunctionValue<'ctx>) -> Result<(), Error> {
+  fn build_module(&mut self, _expr: Expression, path: Vec<Name>, opts: Option<Vec<(Name, Option<Name>)>>, ast: Vec<Expression>, _main_fn: FunctionValue<'ctx>, _block: BasicBlock<'ctx>) -> Result<(), Error> {
     let module_name = path.iter().map(|n| n.0.to_string()).collect::<Vec<String>>().join("/");
 
     // Check if module is already built and exported
-    if ast.is_empty() {
-      if let Some(scope) = self.module_exports.get(&module_name) {
-        if let Some(current_scope) = self.symbol_table_stack.last_mut() {
-          for (name, sym) in &scope.symbols {
-            current_scope.symbols.insert(name.clone(), sym.clone());
-          }
-          for (name, strct) in &scope.struct_enum_types {
-            current_scope.struct_enum_types.insert(name.clone(), strct.clone());
-          }
-          for (name, map) in &scope.struct_map {
-            current_scope.struct_map.insert(name.clone(), map.clone());
-          }
-          for (name, map) in &scope.enum_map {
-            current_scope.enum_map.insert(name.clone(), map.clone());
+    if !self.module_exports.contains_key(&module_name) {
+      let module = self.context.create_module(module_name.as_str());
+
+      // Collect public names
+      let mut public_names = Vec::new();
+      for expr in &ast {
+        if let Expr::Public(inner) = &expr.expr {
+          match &inner.expr {
+            Expr::Class(Name(n), _, _) => public_names.push(n.clone()),
+            Expr::Function(Name(n), _, _, _) => public_names.push(n.clone()),
+            Expr::TypeDef(Name(n), _) => public_names.push(n.clone()),
+            Expr::Enum(Name(n), _) => public_names.push(n.clone()),
+            Expr::Assignment(_, ident, _) => {
+              if let Expr::Literal(Literals::Identifier(Name(n))) = &ident.expr {
+                public_names.push(n.clone());
+              }
+            },
+            _ => {}
           }
         }
-        return Ok(());
       }
-    }
 
-    let module = self.context.create_module(module_name.as_str());
+      // Enter the module scope
+      self.enter_scope(false);
 
-    // Collect public names
-    let mut public_names = Vec::new();
-    for expr in &ast {
-      if let Expr::Public(inner) = &expr.expr {
-        match &inner.expr {
-          Expr::Class(Name(n), _, _) => public_names.push(n.clone()),
-          Expr::Function(Name(n), _, _, _) => public_names.push(n.clone()),
-          Expr::TypeDef(Name(n), _) => public_names.push(n.clone()),
-          Expr::Enum(Name(n), _) => public_names.push(n.clone()),
-          Expr::Assignment(_, ident, _) => {
-            if let Expr::Literal(Literals::Identifier(Name(n))) = &ident.expr {
-              public_names.push(n.clone());
+      // Process the AST
+      self.process_ast(ast, _main_fn)?;
+
+      // Capture exported items
+      let mut exported_symbols = Vec::new();
+      let mut exported_import_origins = Vec::new();
+      let mut exported_structs = Vec::new();
+      let mut exported_struct_maps = Vec::new();
+      let mut exported_enum_maps = Vec::new();
+
+      if let Some(scope) = self.symbol_table_stack.last() {
+        for name in &public_names {
+          if let Some(sym) = scope.symbols.get(name) {
+            exported_symbols.push((name.clone(), sym.clone()));
+            if self.functions.contains_key(name) {
+              exported_import_origins.push((name.clone(), name.clone()));
             }
-          },
-          _ => {}
+          } else if let Some(func_ctx) = self.functions.get(name) {
+            let func_ptr = func_ctx.llvm_fun.as_global_value().as_pointer_value();
+            let ptr_type = func_ptr.get_type().as_basic_type_enum();
+            exported_symbols.push((name.clone(), (None, ptr_type, func_ptr.as_basic_value_enum())));
+            exported_import_origins.push((name.clone(), name.clone()));
+          }
+
+          if let Some(strct) = scope.struct_enum_types.get(name) {
+            exported_structs.push((name.clone(), strct.clone()));
+          }
+          if let Some(map) = scope.struct_map.get(name) {
+            exported_struct_maps.push((name.clone(), map.clone()));
+          }
+          if let Some(map) = scope.enum_map.get(name) {
+            exported_enum_maps.push((name.clone(), map.clone()));
+          }
         }
+      }
+
+      self.exit_scope();
+
+      // Save exports to module_exports
+      let mut scope = Scope {
+        symbols: IndexMap::new(),
+        struct_enum_types: IndexMap::new(),
+        struct_map: IndexMap::new(),
+        enum_map: IndexMap::new(),
+        import_origins: IndexMap::new(),
+        is_function: false,
+      };
+      for (name, sym) in exported_symbols {
+        scope.symbols.insert(name, sym);
+      }
+      for (name, origin) in exported_import_origins {
+        scope.import_origins.insert(name, origin);
+      }
+      for (name, strct) in exported_structs {
+        scope.struct_enum_types.insert(name, strct);
+      }
+      for (name, map) in exported_struct_maps {
+        scope.struct_map.insert(name, map);
+      }
+      for (name, map) in exported_enum_maps {
+        scope.enum_map.insert(name, map);
+      }
+      self.module_exports.insert(module_name.clone(), scope);
+
+      if let Err(e) = module.verify() {
+        return Err(Error::new(
+          Error::CompilerError,
+          None,
+          &"",
+          Some(0),
+          Some(0),
+          e.to_string()
+        ));
       }
     }
 
-    // Enter the module scope
-    self.enter_scope(false);
+    // Import from module_exports
+    if let Some(scope) = self.module_exports.get(&module_name) {
+      if let Some(current_scope) = self.symbol_table_stack.last_mut() {
+        if let Some(imports) = opts {
+          // Import specific items with aliases
+          for (name, alias) in imports {
+            let target_name = alias.unwrap_or(name.clone()).0;
+            let source_name = name.0;
 
-    // Process the AST
-    self.process_ast(ast, _main_fn)?;
+            // Check if importing the module itself
+            if source_name == path.last().unwrap().0 {
+              let struct_name = format!("module_{}", module_name.replace("/", "_"));
+              let field_types: Vec<BasicTypeEnum> = scope.symbols.values().map(|s| s.1).collect();
+              let struct_type = self.context.opaque_struct_type(&struct_name);
+              struct_type.set_body(&field_types, false);
+              
+              let struct_ptr = self.builder.build_alloca(struct_type, &struct_name).unwrap();
+              
+              for (i, (_, sym)) in scope.symbols.iter().enumerate() {
+                let field_ptr = self.builder.build_struct_gep(struct_type, struct_ptr, i as u32, "field_ptr").unwrap();
+                self.builder.build_store(field_ptr, sym.2).unwrap();
+              }
+              
+              let struct_val = self.builder.build_load(struct_type, struct_ptr, "module_val").unwrap();
+              
+              current_scope.symbols.insert(target_name.clone(), (Some(struct_ptr), struct_type.as_basic_type_enum(), struct_val));
+              
+              let mut struct_fields = Vec::new();
+              for (n, sym) in scope.symbols.iter() {
+                struct_fields.push((n.clone(), sym.1, None));
+              }
+              current_scope.struct_enum_types.insert(struct_name.clone(), struct_fields);
+              current_scope.struct_map.insert(target_name.clone(), struct_name.clone());
+            } else {
+              if let Some(sym) = scope.symbols.get(&source_name) {
+                current_scope.symbols.insert(target_name.clone(), sym.clone());
+              }
+              if let Some(origin) = scope.import_origins.get(&source_name) {
+                current_scope.import_origins.insert(target_name.clone(), origin.clone());
+              }
+              if let Some(strct) = scope.struct_enum_types.get(&source_name) {
+                current_scope.struct_enum_types.insert(target_name.clone(), strct.clone());
+              }
+              if let Some(map) = scope.struct_map.get(&source_name) {
+                current_scope.struct_map.insert(target_name.clone(), map.clone());
+              }
+              if let Some(map) = scope.enum_map.get(&source_name) {
+                current_scope.enum_map.insert(target_name.clone(), map.clone());
+              }
+            }
+          }
+        } else {
+          let last_path_part = &path.last().unwrap().0;
 
-    // Capture exported items
-    let mut exported_symbols = Vec::new();
-    let mut exported_structs = Vec::new();
-    let mut exported_struct_maps = Vec::new();
-    let mut exported_enum_maps = Vec::new();
+          if last_path_part == "*" {
+            // Import everything
+            for (name, sym) in &scope.symbols {
+              current_scope.symbols.insert(name.clone(), sym.clone());
+            }
+            for (name, origin) in &scope.import_origins {
+              current_scope.import_origins.insert(name.clone(), origin.clone());
+            }
+            for (name, strct) in &scope.struct_enum_types {
+              current_scope.struct_enum_types.insert(name.clone(), strct.clone());
+            }
+            for (name, map) in &scope.struct_map {
+              current_scope.struct_map.insert(name.clone(), map.clone());
+            }
+            for (name, map) in &scope.enum_map {
+              current_scope.enum_map.insert(name.clone(), map.clone());
+            }
+          } else {
+            // Import module object
+            let target_name = last_path_part.clone();
+            let struct_name = format!("module_{}", module_name.replace("/", "_"));
 
-    if let Some(scope) = self.symbol_table_stack.last() {
-      for name in &public_names {
-        if let Some(sym) = scope.symbols.get(name) {
-          exported_symbols.push((name.clone(), sym.clone()));
-        }
-        if let Some(strct) = scope.struct_enum_types.get(name) {
-          exported_structs.push((name.clone(), strct.clone()));
-        }
-        if let Some(map) = scope.struct_map.get(name) {
-          exported_struct_maps.push((name.clone(), map.clone()));
-        }
-        if let Some(map) = scope.enum_map.get(name) {
-          exported_enum_maps.push((name.clone(), map.clone()));
+            let field_types: Vec<BasicTypeEnum> = scope.symbols.values().map(|s| s.1).collect();
+            let struct_type = self.context.opaque_struct_type(&struct_name);
+            struct_type.set_body(&field_types, false);
+
+            let struct_ptr = self.builder.build_alloca(struct_type, &struct_name).unwrap();
+
+            for (i, (_, sym)) in scope.symbols.iter().enumerate() {
+              let field_ptr = self.builder.build_struct_gep(struct_type, struct_ptr, i as u32, "field_ptr").unwrap();
+              self.builder.build_store(field_ptr, sym.2).unwrap();
+            }
+
+            let struct_val = self.builder.build_load(struct_type, struct_ptr, "module_val").unwrap();
+
+            current_scope.symbols.insert(target_name.clone(), (Some(struct_ptr), struct_type.as_basic_type_enum(), struct_val));
+
+            let mut struct_fields = Vec::new();
+            for (n, sym) in scope.symbols.iter() {
+              struct_fields.push((n.clone(), sym.1, None));
+            }
+            current_scope.struct_enum_types.insert(struct_name.clone(), struct_fields);
+            current_scope.struct_map.insert(target_name.clone(), struct_name.clone());
+          }
         }
       }
-    }
-
-    self.exit_scope();
-
-    // Re-add exported items to parent scope
-    for (name, sym) in exported_symbols.iter() {
-      self.set_symbol(name.clone(), sym.0, sym.1, sym.2);
-    }
-    for (name, strct) in exported_structs.iter() {
-      self.set_struct(name.clone(), strct.clone());
-    }
-    for (name, map) in exported_struct_maps.iter() {
-      self.set_struct_mapping(name.clone(), map.clone());
-    }
-    for (name, map) in exported_enum_maps.iter() {
-      self.set_enum_mapping(name.clone(), map.clone());
-    }
-
-    // Save exports to module_exports
-    let mut scope = Scope {
-      symbols: IndexMap::new(),
-      struct_enum_types: IndexMap::new(),
-      struct_map: IndexMap::new(),
-      enum_map: IndexMap::new(),
-      is_function: false,
-    };
-    for (name, sym) in exported_symbols {
-      scope.symbols.insert(name, sym);
-    }
-    for (name, strct) in exported_structs {
-      scope.struct_enum_types.insert(name, strct);
-    }
-    for (name, map) in exported_struct_maps {
-      scope.struct_map.insert(name, map);
-    }
-    for (name, map) in exported_enum_maps {
-      scope.enum_map.insert(name, map);
-    }
-    self.module_exports.insert(module_name, scope);
-
-    if let Err(e) = module.verify() {
-      return Err(Error::new(
-        Error::CompilerError,
-        None,
-        &"",
-        Some(0),
-        Some(0),
-        e.to_string()
-      ));
     }
 
     return Ok(());
@@ -726,7 +822,14 @@ impl<'ctx> CodeGen<'ctx> {
       let full_method_name = format!("{}_{}", struct_name, method_name);
 
       // Find function
-      let llvm_function = self.module.get_function(&full_method_name);
+      let llvm_function = self.module.get_function(&full_method_name)
+        .or_else(|| {
+          if struct_name.starts_with("module_") {
+            self.module.get_function(&method_name)
+          } else {
+            None
+          }
+        });
       if llvm_function.is_none() {
         return Err(Error::new(
           Error::NameError,
@@ -742,13 +845,15 @@ impl<'ctx> CodeGen<'ctx> {
       // Prepare args: self + args
       let mut llvm_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len() + 1);
 
-      // Add self
-      if parent_val.unwrap().is_pointer_value() {
-        llvm_args.push(parent_val.unwrap().into_pointer_value().into());
-      } else {
-        let alloca = self.builder.build_alloca(parent_val.unwrap().get_type(), "self_tmp").unwrap();
-        self.builder.build_store(alloca, parent_val.unwrap()).unwrap();
-        llvm_args.push(alloca.into());
+      // Add self if not a module
+      if !struct_name.starts_with("module_") {
+        if parent_val.unwrap().is_pointer_value() {
+          llvm_args.push(parent_val.unwrap().into_pointer_value().into());
+        } else {
+          let alloca = self.builder.build_alloca(parent_val.unwrap().get_type(), "self_tmp").unwrap();
+          self.builder.build_store(alloca, parent_val.unwrap()).unwrap();
+          llvm_args.push(alloca.into());
+        }
       }
 
       // Add other args
@@ -1457,17 +1562,19 @@ impl<'ctx> CodeGen<'ctx> {
     // Now position the builder at the merge block and create all PHI nodes
     self.builder.position_at_end(merge_block);
 
-    let mut created_phis = vec![];
-    for (name, phi_type, incoming_for_phi) in &phi_nodes_to_create {
-      let phi = self.builder.build_phi(*phi_type, name).unwrap();
-      let incoming_refs: Vec<(&dyn BasicValue<'ctx>, BasicBlock<'ctx>)> = incoming_for_phi.iter().map(|(v, b)| (v as &dyn BasicValue<'ctx>, *b)).collect();
-      phi.add_incoming(&incoming_refs);
-      created_phis.push((name, phi, *phi_type));
+    let mut phis = Vec::new();
+
+    for (name, phi_type, incoming_for_phi) in phi_nodes_to_create {
+      let phi = self.builder.build_phi(phi_type, &name).unwrap();
+      for (val, block) in incoming_for_phi {
+        phi.add_incoming(&[(&val, block)]);
+      }
+      phis.push((name, phi_type, phi));
     }
 
-    for (name, phi, phi_type) in created_phis {
+    for (name, phi_type, phi) in phis {
       // Check if the symbol exists in the symbol table
-      if let Some(symbol) = self.get_symbol(name)? {
+      if let Some(symbol) = self.get_symbol(&name)? {
         // Update the existing variable with the new PHI value
         let (_, inst, _, _, exited_func) = symbol;
         if exited_func {
@@ -1484,9 +1591,9 @@ impl<'ctx> CodeGen<'ctx> {
         self.set_symbol(name.to_string(), inst, phi_type, phi.as_basic_value());
       } else {
         // Create a new variable and store the PHI value
-        let var = self.builder.build_alloca(phi_type, name).unwrap();
+        let var = self.builder.build_alloca(phi_type, &name).unwrap();
         self.builder.build_store(var, phi.as_basic_value()).unwrap();
-        self.set_symbol(name.to_string(), None, phi_type, phi.as_basic_value());
+        self.set_symbol(name.to_string(), Some(var), phi_type, phi.as_basic_value());
       }
     }
 
@@ -2240,7 +2347,7 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Get return type
     let returns: String = ret_type.map_or("void".to_string(), |ty| match ty {
-      Literals::Identifier(name) => name.0,
+      Literals::Identifier(Name(name)) => name,
       _ => panic!("Invalid return type"),
     });
 
@@ -3191,12 +3298,65 @@ impl<'ctx> CodeGen<'ctx> {
           let elem_ptr = unsafe { self.builder.build_gep(self.context.i64_type(), ptr, &[offset], "ptr_gep").unwrap() };
           self.builder.build_store(elem_ptr, val).unwrap();
           return Ok(self.context.i64_type().const_zero().as_basic_value_enum());
+        } else if name.0 == "type" {
+          if args.len() != 1 {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+              expr.first_pos,
+              expr.last_line,
+              format!("type() expects 1 argument, got {}", args.len())
+            ));
+          }
+          let arg = &args[0];
+          let type_name = arg.inferred_type.as_ref().unwrap().to_string();
+          let global_str = self.builder.build_global_string_ptr(&type_name, "type_str").unwrap();
+          return Ok(global_str.as_pointer_value().as_basic_value_enum());
+        } else if name.0 == "int" {
+          if args.len() != 1 {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+              expr.first_pos,
+              expr.last_line,
+              format!("int() expects 1 argument, got {}", args.len())
+            ));
+          }
+          let val = self.visit(&args[0], block)?;
+          if val.is_float_value() {
+            return Ok(self.builder.build_float_to_signed_int(val.into_float_value(), self.context.i64_type(), "fptosi").unwrap().as_basic_value_enum());
+          } else if val.is_int_value() {
+            return Ok(val);
+          }
+        } else if name.0 == "float" {
+          if args.len() != 1 {
+            return Err(Error::new(
+              Error::CompilerError,
+              None,
+              &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+              expr.first_pos,
+              expr.last_line,
+              format!("float() expects 1 argument, got {}", args.len())
+            ));
+          }
+          let val = self.visit(&args[0], block)?;
+          if val.is_int_value() {
+            return Ok(self.builder.build_signed_int_to_float(val.into_int_value(), self.context.f64_type(), "sitofp").unwrap().as_basic_value_enum());
+          } else if val.is_float_value() {
+            return Ok(val);
+          }
         }
 
         let func_name = if self.class_table.contains_key(&name.0) {
           format!("{}_constructor", name.0)
         } else {
-          name.0.clone()
+          if let Some(origin) = self.get_import_origin(&name.0) {
+            origin
+          } else {
+            name.0.clone()
+          }
         };
 
         // Attempt to find function mapping
@@ -3301,7 +3461,7 @@ impl<'ctx> CodeGen<'ctx> {
             None => Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum()),
           }
 
-        // Our mapping was not found, check for built-in functions
+        // Mapping was not found, check for built-in functions
         } else {
 
           let llvm_function = self.module.get_function(&func_name);
@@ -3320,6 +3480,20 @@ impl<'ctx> CodeGen<'ctx> {
           let num_expected = llvm_function.unwrap().get_params().len() as usize;
           let num_provided = args.len();
           let is_llvm_variadic = llvm_function.unwrap().get_type().is_var_arg();
+
+          // Retrieve function context to check for variadic functions
+          let func_ctx = self.functions.get(&name.0);
+          let (variadic, is_external, num_params_fixed) = if let Some(ctx) = func_ctx {
+            let fixed_count = if ctx.variadic {
+              ctx.parameters.len() - 1
+            } else {
+              ctx.parameters.len()
+            };
+            (ctx.variadic, ctx.is_external, fixed_count)
+          } else {
+            (false, true, num_expected)
+          };
+          let num_args_provided = num_provided;
 
           // Adjust for constructor call
           let is_constructor = self.class_table.contains_key(&name.0);
@@ -3351,6 +3525,13 @@ impl<'ctx> CodeGen<'ctx> {
             // Cast i8* from malloc to struct*
             let struct_ptr = self.builder.build_pointer_cast(ptr, self.context.ptr_type(AddressSpace::default()), &format!("{}_inst", name.0)).unwrap();
             llvm_args.push(struct_ptr.into());
+          }
+
+          // Add hidden count for variadic functions
+          if variadic && !is_external {
+            let count = num_args_provided as i64 - num_params_fixed as i64;
+            let var_arg_count = if count > 0 { count } else { 0 };
+            llvm_args.push(self.context.i64_type().const_int(var_arg_count as u64, false).into());
           }
 
           for arg in args.iter() {
@@ -4432,5 +4613,57 @@ mod tests {
       free(p);
     ",
     "42")
+  }
+
+  #[test]
+  fn test_build_type_intrinsic() -> Result<(), Error> {
+    run_test("
+      let a = 1;
+      printf(\"%s\", type(a));
+    ",
+    "int")
+  }
+
+  #[test]
+  fn test_build_import() -> Result<(), Error> {
+    run_test("
+      import std.math;
+      printf(\"%f\", math.abs(-42.0));
+    ",
+    "42.000000")
+  }
+
+  #[test]
+  fn test_build_import_libc() -> Result<(), Error> {
+    run_test("
+      import from jink.ext.libc { puts };
+      let s = \"Hello, World!\";
+      puts(s);
+    ",
+    "Hello, World!\r\n")
+  }
+
+  #[test]
+  fn test_build_string_class() -> Result<(), Error> {
+    run_test("
+      import from std.string { String };
+      let s = String(\"  hello  \");
+      let trimmed = s.trim();
+      trimmed.print();
+    ",
+    "hello\r\n")
+  }
+
+  #[test]
+  fn test_build_array_class() -> Result<(), Error> {
+    run_test("
+      import std.array.*;
+      let a = IntArray();
+      a.push(1);
+      a.push(2);
+      a.push(3);
+      printf(\"%d\", a.get(1));
+    ",
+    "2")
   }
 }

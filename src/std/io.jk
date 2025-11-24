@@ -1,0 +1,47 @@
+import from jink.ext.libc { printf, getchar, malloc, realloc };
+import from std.string { String };
+
+pub fun print(string ...args) -> void {
+  for (let i in args) {
+    if (i > 0) printf(" ");
+    printf("%s", args[i]);
+  }
+  printf("\n");
+};
+
+pub fun input(string x) -> String {
+  print(x);
+
+  int size = 32;
+  int len = 0;
+  string buf = malloc(size);
+
+  int c = getchar();
+
+  // Read until newline or EOF
+  while (c != 10 && c != -1) {
+    if (len >= size - 1) {
+      size = size * 2;
+      buf = realloc(buf, size);
+    }
+
+    // Ignore CR
+    if (c != 13) {
+      buf[len] = c;
+      len = len + 1;
+    }
+
+    c = getchar();
+  }
+
+  buf[len] = 0;
+  return String(buf);
+}
+
+pub fun input_int(string x) -> int {
+  return input(x).to_int();
+}
+
+pub fun input_float(string x) -> float {
+  return input(x).to_float();
+}

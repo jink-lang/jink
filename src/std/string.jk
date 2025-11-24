@@ -1,0 +1,69 @@
+import from jink.ext.libc {
+  printf, strlen, getchar,
+  malloc, realloc, atoi, atof
+};
+
+pub cls String = {
+  string value;
+  int length;
+
+  fun new(string val) -> self {
+    self.value = val;
+    self.length = strlen(val);
+  }
+
+  // Trim leading and trailing whitespace
+  // 32 - space
+  // 9 - tab
+  // 10 - newline
+  // 13 - carriage return
+  pub fun trim() -> String {
+    int start = 0;
+    int end = self.length - 1;
+
+    // Find start
+    while (start < self.length) {
+      int c = self.value[start];
+      if (c != 32 && c != 9 && c != 10 && c != 13) {
+        break;
+      }
+      start = start + 1;
+    }
+
+    // Find end
+    while (end >= start) {
+      int c = self.value[end];
+      if (c != 32 && c != 9 && c != 10 && c != 13) {
+        break;
+      }
+      end = end - 1;
+    }
+
+    int new_len = end - start + 1;
+    string new_str = malloc(new_len + 1);
+
+    // Copy
+    int i = 0;
+    while (i < new_len) {
+      new_str[i] = self.value[start + i];
+      i = i + 1;
+    }
+    new_str[new_len] = 0; // Null terminator
+
+    return String(new_str);
+  }
+
+  // TODO: Support for arrays of specific size, for string split method
+
+  pub fun print() -> void {
+    printf("%s\n", self.value);
+  }
+
+  pub fun to_int() -> int {
+    return atoi(self.value);
+  }
+
+  pub fun to_float() -> float {
+    return atof(self.value);
+  }
+}
