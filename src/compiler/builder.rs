@@ -4184,6 +4184,7 @@ mod tests {
         .arg(&executable_file) // `test1`
         .arg("-no-pie")
         .arg(&llvm_ir_file)    // `test1.ll`
+        .arg("-lm")
         .output()
         .expect(format!("Failed to execute clang for file {}", llvm_ir_file).as_str())
     };
@@ -4257,6 +4258,7 @@ mod tests {
         .arg(&executable_file) // `test1`
         .arg("-no-pie")
         .arg(&llvm_ir_file)    // `test1.ll`
+        .arg("-lm")
         .output()
         .expect(format!("Failed to execute clang for file {}", llvm_ir_file).as_str())
     };
