@@ -99,13 +99,16 @@ impl TypeChecker {
   // Check if a function is a built-in/intrinsic
   fn is_builtin_function(&self, name: &str) -> bool {
     let builtins = [
-      "ptr"
+      "ptr",
+      "__ptr_read_int",
+      "__ptr_write_int",
+      "__ptr_read_string",
+      "__ptr_write_string"
     ];
     builtins.contains(&name)
   }
 
   fn string_to_jtype(&self, type_name: &str) -> Result<JType, String> {
-    // println!("Resolving type: {}", type_name);
     match type_name {
       "int" => Ok(JType::Integer),
       "uint" => Ok(JType::UnsignedInteger),
@@ -113,7 +116,7 @@ impl TypeChecker {
       "string" => Ok(JType::String),
       "bool" => Ok(JType::Boolean),
       "void" => Ok(JType::Void),
-      "ptr" => Ok(JType::UnsignedInteger),
+      "ptr" => Ok(JType::Pointer),
       "int32" => Ok(JType::Integer),
       _ => {
         if self.types.contains(type_name) {
@@ -146,6 +149,10 @@ impl TypeChecker {
     match (expected, actual) {
       (JType::String, JType::UnsignedInteger) => true,
       (JType::UnsignedInteger, JType::String) => true,
+      (JType::Pointer, JType::String) => true,
+      (JType::String, JType::Pointer) => true,
+      (JType::Pointer, JType::Integer) => true,
+      (JType::Integer, JType::Pointer) => true,
       (JType::TypeName(name), JType::Object(obj_fields)) => {
         if let Some(JType::StructDef(struct_fields)) = self.type_definitions.get(name) {
           // Check if all struct fields are present in object and have compatible types
@@ -298,7 +305,7 @@ impl TypeChecker {
                 }
                 Ok(JType::Null)
               }
-              JType::UnsignedInteger | JType::Integer => {
+              JType::UnsignedInteger | JType::Integer | JType::Pointer => {
                 if rhs_type != JType::Integer && rhs_type != JType::UnsignedInteger {
                   return Err(format!("Type mismatch for pointer assignment. Expected integer, got {}.", rhs_type));
                 }
@@ -1169,6 +1176,11 @@ impl TypeChecker {
             return Err(format!("String index must be an integer, got {}.", idx_type));
           }
           Ok(JType::Integer)
+        } else if arr_type == JType::Pointer {
+          if idx_type != JType::Integer {
+            return Err(format!("Pointer index must be an integer, got {}.", idx_type));
+          }
+          Ok(JType::Integer) // Assuming pointer indexing returns byte/int
         } else {
           Err(format!("Cannot index into non-array type {}.", arr_type))
         }

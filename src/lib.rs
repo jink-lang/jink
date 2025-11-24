@@ -177,6 +177,7 @@ pub enum JType {
   FloatingPoint,
   String,
   Boolean,
+  Pointer,
   Object(HashMap<String, JType>),
   Array(Box<JType>),
   /// type; default value; is spread
@@ -204,6 +205,7 @@ impl std::fmt::Display for JType {
       JType::FloatingPoint => write!(f, "float"),
       JType::String => write!(f, "string"),
       JType::Boolean => write!(f, "bool"),
+      JType::Pointer => write!(f, "ptr"),
       JType::Object(_) => write!(f, "object"), // TODO: Improve display
       JType::Array(t) => write!(f, "array<{}>", t),
       JType::FunctionParam(t, default, is_spread) => {

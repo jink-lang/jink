@@ -604,6 +604,21 @@ impl Parser {
       if self.is_indexing { break; };
 
       let operator = self.iter.next().unwrap();
+
+      // Handle dot access
+      if operator.value.as_ref().unwrap() == "." {
+        self.is_indexing = true;
+        let precedence = self.get_precedence(operator.clone()) + 1;
+        let right = self.parse_expression(precedence)?;
+        self.is_indexing = false;
+
+        left = self.get_expr(Expr::Index(
+          Box::new(left),
+          Box::new(right.clone())
+        ), Some(init.line), init.start_pos, right.last_line);
+        continue;
+      }
+
       if ["++", "--"].contains(&&operator.value.as_ref().unwrap().as_str()) {
         return Ok(self.get_expr(Expr::UnaryOperator(
           Operator(String::from(operator.value.as_ref().unwrap().to_owned() + ":post")),
@@ -734,14 +749,6 @@ impl Parser {
           Some(ident.line), ident.start_pos, Some(ident.line)
         ));
 
-      // Index
-      } else if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "." {
-        // Add top-most identifier being indexed as a dependency
-        if !self.is_indexing {
-          self.add_dependency(ident.value.as_ref().unwrap().to_owned())?;
-        }
-        return self.parse_index(ident);
-
       // Array index
       } else if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type == TokenTypes::LBracket {
         // Add top-most identifier being indexed as a dependency
@@ -764,6 +771,9 @@ impl Parser {
 
       // Literal
       } else {
+        if !self.is_indexing {
+          self.add_dependency(ident.value.as_ref().unwrap().to_owned())?;
+        }
         return Ok(self.get_expr(Expr::Literal(
           Literals::Identifier(Name(String::from(ident.value.unwrap())))
         ), Some(ident.line), ident.start_pos, Some(ident.line)));
@@ -838,6 +848,7 @@ impl Parser {
       "<" | ">" | "<=" | ">=" => 6,
       "+" | "-" => 7,
       "*" | "/" | "//" | "%" => 8,
+      "." => 9,
       _ => 0
     }
   }
@@ -1346,33 +1357,6 @@ impl Parser {
         format!("Expected keyword \"{}\", got end of file.", keyword),
       ))
     }
-  }
-
-  /// Parse index chain (recursive)
-  fn parse_index(&mut self, identifier: Token) -> Result<Expression, Error> {
-    self.iter.next(); // Consume `.`
-
-    let was_indexing = self.is_indexing;
-    self.is_indexing = true;
-    let index = self.parse_expression(0)?;
-    self.is_indexing = was_indexing;
-
-    // If indexing `self`, return self initial expression instead of identifier
-    if identifier.value.as_ref().unwrap() == "self" {
-      return Ok(self.get_expr(Expr::Index(
-        Box::new(self.get_expr(Expr::SelfRef, Some(identifier.line), identifier.start_pos, Some(identifier.line))),
-        Box::new(index.clone())),
-        Some(identifier.line), identifier.start_pos, index.last_line
-      ));
-    }
-
-    return Ok(self.get_expr(Expr::Index(
-      Box::new(self.get_expr(Expr::Literal(
-        Literals::Identifier(Name(String::from(identifier.value.unwrap())))
-      ), Some(identifier.line), identifier.start_pos, Some(identifier.line))),
-      Box::new(index.clone())),
-      Some(identifier.line), identifier.start_pos, index.last_line
-    ));
   }
 
   fn parse_array_index(&mut self, identifier: Token) -> Result<Expression, Error> {
@@ -1944,12 +1928,6 @@ impl Parser {
         init.as_ref().unwrap().end_pos,
         "Cannot use `self` outside of class body".to_string()
       ));
-    }
-
-    if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Operator
-      && self.iter.current.as_ref().unwrap().value.as_ref().unwrap() == "." {
-      let index = self.parse_index(init.unwrap())?;
-      return Ok(index);
     }
 
     return Ok(self.get_expr(Expr::SelfRef,

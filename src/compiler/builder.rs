@@ -16,6 +16,7 @@ use jink::{Error, Expr, Expression, JType, Literals, Name, Operator, Type};
 
 use super::parser::Namespace;
 
+#[derive(Clone)]
 struct Scope<'ctx> {
   symbols: IndexMap<String, (Option<PointerValue<'ctx>>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>)>,
   /// Table of struct and enum types
@@ -65,6 +66,8 @@ pub struct CodeGen<'ctx> {
   functions: IndexMap<String, FunctionCtx<'ctx>>,
   /// Stack of symbol tables
   symbol_table_stack: Vec<Scope<'ctx>>,
+  /// Cache of exported symbols per module path
+  module_exports: IndexMap<String, Scope<'ctx>>,
   /// Table of class types, similar to struct table but with references to parents and methods
   class_table: IndexMap<String, (       // name
     Option<Vec<String>>,                // parents
@@ -95,6 +98,7 @@ impl<'ctx> CodeGen<'ctx> {
       builder: context.create_builder(),
       functions: IndexMap::new(),
       symbol_table_stack: Vec::new(),
+      module_exports: IndexMap::new(),
       class_table: IndexMap::new(),
       current_class: None,
       _type_tags: Self::map_types(),
@@ -302,6 +306,7 @@ impl<'ctx> CodeGen<'ctx> {
       JType::FloatingPoint => Ok(self.context.f64_type().as_basic_type_enum()),
       JType::String => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
       JType::Boolean => Ok(self.context.bool_type().as_basic_type_enum()),
+      JType::Pointer => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
       JType::Object(_) => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
       JType::Array(_) => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
       JType::Null => Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
@@ -470,6 +475,28 @@ impl<'ctx> CodeGen<'ctx> {
   // TODO: Ensure that modules are properly contained
   fn build_module(&mut self, _expr: Expression, path: Vec<Name>, _opts: Option<Vec<(Name, Option<Name>)>>, ast: Vec<Expression>, _main_fn: FunctionValue<'ctx>) -> Result<(), Error> {
     let module_name = path.iter().map(|n| n.0.to_string()).collect::<Vec<String>>().join("/");
+
+    // Check if module is already built and exported
+    if ast.is_empty() {
+      if let Some(scope) = self.module_exports.get(&module_name) {
+        if let Some(current_scope) = self.symbol_table_stack.last_mut() {
+          for (name, sym) in &scope.symbols {
+            current_scope.symbols.insert(name.clone(), sym.clone());
+          }
+          for (name, strct) in &scope.struct_enum_types {
+            current_scope.struct_enum_types.insert(name.clone(), strct.clone());
+          }
+          for (name, map) in &scope.struct_map {
+            current_scope.struct_map.insert(name.clone(), map.clone());
+          }
+          for (name, map) in &scope.enum_map {
+            current_scope.enum_map.insert(name.clone(), map.clone());
+          }
+        }
+        return Ok(());
+      }
+    }
+
     let module = self.context.create_module(module_name.as_str());
 
     // Collect public names
@@ -523,18 +550,40 @@ impl<'ctx> CodeGen<'ctx> {
     self.exit_scope();
 
     // Re-add exported items to parent scope
+    for (name, sym) in exported_symbols.iter() {
+      self.set_symbol(name.clone(), sym.0, sym.1, sym.2);
+    }
+    for (name, strct) in exported_structs.iter() {
+      self.set_struct(name.clone(), strct.clone());
+    }
+    for (name, map) in exported_struct_maps.iter() {
+      self.set_struct_mapping(name.clone(), map.clone());
+    }
+    for (name, map) in exported_enum_maps.iter() {
+      self.set_enum_mapping(name.clone(), map.clone());
+    }
+
+    // Save exports to module_exports
+    let mut scope = Scope {
+      symbols: IndexMap::new(),
+      struct_enum_types: IndexMap::new(),
+      struct_map: IndexMap::new(),
+      enum_map: IndexMap::new(),
+      is_function: false,
+    };
     for (name, sym) in exported_symbols {
-      self.set_symbol(name, sym.0, sym.1, sym.2);
+      scope.symbols.insert(name, sym);
     }
     for (name, strct) in exported_structs {
-      self.set_struct(name, strct);
+      scope.struct_enum_types.insert(name, strct);
     }
     for (name, map) in exported_struct_maps {
-      self.set_struct_mapping(name, map);
+      scope.struct_map.insert(name, map);
     }
     for (name, map) in exported_enum_maps {
-      self.set_enum_mapping(name, map);
+      scope.enum_map.insert(name, map);
     }
+    self.module_exports.insert(module_name, scope);
 
     if let Err(e) = module.verify() {
       return Err(Error::new(
@@ -588,9 +637,15 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Get struct information by type
     let struct_type_name = if getting_inner_parent && !passing_type_name {
-      self.get_struct_mapping(&parent_name)
+      self.get_struct_mapping(&parent_name).cloned().or_else(|| {
+        if let Some(JType::TypeName(name)) = &parent.inferred_type {
+          Some(name.clone())
+        } else {
+          None
+        }
+      })
     } else {
-      Some(&parent_name)
+      Some(parent_name.clone())
     };
     if struct_type_name.is_none() {
       return Err(Error::new(
@@ -606,7 +661,7 @@ impl<'ctx> CodeGen<'ctx> {
     // Get value of child
     // Used at final index as well as passing indexes back through recursively
     if let Expr::Literal(Literals::Identifier(Name(name))) = child.expr {
-      let struct_ref = self.get_struct(struct_type_name.unwrap());
+      let struct_ref = self.get_struct(struct_type_name.as_ref().unwrap());
       if struct_ref.is_none() {
         return Err(Error::new(
           Error::CompilerError,
@@ -617,7 +672,7 @@ impl<'ctx> CodeGen<'ctx> {
           format!("Unknown type: {}", struct_type_name.unwrap())
         ));
       }
-      let struct_type = self.context.get_struct_type(struct_type_name.unwrap()).unwrap();
+      let struct_type = self.context.get_struct_type(struct_type_name.as_ref().unwrap()).unwrap();
 
       // Try to find the index field on the struct
       for (i, (field_name, _, struct_type_if_any)) in struct_ref.unwrap().iter().enumerate() {
@@ -1318,6 +1373,8 @@ impl<'ctx> CodeGen<'ctx> {
         then_type
       } else if then_type.is_float_type() && else_type.is_float_type() {
         then_type
+      } else if then_type.is_pointer_type() && else_type.is_pointer_type() {
+        then_type
       } else {
         // Handle cases where only one branch modifies the value or they are of different types
         if then_type.is_float_type() && !else_type.is_float_type() {
@@ -1571,8 +1628,20 @@ impl<'ctx> CodeGen<'ctx> {
     };
 
     let set = match &value {
-      // Case: No rhs / value, set to null
-      None => self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum(),
+      // Case: No rhs / value, set to default value based on type if any
+      None => {
+        if let Some(Type(t)) = &ty {
+          match t.as_str() {
+            "int" => self.context.i64_type().const_int(0, false).as_basic_value_enum(),
+            "int32" => self.context.i32_type().const_int(0, false).as_basic_value_enum(),
+            "float" => self.context.f64_type().const_float(0.0).as_basic_value_enum(),
+            "bool" => self.context.bool_type().const_int(0, false).as_basic_value_enum(),
+            _ => self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum(),
+          }
+        } else {
+          self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum()
+        }
+      },
       Some(v) => match &v.expr {
         // Case: Object rhs
         Expr::Literal(Literals::Object(obj)) => {
@@ -1588,7 +1657,7 @@ impl<'ctx> CodeGen<'ctx> {
           self.set_symbol(name, Some(ptr), typ.as_basic_type_enum(), val);
           return Ok(());
         },
-        _ => self.visit(&value.unwrap(), block)?,
+        _ => self.visit(v, block)?,
       }
     };
 
@@ -1640,7 +1709,14 @@ impl<'ctx> CodeGen<'ctx> {
 
           self.builder.build_store(ptr, val_to_store).unwrap();
           // Set the symbol
-          self.set_symbol(name, Some(ptr), val_to_store.get_type(), val_to_store);
+          self.set_symbol(name.clone(), Some(ptr), val_to_store.get_type(), val_to_store);
+
+          // If inferred type is a struct/class, set the mapping
+          if let Some(val_expr) = &value {
+            if let Some(JType::TypeName(type_name)) = &val_expr.inferred_type {
+              self.set_struct_mapping(name, type_name.clone());
+            }
+          }
         },
         // Custom type (we know exists from builder)
         _ => {
@@ -1660,7 +1736,7 @@ impl<'ctx> CodeGen<'ctx> {
           None,
           &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
           expr.first_pos,
-          Some(name.len() as i32),
+          Some(expr.first_pos.unwrap() + name.len() as i32),
           format!("Variable {} not found", name)
         ));
       }
@@ -1866,7 +1942,7 @@ impl<'ctx> CodeGen<'ctx> {
           self.context.i64_type().fn_type(&parameters, variadic)
         // Check for struct
         } else if self.get_struct_mapping(&returns).is_some() {
-          self.context.get_struct_type(&returns).unwrap().fn_type(&parameters, variadic)
+          self.context.ptr_type(AddressSpace::default()).fn_type(&parameters, variadic)
         } else {
           return Err(Error::new(
             Error::NameError,
@@ -2373,7 +2449,7 @@ impl<'ctx> CodeGen<'ctx> {
           "int" => self.context.i64_type().as_basic_type_enum(),
           "float" => self.context.f64_type().as_basic_type_enum(),
           "bool" => self.context.bool_type().as_basic_type_enum(),
-          "string" => self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(),
+          "string" | "ptr" => self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(),
           _ => {
 
             // Check for enum definition
@@ -2382,18 +2458,21 @@ impl<'ctx> CodeGen<'ctx> {
               self.context.i64_type().as_basic_type_enum()
             // Check for struct definition
             } else {
-              let struct_ref = self.get_struct_mapping(&typ.as_ref().unwrap().0);
-              if struct_ref.is_none() {
+              let type_name = typ.as_ref().unwrap().0.clone();
+              let struct_ref = self.get_struct_mapping(&type_name);
+              let is_struct = self.get_struct(&type_name).is_some();
+
+              if struct_ref.is_none() && !is_struct {
                 return Err(Error::new(
                   Error::NameError,
                   None,
                   &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
                   expr.first_pos,
-                  Some(expr.first_pos.unwrap() + typ.as_ref().unwrap().0.len() as i32),
-                  format!("Type '{}' not found", typ.as_ref().unwrap().0)
+                  Some(expr.first_pos.unwrap() + type_name.len() as i32),
+                  format!("Type '{}' not found", type_name)
                 ));
               } else {
-                if let Some(_) = self.context.get_struct_type(&typ.as_ref().unwrap().0) {
+                if let Some(_) = self.context.get_struct_type(&type_name) {
                   self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()
                 } else {
                   return Err(Error::new(
@@ -2402,7 +2481,7 @@ impl<'ctx> CodeGen<'ctx> {
                     &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
                     expr.first_pos,
                     expr.first_pos,
-                    format!("Unknown type '{}'", typ.as_ref().unwrap().0)
+                    format!("Unknown type '{}'", type_name)
                   ));
                 }
               }
@@ -2521,8 +2600,14 @@ impl<'ctx> CodeGen<'ctx> {
     // Map self to class name
     self.set_struct_mapping("self".to_string(), name.clone());
 
+    // Apply defaults first
+    for (field_name, default_val) in defaults.iter() {
+      let idx = types_as_fields.iter().position(|(n, _)| n == field_name).unwrap();
+      let field_ptr = self.builder.build_struct_gep(class_struct, class_ptr, idx as u32, &format!("{}_field{}", field_name, idx)).unwrap();
+      self.builder.build_store(field_ptr, *default_val).unwrap();
+    }
+
     // Build the constructor body
-    let mut initialized_values: Vec<(String, BasicValueEnum<'ctx>)> = vec![];
     // We know constructor exists
     for ex in method_bodies.get("new").unwrap().to_owned().unwrap().into_iter() {
       if let Expr::Assignment(_, lhs, val) = ex.expr.clone() {
@@ -2547,7 +2632,9 @@ impl<'ctx> CodeGen<'ctx> {
                 ));
               }
 
-              initialized_values.push((field_name, set));
+              let idx = types_as_fields.iter().position(|(n, _)| n == &field_name).unwrap();
+              let field_ptr = self.builder.build_struct_gep(class_struct, class_ptr, idx as u32, &format!("{}_field{}", field_name, idx)).unwrap();
+              self.builder.build_store(field_ptr, set).unwrap();
               continue;
             }
           }
@@ -2557,19 +2644,6 @@ impl<'ctx> CodeGen<'ctx> {
         continue;
       } else {
         self.visit(&ex, constructor_entry_block)?;
-      }
-    }
-
-    // Set the initialized values
-    for (i, (n, _)) in types_as_fields.iter().enumerate() {
-      if initialized_values.iter().filter(|(name, _)| name == n).count() > 0 {
-        let field_ptr = self.builder.build_struct_gep(class_struct, class_ptr, i as u32, &format!("{}_field{}", name, i)).unwrap();
-        let field_val = initialized_values.iter().filter(|(name, _)| name == n).nth(0).unwrap().1;
-        self.builder.build_store(field_ptr, field_val).unwrap();
-      } else if defaults.iter().filter(|(name, _)| name == n).count() > 0 {
-        let field_ptr = self.builder.build_struct_gep(class_struct, class_ptr, i as u32, &format!("{}_field{}", name, i)).unwrap();
-        let field_val = defaults.iter().filter(|(name, _)| name == n).nth(0).unwrap().1;
-        self.builder.build_store(field_ptr, field_val).unwrap();
       }
     }
 
@@ -3102,6 +3176,21 @@ impl<'ctx> CodeGen<'ctx> {
               ));
             }
           }
+        } else if name.0 == "__ptr_read_int" {
+          let ptr = self.visit(&args[0], block)?.into_pointer_value();
+          let offset = self.visit(&args[1], block)?.into_int_value();
+
+          let elem_ptr = unsafe { self.builder.build_gep(self.context.i64_type(), ptr, &[offset], "ptr_gep").unwrap() };
+          let val = self.builder.build_load(self.context.i64_type(), elem_ptr, "ptr_load").unwrap();
+          return Ok(val);
+        } else if name.0 == "__ptr_write_int" {
+          let ptr = self.visit(&args[0], block)?.into_pointer_value();
+          let offset = self.visit(&args[1], block)?.into_int_value();
+          let val = self.visit(&args[2], block)?.into_int_value();
+
+          let elem_ptr = unsafe { self.builder.build_gep(self.context.i64_type(), ptr, &[offset], "ptr_gep").unwrap() };
+          self.builder.build_store(elem_ptr, val).unwrap();
+          return Ok(self.context.i64_type().const_zero().as_basic_value_enum());
         }
 
         let func_name = if self.class_table.contains_key(&name.0) {
@@ -4298,6 +4387,28 @@ mod tests {
   }
 
   #[test]
+  fn test_build_class_defaults() -> Result<(), Error> {
+    run_test("
+      cls TestDefaults = {
+        int a = 10;
+        int b;
+
+        fun new(int val) -> self {
+          self.b = val;
+        }
+
+        fun print() -> void {
+          printf(\"%d %d\", self.a, self.b);
+        }
+      }
+
+      TestDefaults obj = TestDefaults(20);
+      obj.print();
+    ",
+    "10 20")
+  }
+
+  #[test]
   fn test_build_scanf_input() -> Result<(), Error> {
     run_test_with_input("
       int y;
@@ -4305,6 +4416,21 @@ mod tests {
       printf(\"%d\", y);
     ",
     "42",
+    "42")
+  }
+
+  #[test]
+  fn test_build_ptr_intrinsics() -> Result<(), Error> {
+    run_test("
+      extern(\"C\") malloc(int size) -> ptr;
+      extern(\"C\") free(ptr p) -> void;
+      
+      ptr p = malloc(8);
+      __ptr_write_int(p, 0, 42);
+      int val = __ptr_read_int(p, 0);
+      printf(\"%d\", val);
+      free(p);
+    ",
     "42")
   }
 }
