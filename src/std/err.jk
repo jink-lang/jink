@@ -1,0 +1,9 @@
+import from jink.ext.libc { printf, exit };
+
+pub fun abort(string ...err) {
+  for (let i in err) {
+    printf(err[i]);
+  }
+  printf("\n");
+  exit(1);
+}

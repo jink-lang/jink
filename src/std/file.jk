@@ -1,0 +1,61 @@
+import from jink.ext.libc {
+  fopen, fread, fwrite, fclose, fseek, ftell,
+  malloc, memset
+};
+import from std.err { abort };
+
+pub cls File = {
+  string filename;
+  string mode;
+  ptr file_ptr;
+
+  fun new(string filename, string mode) -> File {
+    self.filename = filename;
+    self.mode = mode;
+  }
+
+  pub fun open() -> File {
+    let f = fopen(self.filename, self.mode);
+    if (!f) {
+      abort("Failed to open file: ", self.filename);
+    }
+
+    self.file_ptr = f;
+    return self;
+  }
+
+  pub fun read() -> string {
+    fseek(self.file_ptr, 0, 2); // SEEK_END
+    int size = ftell(self.file_ptr);
+    fseek(self.file_ptr, 0, 0); // SEEK_SET
+
+    let buffer = malloc(size + 1);
+    memset(buffer, 0, size + 1);
+    fread(buffer, 1, size, self.file_ptr);
+
+    return buffer;
+  }
+
+  pub fun read_part(int size, int count) -> ptr {
+    let buffer = malloc(size * count + 1);
+    memset(buffer, 0, size * count + 1);
+    let read_count = fread(buffer, size, count, self.file_ptr);
+    if (read_count < count) {
+      abort("Failed to read from file");
+    }
+
+    return buffer;
+  }
+
+  pub fun write(ptr buffer, int size, int count) -> int {
+    let written_count = fwrite(buffer, size, count, self.file_ptr);
+    if (written_count < count) {
+      abort("Failed to write to file");
+    }
+    return written_count;
+  }
+
+  pub fun close() -> void {
+    fclose(self.file_ptr);
+  }
+}
