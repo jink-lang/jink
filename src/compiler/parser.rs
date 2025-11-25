@@ -885,7 +885,9 @@ impl Parser {
           }
 
           if let Expr::Literal(Literals::Identifier(Name(name))) = name_expr.expr {
-            self.add_name(name.to_string(), expression.clone())?;
+            if !self.is_parsing_class_body {
+              self.add_name(name.to_string(), expression.clone())?;
+            }
             return Ok(self.get_expr(Expr::Public(Box::new(expression)),
               Some(token.line), token.start_pos, token.end_pos
             ));
@@ -1014,7 +1016,9 @@ impl Parser {
 
     // If type (let a = 5), definition
     if typ.is_some() {
-      self.add_name(identifier.value.as_ref().unwrap().to_owned(), assignment.clone())?;
+      if !self.is_parsing_class_body {
+        self.add_name(identifier.value.as_ref().unwrap().to_owned(), assignment.clone())?;
+      }
 
     // If no type (a = 5), reassigment
     } else {

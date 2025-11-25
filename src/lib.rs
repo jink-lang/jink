@@ -184,8 +184,8 @@ pub enum JType {
   FunctionParam(Box<JType>, Option<Box<JType>>, bool),
   /// parameters; return type
   Function(Vec<JType>, Box<JType>),
-  /// fields
-  StructDef(HashMap<String, JType>),
+  /// fields (name -> (type, is_public))
+  StructDef(HashMap<String, (JType, bool)>),
   /// members
   Enum(Vec<String>),
   /// Absence of a value or type, e.g., for statements
@@ -230,11 +230,12 @@ impl std::fmt::Display for JType {
       },
       JType::StructDef(fields) => {
         write!(f, "struct(")?;
-        for (i, (name, field_type)) in fields.iter().enumerate() {
+        for (i, (name, (field_type, is_pub))) in fields.iter().enumerate() {
           if i > 0 {
             write!(f, ", ")?;
           }
-          write!(f, "{}: {}", name, field_type)?;
+          let vis = if *is_pub { "pub " } else { "" };
+          write!(f, "{}{}: {}", vis, name, field_type)?;
         }
         write!(f, ")")
       },

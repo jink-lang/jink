@@ -23,6 +23,7 @@ pub struct TypeChecker {
   // The expected return type of the current function
   current_return_type: Option<JType>,
   in_loop: bool,
+  current_class: Option<String>,
 }
 
 impl TypeChecker {
@@ -36,6 +37,7 @@ impl TypeChecker {
       in_function: false,
       current_return_type: None,
       in_loop: false,
+      current_class: None,
       source: String::new(),
     }
   }
@@ -161,7 +163,7 @@ impl TypeChecker {
       (JType::TypeName(name), JType::Object(obj_fields)) => {
         if let Some(JType::StructDef(struct_fields)) = self.type_definitions.get(name) {
           // Check if all struct fields are present in object and have compatible types
-          for (field_name, field_type) in struct_fields {
+          for (field_name, (field_type, _)) in struct_fields {
             if let Some(obj_field_type) = obj_fields.get(field_name) {
               if !self.check_type_compatibility(field_type, obj_field_type) {
                 return false;
@@ -329,7 +331,12 @@ impl TypeChecker {
               JType::TypeName(type_name) => {
                 if let Some(JType::StructDef(fields)) = self.type_definitions.get(&type_name) {
                   if let Expr::Literal(Literals::Identifier(Name(field_name))) = &idx_expr.expr {
-                    if let Some(field_type) = fields.get(field_name) {
+                    if let Some((field_type, is_public)) = fields.get(field_name) {
+                      if !is_public {
+                        if self.current_class.as_ref() != Some(&type_name) {
+                          return Err(format!("Property '{}' is private in type '{}'.", field_name, type_name));
+                        }
+                      }
                       if !self.check_type_compatibility(field_type, &rhs_type) {
                         return Err(format!("Type mismatch for field '{}'. Expected {}, got {}.", field_name, field_type, rhs_type));
                       }
@@ -726,8 +733,8 @@ impl TypeChecker {
                 if let Some(param_items) = params {
                   for param in param_items.iter() {
                     if let Expr::FunctionParam(Some(Type(ptype)), _, _, _, is_spread) = &param.expr {
-                       let param_type = self.string_to_jtype(ptype)?;
-                       constructor_params.push(JType::FunctionParam(Box::new(param_type), None, *is_spread));
+                      let param_type = self.string_to_jtype(ptype)?;
+                      constructor_params.push(JType::FunctionParam(Box::new(param_type), None, *is_spread));
                     }
                   }
                 }
@@ -741,15 +748,17 @@ impl TypeChecker {
         if let Some(body_exprs) = body {
           for expr in body_exprs.iter() {
             let mut field_expr = &expr.expr;
+            let mut is_public = false;
             if let Expr::Public(inner) = &expr.expr {
               field_expr = &inner.expr;
+              is_public = true;
             }
 
             if let Expr::Assignment(Some(Type(type_name)), ident_expr, _) = field_expr {
-               if let Expr::Literal(Literals::Identifier(Name(field_name))) = &ident_expr.expr {
-                 let field_type = self.string_to_jtype(type_name)?;
-                 fields.insert(field_name.clone(), field_type);
-               }
+              if let Expr::Literal(Literals::Identifier(Name(field_name))) = &ident_expr.expr {
+                let field_type = self.string_to_jtype(type_name)?;
+                fields.insert(field_name.clone(), (field_type, is_public));
+              }
             }
           }
         }
@@ -797,11 +806,13 @@ impl TypeChecker {
         // Check body
         if let Some(body_exprs) = body {
           self.enter_scope();
+          self.current_class = Some(name.clone());
           self.add_variable("self", JType::TypeName(name.clone()), false)?;
 
           for expr in body_exprs.iter_mut() {
             self.check_expression(expr)?;
           }
+          self.current_class = None;
           self.exit_scope();
         }
 
@@ -975,7 +986,8 @@ impl TypeChecker {
           Literals::Object(inner) => {
             let props = self.check_object(inner, true)?;
             self.types.insert(name.0.clone());
-            self.type_definitions.insert(name.0.clone(), JType::StructDef(props.clone()));
+            let struct_fields: HashMap<String, (JType, bool)> = props.iter().map(|(k, v)| (k.clone(), (v.clone(), true))).collect();
+            self.type_definitions.insert(name.0.clone(), JType::StructDef(struct_fields));
             self.add_variable(&name.0, JType::Object(props), false)?;
           },
           _ => {
@@ -1038,7 +1050,12 @@ impl TypeChecker {
                 },
                 JType::TypeName(type_name) => {
                   if let Some(JType::StructDef(fields)) = self.type_definitions.get(&type_name) {
-                    if let Some(field_type) = fields.get(member_name) {
+                    if let Some((field_type, is_public)) = fields.get(member_name) {
+                      if !is_public {
+                        if self.current_class.as_ref() != Some(&type_name) {
+                          return Err(format!("Property '{}' is private in type '{}'.", member_name, type_name));
+                        }
+                      }
                       cur_lhs_type = field_type.clone();
                       cur_chain_node.inferred_type = Some(cur_lhs_type.clone());
                     } else {
@@ -1083,7 +1100,12 @@ impl TypeChecker {
                 },
                 JType::TypeName(type_name) => {
                   if let Some(JType::StructDef(fields)) = self.type_definitions.get(&type_name) {
-                    if let Some(field_type) = fields.get(member_name_to_access) {
+                    if let Some((field_type, is_public)) = fields.get(member_name_to_access) {
+                      if !is_public {
+                        if self.current_class.as_ref() != Some(&type_name) {
+                          return Err(format!("Property '{}' is private in type '{}'.", member_name_to_access, type_name));
+                        }
+                      }
                       cur_lhs_type = field_type.clone();
                       next_rhs.inferred_type = Some(cur_lhs_type.clone());
                       cur_chain_node = next_rhs;
@@ -1142,7 +1164,7 @@ impl TypeChecker {
                 JType::Object(fields) => fields.get(member_name).cloned(),
                 JType::TypeName(type_name) => {
                   if let Some(JType::StructDef(fields)) = self.type_definitions.get(&type_name) {
-                    fields.get(member_name).cloned()
+                    fields.get(member_name).map(|(t, _)| t).cloned()
                   } else {
                     None
                   }

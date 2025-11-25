@@ -1272,7 +1272,7 @@ impl<'ctx> CodeGen<'ctx> {
           "int" => return Ok((self.context.i64_type().as_basic_type_enum(), None)),
           "float" => return Ok((self.context.f64_type().as_basic_type_enum(), None)),
           "bool" => return Ok((self.context.bool_type().as_basic_type_enum(), None)),
-          "string" => return Ok((self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(), None)),
+          "string" | "ptr" => return Ok((self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(), None)),
           _ => {
             // Check for enum
             if let Some(enum_type) = self.get_enum_mapping(&name) {
@@ -2498,10 +2498,10 @@ impl<'ctx> CodeGen<'ctx> {
       return Err(Error::new(
         Error::CompilerError,
         None,
-        &self.code.lines().nth((exp.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+        &self.code.lines().nth((exp.first_line.unwrap_or(1) - 1) as usize).unwrap_or("").to_string(),
         exp.first_pos,
         // + 4 for `cls `
-        Some(exp.first_pos.unwrap() + 4 + name.len() as i32),
+        Some(exp.first_pos.unwrap_or(0) + 4 + name.len() as i32),
         format!("Class '{}' is missing constructor", name)
       ));
     }
@@ -2520,7 +2520,13 @@ impl<'ctx> CodeGen<'ctx> {
 
     // Set up the class fields
     let mut struct_fields: Vec<(String, BasicTypeEnum<'ctx>, Option<String>)> = vec![];
-    for expr in body.unwrap().into_iter() {
+    for expr_orig in body.unwrap().into_iter() {
+      let expr = if let Expr::Public(inner) = expr_orig.expr.clone() {
+        *inner
+      } else {
+        expr_orig.clone()
+      };
+
       if let Expr::Assignment(typ, idx_or_ident, opt_var) = expr.expr.clone() {
         if let Expr::Index(parent, child) = expr.expr.clone() {
           if let Expr::Index(_, _) = child.expr {
@@ -4614,6 +4620,67 @@ mod tests {
       obj.print();
     ",
     "10 20")
+  }
+
+  #[test]
+  fn test_build_class_public_field() -> Result<(), Error> {
+    run_test("
+      cls TestPublic = {
+        pub int public = 42;
+
+        fun new() -> self {}
+
+        fun print_public() -> void {
+          printf(\"%d\", self.public);
+        }
+      }
+
+      TestPublic obj = TestPublic();
+      obj.print_public();
+      printf(\"%d\", obj.public);
+    ",
+    "4242")
+  }
+
+  #[test]
+  fn test_build_class_private_access_pass() -> Result<(), Error> {
+    run_test("
+      cls TestPrivate = {
+        int private = 42;
+
+        fun new() -> self {}
+
+        fun print_private() -> void {
+          printf(\"%d\", self.private);
+        }
+      }
+
+      TestPrivate obj = TestPrivate();
+      obj.print_private();
+    ",
+    "42")
+  }
+
+  #[test]
+  fn test_build_class_private_access_fail() -> Result<(), Error> {
+    let result = run_test("
+      cls TestPrivate = {
+        int private = 42;
+
+        fun new() -> self {}
+
+        fun print_private() -> void {
+          printf(\"%d\", self.private);
+        }
+      }
+
+      TestPrivate obj = TestPrivate();
+      printf(\"%d\", obj.private);
+    ",
+    "42");
+
+    assert!(result.is_err());
+    Ok(())
   }
 
   #[test]
