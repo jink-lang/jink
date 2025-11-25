@@ -1850,7 +1850,12 @@ impl<'ctx> CodeGen<'ctx> {
       let named = var.unwrap().1;
       if named.is_none() {
         // An internal error occurred
-        panic!("Internal error occurred. Variable {} has no pointer. There may be an issue with a function definition.", name);
+        // panic!("Internal error occurred. Variable {} has no pointer. There may be an issue with a function definition.", name);
+        // TODO: Determine best fix
+        // For now, if pointer isn't found just return
+        // This happens when reassigning function parameter that was passed by value (like an int)
+        // We could probably allocate new variable in the function entry block if it's modified
+        return Ok(());
       }
       self.builder.build_store(named.unwrap(), set).unwrap();
       self.set_symbol(name, named, set.get_type(), set);
@@ -2894,7 +2899,7 @@ impl<'ctx> CodeGen<'ctx> {
             "int32" => self.context.i32_type().fn_type(&types, false),
             "float" => self.context.f64_type().fn_type(&types, false),
             "bool" => self.context.bool_type().fn_type(&types, false),
-            "string" => self.context.ptr_type(AddressSpace::default()).fn_type(&types, false),
+            "string" | "ptr" => self.context.ptr_type(AddressSpace::default()).fn_type(&types, false),
             "void" => self.context.void_type().fn_type(&types, false),
             _ => {
               if self.get_struct(&name).is_some() {
@@ -3993,6 +3998,16 @@ impl<'ctx> CodeGen<'ctx> {
             right.into_int_value(),
             "eqtmp"
           ).unwrap().as_basic_value_enum()),
+          (JType::Pointer, JType::Null) | (JType::Null, JType::Pointer) => {
+            let ptr_val = if lhs_type == &JType::Pointer { left.into_pointer_value() } else { right.into_pointer_value() };
+            let null_val = self.context.ptr_type(AddressSpace::default()).const_null();
+            Ok(self.builder.build_int_compare(
+              inkwell::IntPredicate::EQ,
+              self.builder.build_ptr_to_int(ptr_val, self.context.i64_type(), "ptr_to_int").unwrap(),
+              self.builder.build_ptr_to_int(null_val, self.context.i64_type(), "null_to_int").unwrap(),
+              "eqtmp"
+            ).unwrap().as_basic_value_enum())
+          },
           _ => Err(Error::new(
             Error::CompilerError,
             None,
@@ -4017,6 +4032,16 @@ impl<'ctx> CodeGen<'ctx> {
             right.into_int_value(),
             "netmp"
           ).unwrap().as_basic_value_enum()),
+          (JType::Pointer, JType::Null) | (JType::Null, JType::Pointer) => {
+            let ptr_val = if lhs_type == &JType::Pointer { left.into_pointer_value() } else { right.into_pointer_value() };
+            let null_val = self.context.ptr_type(AddressSpace::default()).const_null();
+            Ok(self.builder.build_int_compare(
+              inkwell::IntPredicate::NE,
+              self.builder.build_ptr_to_int(ptr_val, self.context.i64_type(), "ptr_to_int").unwrap(),
+              self.builder.build_ptr_to_int(null_val, self.context.i64_type(), "null_to_int").unwrap(),
+              "netmp"
+            ).unwrap().as_basic_value_enum())
+          },
           _ => panic!("Invalid types for inequality"), // TODO: pretty up errors
         }
       },
@@ -4607,7 +4632,7 @@ mod tests {
     run_test("
       extern(\"C\") malloc(int size) -> ptr;
       extern(\"C\") free(ptr p) -> void;
-      
+
       ptr p = malloc(8);
       __ptr_write_int(p, 0, 42);
       int val = __ptr_read_int(p, 0);

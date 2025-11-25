@@ -377,8 +377,11 @@ impl TypeChecker {
               right_type == JType::Integer || right_type == JType::FloatingPoint
             );
 
+            let is_pointer_null_check = (left_type == JType::Pointer && right_type == JType::Null) ||
+                                              (left_type == JType::Null && right_type == JType::Pointer);
+
             // Basic comparison for primitives for now
-            if are_both_sides_numeric || (
+            if are_both_sides_numeric || is_pointer_null_check || (
               self.check_type_compatibility(&left_type, &right_type) &&
               // No placeholder types
               left_type != JType::Object(HashMap::new()) &&
@@ -423,6 +426,8 @@ impl TypeChecker {
               Ok(JType::Boolean)
             } else if operand_type == JType::String {
               Ok(JType::Boolean)
+            } else if operand_type == JType::Pointer {
+              Ok(JType::Boolean)
             } else {
               Err(format!("Operator '!' requires a boolean operand, got {}.", operand_type))
             }
@@ -439,8 +444,18 @@ impl TypeChecker {
       }
 
       Expr::Call(Name(func_name), args_expr) => {
-        // TODO: Remove builtin definitions from the compiler..
         if self.is_builtin_function(func_name) {
+          if func_name == "ptr" {
+            if args_expr.len() != 1 {
+              return Err(format!("ptr() expects 1 argument, got {}.", args_expr.len()));
+            }
+            let arg_type = self.check_expression(&mut args_expr[0])?;
+            if arg_type == JType::String || arg_type == JType::Pointer {
+              println!("Warning: Calling ptr() on a {} type. This returns a pointer to the variable (double pointer), which is likely not what you want.", arg_type);
+            }
+            return Ok(JType::Pointer);
+          }
+
           for arg in args_expr.iter_mut() {
             self.check_expression(arg)?;
           }
