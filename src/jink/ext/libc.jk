@@ -2,21 +2,22 @@ pub extern("C") printf(string fmt, ...) -> int32;
 pub extern("C") puts(string fmt) -> int32;
 pub extern("C") scanf(string fmt, ...) -> int32;
 pub extern("C") strlen(string p) -> int;
+pub extern("C") getchar() -> int;
+pub extern("C") atoi(string s) -> int;
+pub extern("C") atof(string s) -> float;
 
 pub extern("C") exit(int code);
 
 pub extern("C") malloc(int size) -> ptr;
 pub extern("C") free(ptr p) -> void;
-
-pub extern("C") fopen(ptr filename, ptr mode) -> ptr;
-pub extern("C") fwrite(ptr p, int size, int count, ptr stream) -> int;
-pub extern("C") fread(ptr p, int size, int count, ptr stream) -> int;
-pub extern("C") fclose(ptr stream) -> int;
-pub extern("C") fputs(ptr p, ptr stream) -> int32;
-
-pub extern("C") atoi(string s) -> int;
-pub extern("C") atof(string s) -> float;
-
-pub extern("C") getchar() -> int;
 pub extern("C") realloc(ptr p, int size) -> ptr;
 pub extern("C") memcpy(ptr dest, ptr src, int n) -> ptr;
+pub extern("C") memset(ptr dest, int c, int n) -> ptr;
+
+pub extern("C") fopen(ptr filename, ptr mode) -> ptr;
+pub extern("C") fread(ptr p, int size, int count, ptr stream) -> int;
+pub extern("C") fwrite(ptr p, int size, int count, ptr stream) -> int;
+pub extern("C") fclose(ptr stream) -> int;
+pub extern("C") fseek(ptr stream, int offset, int whence) -> int;
+pub extern("C") ftell(ptr stream) -> int;
+pub extern("C") fputs(ptr p, ptr stream) -> int32;
