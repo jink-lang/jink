@@ -3297,7 +3297,6 @@ impl<'ctx> CodeGen<'ctx> {
         } else if name.0 == "__ptr_read_int" {
           let ptr = self.visit(&args[0], block)?.into_pointer_value();
           let offset = self.visit(&args[1], block)?.into_int_value();
-
           let elem_ptr = unsafe { self.builder.build_gep(self.context.i64_type(), ptr, &[offset], "ptr_gep").unwrap() };
           let val = self.builder.build_load(self.context.i64_type(), elem_ptr, "ptr_load").unwrap();
           return Ok(val);
@@ -3305,9 +3304,38 @@ impl<'ctx> CodeGen<'ctx> {
           let ptr = self.visit(&args[0], block)?.into_pointer_value();
           let offset = self.visit(&args[1], block)?.into_int_value();
           let val = self.visit(&args[2], block)?.into_int_value();
-
           let elem_ptr = unsafe { self.builder.build_gep(self.context.i64_type(), ptr, &[offset], "ptr_gep").unwrap() };
           self.builder.build_store(elem_ptr, val).unwrap();
+          return Ok(self.context.i64_type().const_zero().as_basic_value_enum());
+        } else if name.0 == "__ptr_read_byte" {
+          let ptr = self.visit(&args[0], block)?.into_pointer_value();
+          let offset = self.visit(&args[1], block)?.into_int_value();
+          let elem_ptr = unsafe { self.builder.build_gep(self.context.i8_type(), ptr, &[offset], "byte_gep").unwrap() };
+          let byte = self.builder.build_load(self.context.i8_type(), elem_ptr, "byte_load").unwrap().into_int_value();
+          let val = self.builder.build_int_z_extend(byte, self.context.i64_type(), "byte_zext").unwrap();
+          return Ok(val.as_basic_value_enum());
+        } else if name.0 == "__ptr_write_byte" {
+          let ptr = self.visit(&args[0], block)?.into_pointer_value();
+          let offset = self.visit(&args[1], block)?.into_int_value();
+          let val = self.visit(&args[2], block)?.into_int_value();
+          let byte = self.builder.build_int_truncate(val, self.context.i8_type(), "byte_trunc").unwrap();
+          let elem_ptr = unsafe { self.builder.build_gep(self.context.i8_type(), ptr, &[offset], "byte_gep").unwrap() };
+          self.builder.build_store(elem_ptr, byte).unwrap();
+          return Ok(self.context.i64_type().const_zero().as_basic_value_enum());
+        } else if name.0 == "__ptr_read_f32" {
+          let ptr = self.visit(&args[0], block)?.into_pointer_value();
+          let offset = self.visit(&args[1], block)?.into_int_value();
+          let elem_ptr = unsafe { self.builder.build_gep(self.context.f32_type(), ptr, &[offset], "f32_gep").unwrap() };
+          let f = self.builder.build_load(self.context.f32_type(), elem_ptr, "f32_load").unwrap().into_float_value();
+          let val = self.builder.build_float_ext(f, self.context.f64_type(), "f32_ext").unwrap();
+          return Ok(val.as_basic_value_enum());
+        } else if name.0 == "__ptr_write_f32" {
+          let ptr = self.visit(&args[0], block)?.into_pointer_value();
+          let offset = self.visit(&args[1], block)?.into_int_value();
+          let val = self.visit(&args[2], block)?.into_float_value();
+          let f = self.builder.build_float_trunc(val, self.context.f32_type(), "f32_trunc").unwrap();
+          let elem_ptr = unsafe { self.builder.build_gep(self.context.f32_type(), ptr, &[offset], "f32_gep").unwrap() };
+          self.builder.build_store(elem_ptr, f).unwrap();
           return Ok(self.context.i64_type().const_zero().as_basic_value_enum());
         } else if name.0 == "type" {
           if args.len() != 1 {

@@ -106,6 +106,10 @@ impl TypeChecker {
       "ptr",
       "__ptr_read_int",
       "__ptr_write_int",
+      "__ptr_read_byte",
+      "__ptr_write_byte",
+      "__ptr_read_f32",
+      "__ptr_write_f32",
       "__ptr_read_string",
       "__ptr_write_string",
       "type",
@@ -160,6 +164,8 @@ impl TypeChecker {
       (JType::String, JType::Pointer) => true,
       (JType::Pointer, JType::Integer) => true,
       (JType::Integer, JType::Pointer) => true,
+      (JType::FloatingPoint, JType::Integer) => true,
+      (JType::FloatingPoint, JType::UnsignedInteger) => true,
       (JType::TypeName(name), JType::Object(obj_fields)) => {
         if let Some(JType::StructDef(struct_fields)) = self.type_definitions.get(name) {
           // Check if all struct fields are present in object and have compatible types
@@ -466,6 +472,10 @@ impl TypeChecker {
           for arg in args_expr.iter_mut() {
             self.check_expression(arg)?;
           }
+          // Conversion builtins have concrete result types
+          // TODO: Likely prudent to eventually represent built-ins with own type signatures for more accurate checking and error messages
+          if func_name == "int" { return Ok(JType::Integer); }
+          if func_name == "float" { return Ok(JType::FloatingPoint); }
           return Ok(JType::Unknown);
         }
 

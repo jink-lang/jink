@@ -1,0 +1,73 @@
+import from std.mem.raw { alloc, grow, get_byte, set_byte, get_f32, set_f32 };
+
+// TODO: Generics to avoid duplication of buffers
+
+pub cls ByteBuf = {
+  pub ptr data;
+  pub int len;
+  pub int cap;
+
+  fun new() -> self {
+    self.cap = 16;
+    self.len = 0;
+    self.data = alloc(self.cap);
+  }
+
+  fun ensure(int n) -> void {
+    if (n > self.cap) {
+      while (self.cap < n) { self.cap = self.cap * 2; }
+      self.data = grow(self.data, self.cap);
+    }
+  }
+
+  pub fun push(int v) -> void {
+    self.ensure(self.len + 1);
+    set_byte(self.data, self.len, v);
+    self.len = self.len + 1;
+  }
+  // Append every byte of a NUL-terminated string
+  pub fun push_str(string s) -> void {
+    int i = 0;
+    int c = __ptr_read_byte(s, 0);
+    while (c != 0) {
+      self.push(c);
+      i = i + 1;
+      c = __ptr_read_byte(s, i);
+    }
+  }
+  pub fun get(int i) -> int { return get_byte(self.data, i); }
+  pub fun set(int i, int v) -> void { set_byte(self.data, i, v); }
+  pub fun size() -> int { return self.len; }
+  pub fun clear() -> void { self.len = 0; }
+  pub fun raw() -> ptr { return self.data; }
+}
+
+pub cls F32Buf = {
+  pub ptr data;
+  pub int len;
+  pub int cap;
+
+  fun new() -> self {
+    self.cap = 16;
+    self.len = 0;
+    self.data = alloc(self.cap * 4);
+  }
+
+  fun ensure(int n) -> void {
+    if (n > self.cap) {
+      while (self.cap < n) { self.cap = self.cap * 2; }
+      self.data = grow(self.data, self.cap * 4);
+    }
+  }
+
+  pub fun push(float v) -> void {
+    self.ensure(self.len + 1);
+    set_f32(self.data, self.len, v);
+    self.len = self.len + 1;
+  }
+  pub fun get(int i) -> float { return get_f32(self.data, i); }
+  pub fun set(int i, float v) -> void { set_f32(self.data, i, v); }
+  pub fun size() -> int { return self.len; }
+  pub fun clear() -> void { self.len = 0; }
+  pub fun raw() -> ptr { return self.data; }
+}

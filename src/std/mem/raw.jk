@@ -1,0 +1,16 @@
+import from jink.ext.libc { malloc, realloc, free, memcpy, memset };
+
+pub fun alloc(int bytes) -> ptr { return malloc(bytes); }
+pub fun grow(ptr p, int bytes) -> ptr { return realloc(p, bytes); }
+pub fun release(ptr p) -> void { free(p); }
+pub fun copy(ptr dest, ptr src, int n) -> void { memcpy(dest, src, n); }
+pub fun zero(ptr p, int n) -> void { memset(p, 0, n); }
+
+pub fun get_i64(ptr p, int i) -> int { return __ptr_read_int(p, i); }
+pub fun set_i64(ptr p, int i, int v) -> void { __ptr_write_int(p, i, v); }
+
+pub fun get_f32(ptr p, int i) -> float { return __ptr_read_f32(p, i); }
+pub fun set_f32(ptr p, int i, float v) -> void { __ptr_write_f32(p, i, v); }
+
+pub fun get_byte(ptr p, int i) -> int { return __ptr_read_byte(p, i); }
+pub fun set_byte(ptr p, int i, int v) -> void { __ptr_write_byte(p, i, v); }
