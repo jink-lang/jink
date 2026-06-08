@@ -252,6 +252,24 @@ impl Lexer {
           self.pos += 1;
           self.line_pos = 1;
 
+        // Carriage return
+        } else if escaped.unwrap() == &'r' {
+          string.push('\r');
+          self.pos += 1;
+          self.line_pos += 1;
+
+        // Tab
+        } else if escaped.unwrap() == &'t' {
+          string.push('\t');
+          self.pos += 1;
+          self.line_pos += 1;
+
+        // Null byte
+        } else if escaped.unwrap() == &'0' {
+          string.push('\0');
+          self.pos += 1;
+          self.line_pos += 1;
+
         // Escaped newline
         } else if ['\r', '\n'].contains(escaped.unwrap()) {
           self.pos += 1;
@@ -294,6 +312,20 @@ impl Lexer {
   fn parse_number(&mut self, iter: &mut Peekable<Iter<char>>, init: &char) {
     let mut number = String::from(*init);
     let start = self.line_pos;
+
+    // Hexadecimal literal: 0x...
+    if *init == '0' && iter.peek().is_some() && (iter.peek().unwrap() == &&'x' || iter.peek().unwrap() == &&'X') {
+      number.push(*iter.next().unwrap()); // consume the 'x'
+      self.pos += 1;
+      self.line_pos += 1;
+      while iter.peek().is_some() && iter.peek().unwrap().is_ascii_hexdigit() {
+        number.push(*iter.next().unwrap());
+        self.pos += 1;
+        self.line_pos += 1;
+      }
+      self.add_token(TokenTypes::Number, Some(number.clone()), self.line, Some(self.line_pos - number.len() as i32), Some(self.line_pos));
+      return;
+    }
 
     // While we are still working with the number
     while iter.peek().is_some() && (iter.peek().unwrap().is_numeric() || iter.peek().unwrap() == &&'.') {

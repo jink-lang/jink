@@ -139,6 +139,7 @@ fn main() {
       .arg("-o")
       .arg("output.exe")
       .arg("output.ll")
+      .arg("-lws2_32") // Winsock (sockets) - not in the default-linked CRT
       .output()
       .expect("Failed to compile LLVM IR");
     #[cfg(not(target_os = "windows"))]

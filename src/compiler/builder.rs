@@ -1425,8 +1425,10 @@ impl<'ctx> CodeGen<'ctx> {
     let then_vals = self.get_all_cur_symbols(false);
     self.exit_scope();
     // Merge back if the block wasn't already terminated
+    // Position at then_out explicitly - inner statement-building may have left the builder elsewhere
     let then_branches_to_merge = then_out.get_terminator().is_none();
     if then_branches_to_merge {
+      self.builder.position_at_end(then_out);
       self.builder.build_unconditional_branch(merge_block).unwrap();
     }
 
@@ -1438,6 +1440,7 @@ impl<'ctx> CodeGen<'ctx> {
     // Merge back if the block wasn't already terminated
     let else_branches_to_merge = else_out.get_terminator().is_none();
     if else_branches_to_merge {
+      self.builder.position_at_end(else_out);
       self.builder.build_unconditional_branch(merge_block).unwrap();
     }
 
@@ -1628,10 +1631,14 @@ impl<'ctx> CodeGen<'ctx> {
             }
           },
           Expr::Assignment(_, _, _) => {
-            self.build_assignment(expr.clone(), block, false)?;
+            // Use current_block, not the original block - a preceding loop may
+            // have advanced the active block (e.g. while-loop's loop_end)
+            self.builder.position_at_end(current_block);
+            self.build_assignment(expr.clone(), current_block, false)?;
           },
           Expr::Return(ret) => {
-            let val = self.visit(&ret, block)?;
+            self.builder.position_at_end(current_block);
+            let val = self.visit(&ret, current_block)?;
             if val != self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum() {
               self.builder.build_return(Some(&val)).unwrap();
             // Null != void
@@ -3019,6 +3026,38 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     if let Expr::Literal(Literals::Identifier(Name(n))) = parent.expr {
+      // Struct/class field access on a named variable (variable.field)
+      // Mirrors self-ref path above; the code further down only handles
+      // `[]` array indexing (and would treat the field name as an index var)
+      // Gated on `.` access (Expr::Index) so arr[i] is unaffected
+      if matches!(expr.expr, Expr::Index(_, _)) {
+        if let Expr::Literal(Literals::Identifier(Name(field_name))) = index.expr.clone() {
+          if let Some(class_name) = self.get_struct_mapping(&n).cloned() {
+            let struct_fields = self.get_struct(&class_name).unwrap();
+            let mut field_hit: Option<(u32, BasicTypeEnum<'ctx>)> = None;
+            for (i, (fname, ftyp, _)) in struct_fields.iter().enumerate() {
+              if fname == &field_name {
+                field_hit = Some((i as u32, *ftyp));
+                break;
+              }
+            }
+            if let Some((fidx, ftyp)) = field_hit {
+              let sym = self.get_symbol(&n)?.unwrap();
+              // sym.1 is an alloca holding the instance ptr (let/const);
+              // if absent (value-only local), sym.3 is the instance ptr
+              let instance_ptr = if let Some(p) = sym.1 {
+                self.builder.build_load(self.context.ptr_type(AddressSpace::default()), p, "load_inst").unwrap().into_pointer_value()
+              } else {
+                sym.3.into_pointer_value()
+              };
+              let field_ptr = self.builder.build_struct_gep(self.context.get_struct_type(&class_name).unwrap(), instance_ptr, fidx, "field_ptr").unwrap();
+              let val = self.builder.build_load(ftyp, field_ptr, "field_val").unwrap();
+              return Ok((field_ptr, val));
+            }
+          }
+        }
+      }
+
       let symbol = self.get_symbol(&n)?;
       if symbol.is_none() {
         return Err(Error::new(
@@ -3336,6 +3375,23 @@ impl<'ctx> CodeGen<'ctx> {
           let f = self.builder.build_float_trunc(val, self.context.f32_type(), "f32_trunc").unwrap();
           let elem_ptr = unsafe { self.builder.build_gep(self.context.f32_type(), ptr, &[offset], "f32_gep").unwrap() };
           self.builder.build_store(elem_ptr, f).unwrap();
+          return Ok(self.context.i64_type().const_zero().as_basic_value_enum());
+        } else if name.0 == "__ptr_read_ptr" {
+          // Pointer-sized value at elem index `offset` (* 8 bytes) & return typed as a pointer
+          // Needed to pull pointer fields out of C structs (e.g. addrinfo.ai_addr) & use them as ptr arguments
+          let ptr = self.visit(&args[0], block)?.into_pointer_value();
+          let offset = self.visit(&args[1], block)?.into_int_value();
+          let ptr_ty = self.context.ptr_type(AddressSpace::default());
+          let elem_ptr = unsafe { self.builder.build_gep(ptr_ty, ptr, &[offset], "ptr_gep").unwrap() };
+          let val = self.builder.build_load(ptr_ty, elem_ptr, "ptr_load").unwrap();
+          return Ok(val);
+        } else if name.0 == "__ptr_write_ptr" {
+          let ptr = self.visit(&args[0], block)?.into_pointer_value();
+          let offset = self.visit(&args[1], block)?.into_int_value();
+          let val = self.visit(&args[2], block)?.into_pointer_value();
+          let ptr_ty = self.context.ptr_type(AddressSpace::default());
+          let elem_ptr = unsafe { self.builder.build_gep(ptr_ty, ptr, &[offset], "ptr_gep").unwrap() };
+          self.builder.build_store(elem_ptr, val).unwrap();
           return Ok(self.context.i64_type().const_zero().as_basic_value_enum());
         } else if name.0 == "type" {
           if args.len() != 1 {
@@ -3716,7 +3772,7 @@ impl<'ctx> CodeGen<'ctx> {
       return Err(Error::new(
         Error::CompilerError,
         None,
-        &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap().to_string(),
+        &self.code.lines().nth((expr.first_line.unwrap() - 1) as usize).unwrap_or("").to_string(),
         expr.first_pos,
         Some(expr.first_pos.unwrap() + name.len() as i32),
         format!("Unknown identifier: {}", name)
@@ -3974,9 +4030,11 @@ impl<'ctx> CodeGen<'ctx> {
           _ => panic!("Invalid types for modulus"),
         }
       },
-      "^" => {
-        todo!();
-      },
+      "^" => Ok(self.builder.build_xor(
+        left.into_int_value(),
+        right.into_int_value(),
+        "xortmp"
+      ).unwrap().as_basic_value_enum()),
       "<<" => Ok(self.builder.build_left_shift(
         left.into_int_value(),
         right.into_int_value(),
@@ -4223,6 +4281,7 @@ mod tests {
         .arg("-o")
         .arg(&executable_file) // `test1.exe`
         .arg(&llvm_ir_file)    // `test1.ll`
+        .arg("-lws2_32")       // Winsock (sockets)
         .output()
         .expect(format!("Failed to execute clang for file {}", llvm_ir_file).as_str())
     } else {
@@ -4297,6 +4356,7 @@ mod tests {
         .arg(&executable_file) // `test1.exe`
         .arg(&llvm_ir_file)    // `test1.ll`
         .arg("-llegacy_stdio_definitions")
+        .arg("-lws2_32")       // Winsock (sockets)
         .output()
         .expect(format!("Failed to execute clang for file {}", llvm_ir_file).as_str())
     } else {

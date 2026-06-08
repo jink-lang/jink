@@ -1,0 +1,138 @@
+// SHA-256 (FIPS 180-4)
+//
+// Works on 32-bit lanes held in i64: every arithmetic result is masked with
+// MASK32 (0xFFFFFFFF) to emulate mod-2^32 wrap-around
+//
+// NOTE: assumes message length < 2^32 bytes (only the low 32 bits of the bit
+// length are written into the padding) - fine for manifests, headers, tokens
+
+import from std.array { IntArray };
+import from std.mem.raw { alloc, zero, release };
+import from jink.ext.libc { printf };
+
+// 32-bit right rotate
+fun rotr(int x, int n) -> int {
+  return ((x >> n) | (x << (32 - n))) & 0xFFFFFFFF;
+}
+
+// SHA-256 round constants (first 32 bits of the fractional parts of the cube
+// roots of the first 64 primes)
+fun sha256_k() -> IntArray {
+  IntArray k = IntArray();
+  k.push(0x428a2f98); k.push(0x71374491); k.push(0xb5c0fbcf); k.push(0xe9b5dba5);
+  k.push(0x3956c25b); k.push(0x59f111f1); k.push(0x923f82a4); k.push(0xab1c5ed5);
+  k.push(0xd807aa98); k.push(0x12835b01); k.push(0x243185be); k.push(0x550c7dc3);
+  k.push(0x72be5d74); k.push(0x80deb1fe); k.push(0x9bdc06a7); k.push(0xc19bf174);
+  k.push(0xe49b69c1); k.push(0xefbe4786); k.push(0x0fc19dc6); k.push(0x240ca1cc);
+  k.push(0x2de92c6f); k.push(0x4a7484aa); k.push(0x5cb0a9dc); k.push(0x76f988da);
+  k.push(0x983e5152); k.push(0xa831c66d); k.push(0xb00327c8); k.push(0xbf597fc7);
+  k.push(0xc6e00bf3); k.push(0xd5a79147); k.push(0x06ca6351); k.push(0x14292967);
+  k.push(0x27b70a85); k.push(0x2e1b2138); k.push(0x4d2c6dfc); k.push(0x53380d13);
+  k.push(0x650a7354); k.push(0x766a0abb); k.push(0x81c2c92e); k.push(0x92722c85);
+  k.push(0xa2bfe8a1); k.push(0xa81a664b); k.push(0xc24b8b70); k.push(0xc76c51a3);
+  k.push(0xd192e819); k.push(0xd6990624); k.push(0xf40e3585); k.push(0x106aa070);
+  k.push(0x19a4c116); k.push(0x1e376c08); k.push(0x2748774c); k.push(0x34b0bcb5);
+  k.push(0x391c0cb3); k.push(0x4ed8aa4a); k.push(0x5b9cca4f); k.push(0x682e6ff3);
+  k.push(0x748f82ee); k.push(0x78a5636f); k.push(0x84c87814); k.push(0x8cc70208);
+  k.push(0x90befffa); k.push(0xa4506ceb); k.push(0xbef9a3f7); k.push(0xc67178f2);
+  return k;
+}
+
+// Hash `len` bytes at `msg` - returns an IntArray of 8 u32 words (the digest)
+pub fun sha256(ptr msg, int len) -> IntArray {
+  IntArray k = sha256_k();
+
+  IntArray h = IntArray();
+  h.push(0x6a09e667); h.push(0xbb67ae85); h.push(0x3c6ef372); h.push(0xa54ff53a);
+  h.push(0x510e527f); h.push(0x9b05688c); h.push(0x1f83d9ab); h.push(0x5be0cd19);
+
+  // Pad to a multiple of 64 bytes: 0x80, zeros, then 8-byte big-endian bit length
+  int bitlen = len * 8;
+  int newlen = len + 1;
+  while ((newlen % 64) != 56) { newlen = newlen + 1; }
+  int total = newlen + 8;
+
+  ptr buf = alloc(total);
+  zero(buf, total);
+  int i = 0;
+  while (i < len) {
+    __ptr_write_byte(buf, i, __ptr_read_byte(msg, i));
+    i = i + 1;
+  }
+  __ptr_write_byte(buf, len, 0x80);
+  // Low 32 bits of the bit length, big-endian, in the last 4 bytes
+  __ptr_write_byte(buf, total - 1, bitlen & 0xFF);
+  __ptr_write_byte(buf, total - 2, (bitlen >> 8) & 0xFF);
+  __ptr_write_byte(buf, total - 3, (bitlen >> 16) & 0xFF);
+  __ptr_write_byte(buf, total - 4, (bitlen >> 24) & 0xFF);
+
+  int block = 0;
+  while (block < total) {
+    // Message schedule
+    IntArray w = IntArray();
+    int t = 0;
+    while (t < 16) {
+      int j = block + t * 4;
+      int b0 = __ptr_read_byte(buf, j);
+      int b1 = __ptr_read_byte(buf, j + 1);
+      int b2 = __ptr_read_byte(buf, j + 2);
+      int b3 = __ptr_read_byte(buf, j + 3);
+      w.push(((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 0xFFFFFFFF);
+      t = t + 1;
+    }
+    while (t < 64) {
+      int w15 = w.get(t - 15);
+      int w2 = w.get(t - 2);
+      int s0 = rotr(w15, 7) ^ rotr(w15, 18) ^ (w15 >> 3);
+      int s1 = rotr(w2, 17) ^ rotr(w2, 19) ^ (w2 >> 10);
+      w.push((w.get(t - 16) + s0 + w.get(t - 7) + s1) & 0xFFFFFFFF);
+      t = t + 1;
+    }
+
+    int a = h.get(0); int b = h.get(1); int c = h.get(2); int d = h.get(3);
+    int e = h.get(4); int f = h.get(5); int g = h.get(6); int hh = h.get(7);
+
+    int r = 0;
+    while (r < 64) {
+      int big_s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      int ch = (e & f) ^ ((e ^ 0xFFFFFFFF) & g);
+      int temp1 = (hh + big_s1 + ch + k.get(r) + w.get(r)) & 0xFFFFFFFF;
+      int big_s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      int maj = (a & b) ^ (a & c) ^ (b & c);
+      int temp2 = (big_s0 + maj) & 0xFFFFFFFF;
+      hh = g;
+      g = f;
+      f = e;
+      e = (d + temp1) & 0xFFFFFFFF;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) & 0xFFFFFFFF;
+      r = r + 1;
+    }
+
+    h.set(0, (h.get(0) + a) & 0xFFFFFFFF);
+    h.set(1, (h.get(1) + b) & 0xFFFFFFFF);
+    h.set(2, (h.get(2) + c) & 0xFFFFFFFF);
+    h.set(3, (h.get(3) + d) & 0xFFFFFFFF);
+    h.set(4, (h.get(4) + e) & 0xFFFFFFFF);
+    h.set(5, (h.get(5) + f) & 0xFFFFFFFF);
+    h.set(6, (h.get(6) + g) & 0xFFFFFFFF);
+    h.set(7, (h.get(7) + hh) & 0xFFFFFFFF);
+
+    block = block + 64;
+  }
+
+  release(buf);
+  return h;
+}
+
+// Print a digest (8 u32 words) as lowercase hex
+pub fun sha256_print(IntArray h) -> void {
+  int i = 0;
+  while (i < 8) {
+    printf("%08x", h.get(i));
+    i = i + 1;
+  }
+  printf("\n");
+}

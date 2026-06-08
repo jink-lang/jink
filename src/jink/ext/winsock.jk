@@ -1,0 +1,17 @@
+// Winsock2 (ws2_32) bindings for raw TCP sockets on Windows
+
+// WSAStartup(MAKEWORD(2,2) = 0x0202 = 514, &WSADATA) - must run before any socket call
+pub extern("C") WSAStartup(int version, ptr data) -> int32;
+pub extern("C") WSACleanup() -> int32;
+
+// socket(af, type, protocol) -> SOCKET. AF_INET=2, SOCK_STREAM=1, IPPROTO_TCP=6
+pub extern("C") socket(int af, int sock_type, int protocol) -> int;
+pub extern("C") connect(int s, ptr name, int namelen) -> int32;
+pub extern("C") send(int s, ptr buf, int len, int flags) -> int32;
+pub extern("C") recv(int s, ptr buf, int len, int flags) -> int32;
+pub extern("C") shutdown(int s, int how) -> int32;
+pub extern("C") closesocket(int s) -> int32;
+
+// DNS + sockaddr construction. getaddrinfo fills *res with a heap addrinfo list
+pub extern("C") getaddrinfo(ptr node, ptr service, ptr hints, ptr res) -> int32;
+pub extern("C") freeaddrinfo(ptr ai) -> void;

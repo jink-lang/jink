@@ -1,0 +1,113 @@
+// Small HTTP/1.1 client over std.net.socket
+//
+// Scope: plaintext GET over port 80 - sends `Connection: close` so the server
+// closes the socket after the body, which makes "read until EOF" the framing
+// HTTPS will slot in here later by swapping TcpStream for a TLS stream
+
+import from std.net.socket { TcpStream };
+import from std.mem.buf { ByteBuf };
+import from std.mem.raw { alloc, release };
+import from jink.ext.libc { printf };
+
+pub cls HttpResponse = {
+  pub int ok;       // 1 if the round-trip succeeded
+  pub int status;   // HTTP status code, e.g. 200
+  pub ptr data;     // full raw response bytes
+  pub int len;      // total response length
+  pub int body_off; // offset of the body (just past the CRLF CRLF)
+
+  fun new() -> self {
+    self.ok = 0;
+    self.status = 0;
+    self.len = 0;
+    self.body_off = 0;
+  }
+
+  pub fun body_len() -> int {
+    return self.len - self.body_off;
+  }
+
+  // Write the response body to stdout
+  pub fun print_body() -> void {
+    int i = self.body_off;
+    while (i < self.len) {
+      printf("%c", __ptr_read_byte(self.data, i));
+      i = i + 1;
+    }
+  }
+}
+
+// Perform `GET <path>` against `<host>:80` - returns an HttpResponse; check .ok
+pub fun http_get(string host, string path) -> HttpResponse {
+  let resp = HttpResponse();
+
+  TcpStream conn = TcpStream();
+  int opened = conn.open(host, "80");
+  if (opened == 0) {
+    return resp;
+  }
+
+  // Build the request line + headers into a byte buffer
+  ByteBuf req = ByteBuf();
+  req.push_str("GET ");
+  req.push_str(path);
+  req.push_str(" HTTP/1.1\r\nHost: ");
+  req.push_str(host);
+  req.push_str("\r\nUser-Agent: jink/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n");
+
+  int sent = conn.write(req.raw(), req.size());
+  if (sent < 0) {
+    conn.close();
+    return resp;
+  }
+
+  // Drain the response into a growable buffer until the peer closes (n == 0)
+  // recv errors surface as a huge value (32-bit -1 widened), so clamp > 4096
+  ByteBuf out = ByteBuf();
+  ptr chunk = alloc(4096);
+  int n = conn.read(chunk, 4096);
+  if (n > 4096) { n = 0; }
+  while (n > 0) {
+    int i = 0;
+    while (i < n) {
+      out.push(__ptr_read_byte(chunk, i));
+      i = i + 1;
+    }
+    n = conn.read(chunk, 4096);
+    if (n > 4096) { n = 0; }
+  }
+  release(chunk);
+  conn.close();
+
+  resp.data = out.raw();
+  resp.len = out.size();
+  resp.ok = 1;
+
+  // Status code: the 3 digits at offsets 9..11 of "HTTP/1.1 200 ..."
+  if (out.size() >= 12) {
+    int d0 = out.get(9) - 48;
+    int d1 = out.get(10) - 48;
+    int d2 = out.get(11) - 48;
+    resp.status = d0 * 100 + d1 * 10 + d2;
+  }
+
+  // Body starts just past the first CRLF CRLF (13 10 13 10)
+  resp.body_off = out.size();
+  int j = 0;
+  int end = out.size() - 3;
+  while (j < end) {
+    if (out.get(j) == 13) {
+      if (out.get(j + 1) == 10) {
+        if (out.get(j + 2) == 13) {
+          if (out.get(j + 3) == 10) {
+            resp.body_off = j + 4;
+            j = end;
+          }
+        }
+      }
+    }
+    j = j + 1;
+  }
+
+  return resp;
+}

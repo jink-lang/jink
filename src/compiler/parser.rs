@@ -731,7 +731,14 @@ impl Parser {
           Some(cur.line), cur.start_pos, Some(cur.line)
         ));
       } else {
-        return Ok(self.get_expr(Expr::Literal(Literals::Integer(cur.value.unwrap().parse::<i64>().unwrap())),
+        let raw = cur.value.unwrap();
+        // Hex literal (0x...) parsed via radix 16; otherwise decimal
+        let int_val = if raw.len() > 2 && (raw.starts_with("0x") || raw.starts_with("0X")) {
+          i64::from_str_radix(&raw[2..], 16).unwrap()
+        } else {
+          raw.parse::<i64>().unwrap()
+        };
+        return Ok(self.get_expr(Expr::Literal(Literals::Integer(int_val)),
           Some(cur.line), cur.start_pos, Some(cur.line)
         ));
       }

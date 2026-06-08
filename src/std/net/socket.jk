@@ -1,0 +1,104 @@
+// Raw TCP client sockets (Windows / Winsock2)
+//
+// Win64 addrinfo layout (the offsets we read):
+//   off 0  ai_flags (i32)     off 4  ai_family (i32)
+//   off 8  ai_socktype (i32)  off 12 ai_protocol (i32)
+//   off 16 ai_addrlen (size_t)
+//   off 24 ai_canonname (ptr) off 32 ai_addr (ptr)   <- index 4 in 8-byte units
+//   off 40 ai_next (ptr)
+
+import from jink.ext.winsock {
+  WSAStartup, socket, connect, send, recv, shutdown, closesocket,
+  getaddrinfo, freeaddrinfo
+};
+import from std.mem.raw { alloc, zero, release };
+
+// TODO: Fix - module constants codegen as function-local so cannot be used in classes
+// const AF_INET = 2;
+// const SOCK_STREAM = 1;       // IPv4
+// const IPPROTO_TCP = 6;       // TCP stream
+// const SOCKADDR_IN_LEN = 16;
+// const ADDRINFO_SIZE = 48;
+// const WSADATA_SIZE = 512;    // WSADATA is ~408 bytes on Win64; overallocate for safety
+// const WINSOCK_VERSION = 514; // MAKEWORD(2,2) == 0x0202
+
+pub cls TcpStream = {
+  pub int sock;
+  pub int connected;
+
+  fun new() -> self {
+    self.sock = -1;
+    self.connected = 0;
+  }
+
+  // Resolve host and connect to given port (service)
+  // Returns 1 on success, 0 on failure
+  pub fun open(string host, string service) -> int {
+    // Initialise Winsock (idempotent / refcounted aka fine to call per connection)
+    ptr wsa = alloc(512);              // WSADATA buffer (~408 bytes on Win64)
+    int wrc = WSAStartup(514, wsa);    // 514 == MAKEWORD(2, 2)
+    release(wsa);
+    if (wrc != 0) { return 0; }
+
+    // Build addrinfo hints forcing IPv4 + TCP so ai_addr is a 16-byte sockaddr_in
+    ptr hints = alloc(48);             // sizeof(addrinfo) on Win64
+    zero(hints, 48);
+    __ptr_write_byte(hints, 4, 2);     // ai_family   = AF_INET
+    __ptr_write_byte(hints, 8, 1);     // ai_socktype = SOCK_STREAM
+
+    // getaddrinfo writes an addrinfo* into res
+    ptr res = alloc(8);
+    int rc = getaddrinfo(host, service, hints, res);
+    if (rc != 0) {
+      release(hints);
+      release(res);
+      return 0;
+    }
+
+    ptr info = __ptr_read_ptr(res, 0);   // addrinfo*
+    ptr addr = __ptr_read_ptr(info, 4);  // ai_addr (sockaddr*) at byte offset 32
+
+    int s = socket(2, 1, 6);             // AF_INET, SOCK_STREAM, IPPROTO_TCP
+    if (s < 0) {
+      freeaddrinfo(info);
+      release(hints);
+      release(res);
+      return 0;
+    }
+
+    int crc = connect(s, addr, 16);      // sizeof(sockaddr_in)
+    freeaddrinfo(info);
+    release(hints);
+    release(res);
+    if (crc != 0) {
+      closesocket(s);
+      return 0;
+    }
+
+    self.sock = s;
+    self.connected = 1;
+    return 1;
+  }
+
+  // Send up to `len` bytes from buf - returns bytes sent, or < 0 on error
+  pub fun write(ptr buf, int len) -> int {
+    int n = send(self.sock, buf, len, 0); // bind first: widens i32 result to i64
+    return n;
+  }
+
+  // Receive up to `max` bytes into buf - returns bytes read, 0 at EOF, < 0 on error
+  pub fun read(ptr buf, int max) -> int {
+    int n = recv(self.sock, buf, max, 0); // bind first: widens i32 result to i64
+    return n;
+  }
+
+  // Signal we're done writing (SD_SEND == 1) so the peer sees end-of-request
+  pub fun done_writing() -> void {
+    shutdown(self.sock, 1);
+  }
+
+  pub fun close() -> void {
+    closesocket(self.sock);
+    self.connected = 0;
+  }
+}

@@ -112,6 +112,8 @@ impl TypeChecker {
       "__ptr_write_f32",
       "__ptr_read_string",
       "__ptr_write_string",
+      "__ptr_read_ptr",
+      "__ptr_write_ptr",
       "type",
       "int",
       "float"
