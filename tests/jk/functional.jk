@@ -1,0 +1,43 @@
+// std.functional - higher-order helpers over IntArray (first-class functions)
+
+import from std.functional { map, filter, reduce, count, any, all, find_index };
+import from std.array { IntArray };
+import from std.testing { check_int };
+import from jink.ext.libc { exit };
+
+fun square(int x) -> int { return x * x; }
+fun add(int a, int b) -> int { return a + b; }
+fun is_even(int x) -> int {
+  if (x % 2 == 0) { return 1; }
+  return 0;
+}
+fun gt3(int x) -> int {
+  if (x > 3) { return 1; }
+  return 0;
+}
+
+fun run() -> void {
+  int fails = 0;
+
+  IntArray nums = IntArray();
+  nums.push(1); nums.push(2); nums.push(3); nums.push(4); nums.push(5);
+
+  // map then reduce: 1+4+9+16+25 = 55
+  IntArray sq = map(nums, square);
+  fails = fails + check_int("map-sum-of-squares", reduce(sq, 0, add), 55);
+  fails = fails + check_int("reduce-add", reduce(nums, 0, add), 15);
+
+  // filter even -> [2, 4]
+  IntArray evens = filter(nums, is_even);
+  fails = fails + check_int("filter-count", evens.size(), 2);
+  fails = fails + check_int("filter-sum", reduce(evens, 0, add), 6);
+
+  fails = fails + check_int("count-even", count(nums, is_even), 2);
+  fails = fails + check_int("any-gt3", any(nums, gt3), 1);
+  fails = fails + check_int("all-gt3", all(nums, gt3), 0);
+  fails = fails + check_int("find-first-gt3", find_index(nums, gt3), 3); // value 4 at index 3
+
+  exit(fails);
+}
+
+run();

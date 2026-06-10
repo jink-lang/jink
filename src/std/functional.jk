@@ -1,0 +1,95 @@
+// Higher-order helpers over IntArray
+//
+// Generics are a TODO so these are monomorphic (IntArray of int)
+// Predicates return an int and are treated as truthy when non-zero
+
+import from std.array { IntArray };
+
+// New array of f(x) for each element x
+pub fun map(IntArray xs, fun(int) -> int f) -> IntArray {
+  IntArray out = IntArray();
+  int i = 0;
+  while (i < xs.size()) {
+    out.push(f(xs.get(i)));
+    i = i + 1;
+  }
+  return out;
+}
+
+// New array of the elements for which pred(x) is non-zero
+pub fun filter(IntArray xs, fun(int) -> int pred) -> IntArray {
+  IntArray out = IntArray();
+  int i = 0;
+  while (i < xs.size()) {
+    int v = xs.get(i);
+    int keep = pred(v);
+    if (keep != 0) { out.push(v); }
+    i = i + 1;
+  }
+  return out;
+}
+
+// Left fold: acc = f(acc, x) for each x, starting from init
+pub fun reduce(IntArray xs, int init, fun(int, int) -> int f) -> int {
+  int acc = init;
+  int i = 0;
+  while (i < xs.size()) {
+    acc = f(acc, xs.get(i));
+    i = i + 1;
+  }
+  return acc;
+}
+
+// Call f(x) for each x (for side effects) - returns nothing
+pub fun each(IntArray xs, fun(int) -> void f) -> void {
+  int i = 0;
+  while (i < xs.size()) {
+    f(xs.get(i));
+    i = i + 1;
+  }
+}
+
+// Number of elements for which pred(x) is non-zero
+pub fun count(IntArray xs, fun(int) -> int pred) -> int {
+  int n = 0;
+  int i = 0;
+  while (i < xs.size()) {
+    int keep = pred(xs.get(i));
+    if (keep != 0) { n = n + 1; }
+    i = i + 1;
+  }
+  return n;
+}
+
+// 1 if pred(x) is non-zero for any element, else 0
+pub fun any(IntArray xs, fun(int) -> int pred) -> int {
+  int i = 0;
+  while (i < xs.size()) {
+    int keep = pred(xs.get(i));
+    if (keep != 0) { return 1; }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 1 if pred(x) is non-zero for every element, else 0
+pub fun all(IntArray xs, fun(int) -> int pred) -> int {
+  int i = 0;
+  while (i < xs.size()) {
+    int keep = pred(xs.get(i));
+    if (keep == 0) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+// Index of the first element for which pred(x) is non-zero, or -1 if none
+pub fun find_index(IntArray xs, fun(int) -> int pred) -> int {
+  int i = 0;
+  while (i < xs.size()) {
+    int keep = pred(xs.get(i));
+    if (keep != 0) { return i; }
+    i = i + 1;
+  }
+  return 0 - 1;
+}

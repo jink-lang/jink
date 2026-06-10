@@ -14,7 +14,7 @@ use std::process::Command;
 const JK_TESTS: &[&str] = &[
   "sha256", "hkdf", "chacha20", "poly1305", "aead", "x25519", "bigint", "rsa",
   "ecdsa", "x509", "x509_chain", "tls13_kdf", "random", "tls_record", "sha384",
-  "ecdsa_p384", "time", "rootstore",
+  "ecdsa_p384", "time", "rootstore", "functional",
 ];
 
 fn run_one(name: &str) {
