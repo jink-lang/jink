@@ -1,0 +1,32 @@
+import from std.crypto.tls13_kdf { hkdf_expand_label, derive_secret };
+import from std.crypto.hkdf { hkdf_extract };
+import from std.crypto.sha256 { sha256, sha256_to_bytes };
+import from std.testing { check_hex };
+import from std.mem.raw { alloc, zero };
+import from jink.ext.libc { exit };
+
+fun run() -> void {
+  int fails = 0;
+
+  // TLS 1.3 Early Secret = HKDF-Extract(0, 0[32])
+  ptr zeros = alloc(32);
+  zero(zeros, 32);
+  ptr early = alloc(32);
+  hkdf_extract(zeros, 0, zeros, 32, early);
+  fails = fails + check_hex("tls13-early-secret", early, 32,
+    "33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a");
+
+  // derived = Derive-Secret(Early, "derived", "")  (empty transcript hash)
+  string e = "";
+  let dh = sha256(e, 0);
+  ptr empty = alloc(32);
+  sha256_to_bytes(dh, empty);
+  ptr derived = alloc(32);
+  derive_secret(early, "derived", empty, derived);
+  fails = fails + check_hex("tls13-derived-secret", derived, 32,
+    "6f2615a108c702c5678f54fc9dbab69716c076189c48250cebeac3576c3611ba");
+
+  exit(fails);
+}
+
+run();

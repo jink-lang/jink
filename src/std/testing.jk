@@ -1,0 +1,75 @@
+// Minimal test assertions for Jink std tests
+//
+// Each check prints [PASS]/[FAIL] and returns 1 on failure, 0 on pass, so a test
+// accumulates a failure count and `exit(fails)` at the end (nonzero exit = fail)
+//
+// Global counter would be cleaner but module-level mutable state isn't a global yet
+// so the count lives in each test's run()
+
+import from jink.ext.libc { printf };
+
+fun hexval(int ch) -> int {
+  if (ch >= 97) { return ch - 87; } // a-f
+  return ch - 48;                   // 0-9
+}
+
+fun dump_hex(ptr p, int n) -> void {
+  int i = 0;
+  while (i < n) { printf("%02x", __ptr_read_byte(p, i)); i = i + 1; }
+  printf("\n");
+}
+
+// Decode a hex string (2*nbytes chars) into out
+pub fun from_hex(string h, ptr out, int nbytes) -> void {
+  int i = 0;
+  while (i < nbytes) {
+    int hi = hexval(__ptr_read_byte(h, 2 * i));
+    int lo = hexval(__ptr_read_byte(h, 2 * i + 1));
+    __ptr_write_byte(out, i, (hi << 4) | lo);
+    i = i + 1;
+  }
+}
+
+// Assert n bytes at got equal the hex string want - returns 0 pass / 1 fail
+pub fun check_hex(string name, ptr got, int n, string want) -> int {
+  int i = 0;
+  int ok = 1;
+  while (i < n) {
+    int hi = hexval(__ptr_read_byte(want, 2 * i));
+    int lo = hexval(__ptr_read_byte(want, 2 * i + 1));
+    int wb = (hi << 4) | lo;
+    int gb = __ptr_read_byte(got, i);
+    if (gb != wb) { ok = 0; }
+    i = i + 1;
+  }
+  if (ok == 1) {
+    printf("[PASS] %s\n", name);
+    return 0;
+  }
+  printf("[FAIL] %s\n", name);
+  printf("  got:  "); dump_hex(got, n);
+  printf("  want: %s\n", want);
+  return 1;
+}
+
+// Assert n bytes at got equal n bytes at want - returns 0 pass / 1 fail
+pub fun check_bytes(string name, ptr got, ptr want, int n) -> int {
+  int i = 0;
+  int ok = 1;
+  while (i < n) {
+    int g = __ptr_read_byte(got, i);
+    int w = __ptr_read_byte(want, i);
+    if (g != w) { ok = 0; }
+    i = i + 1;
+  }
+  if (ok == 1) { printf("[PASS] %s\n", name); return 0; }
+  printf("[FAIL] %s\n", name);
+  return 1;
+}
+
+// Assert got == want - returns 0 pass / 1 fail
+pub fun check_int(string name, int got, int want) -> int {
+  if (got == want) { printf("[PASS] %s\n", name); return 0; }
+  printf("[FAIL] %s (got %d, want %d)\n", name, got, want);
+  return 1;
+}

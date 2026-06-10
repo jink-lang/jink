@@ -1,0 +1,41 @@
+import from std.crypto.hmac { hmac_sha256 };
+import from std.crypto.hkdf { hkdf_extract, hkdf_expand };
+import from std.testing { check_hex };
+import from std.mem.raw { alloc };
+import from jink.ext.libc { exit };
+
+fun run() -> void {
+  int fails = 0;
+  int i = 0;
+
+  // HMAC-SHA256, RFC 4231 test case 1
+  ptr key = alloc(20);
+  i = 0; while (i < 20) { __ptr_write_byte(key, i, 0x0b); i = i + 1; }
+  string data = "Hi There";
+  ptr mac = alloc(32);
+  hmac_sha256(key, 20, data, 8, mac);
+  fails = fails + check_hex("hmac-sha256", mac, 32,
+    "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+
+  // HKDF-SHA256, RFC 5869 test case 1
+  ptr ikm = alloc(22);
+  i = 0; while (i < 22) { __ptr_write_byte(ikm, i, 0x0b); i = i + 1; }
+  ptr salt = alloc(13);
+  i = 0; while (i < 13) { __ptr_write_byte(salt, i, i); i = i + 1; }
+  ptr info = alloc(10);
+  i = 0; while (i < 10) { __ptr_write_byte(info, i, 0xf0 + i); i = i + 1; }
+
+  ptr prk = alloc(32);
+  hkdf_extract(salt, 13, ikm, 22, prk);
+  fails = fails + check_hex("hkdf-extract", prk, 32,
+    "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5");
+
+  ptr okm = alloc(42);
+  hkdf_expand(prk, 32, info, 10, okm, 42);
+  fails = fails + check_hex("hkdf-expand", okm, 42,
+    "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865");
+
+  exit(fails);
+}
+
+run();

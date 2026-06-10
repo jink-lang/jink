@@ -1,0 +1,49 @@
+// std.sys.time.now_utc - the current UTC time as 14 ASCII digits YYYYMMDDHHMMSS
+// Can't assert an exact value (it's the wall clock), so check the shape
+
+import from std.sys.time { now_utc };
+import from std.testing { check_int };
+import from std.mem.raw { alloc };
+import from jink.ext.libc { exit };
+
+fun run() -> void {
+  int fails = 0;
+
+  ptr buf = alloc(14);
+  now_utc(buf);
+
+  // Every character must be an ASCII digit '0'..'9'
+  int alldig = 1;
+  int i = 0;
+  while (i < 14) {
+    int c = __ptr_read_byte(buf, i);
+    if (c < 48) { alldig = 0; }
+    if (c > 57) { alldig = 0; }
+    i = i + 1;
+  }
+  fails = fails + check_int("now-all-digits", alldig, 1);
+
+  // Century is "20" (valid 2000..2099 - fine for this client's lifetime)
+  fails = fails + check_int("now-century-hi", __ptr_read_byte(buf, 0), 50); // '2'
+  fails = fails + check_int("now-century-lo", __ptr_read_byte(buf, 1), 48); // '0'
+
+  // Month field is in 01..12
+  int m0 = __ptr_read_byte(buf, 4);
+  int m1 = __ptr_read_byte(buf, 5);
+  int month = (m0 - 48) * 10 + (m1 - 48);
+  int monthok = 0;
+  if (month >= 1) { if (month <= 12) { monthok = 1; } }
+  fails = fails + check_int("now-month-range", monthok, 1);
+
+  // Day field is in 01..31
+  int d0 = __ptr_read_byte(buf, 6);
+  int d1 = __ptr_read_byte(buf, 7);
+  int day = (d0 - 48) * 10 + (d1 - 48);
+  int dayok = 0;
+  if (day >= 1) { if (day <= 31) { dayok = 1; } }
+  fails = fails + check_int("now-day-range", dayok, 1);
+
+  exit(fails);
+}
+
+run();

@@ -1,0 +1,38 @@
+import from std.crypto.ecdsa_p384 { ecdsa_p384_verify, ecdsa_p384_base_x };
+import from std.crypto.sha512 { sha384, sha384_to_bytes };
+import from std.testing { check_hex, check_int, from_hex };
+import from std.mem.raw { alloc };
+import from jink.ext.libc { strlen, exit };
+
+fun run() -> void {
+  int fails = 0;
+
+  // Scalar multiplication: (k * G).x
+  ptr k = alloc(48);
+  from_hex("0123456789abcdeffedcba98765432100f1e2d3c4b5a69788796a5b4c3d2e1f0112233445566778899aabbccddeeff00", k, 48);
+  ptr sx = alloc(48);
+  ecdsa_p384_base_x(sx, k);
+  fails = fails + check_hex("p384-scalarmult", sx, 48,
+    "0d92fc9abd769b04b4abe65601562d68792ebbc861cfd6774d9f81609b81a1e57430640979aae0a2a049c1a150d538f3");
+
+  // ECDSA verify
+  ptr qx = alloc(48); from_hex("6a84b79a28d0f37c5ae13bb0e1c9f8d2342bf0636ad3ea723052194ff74963a367b7392485f4b07b32aa18748e434e47", qx, 48);
+  ptr qy = alloc(48); from_hex("9b9811468a9de76119dab69b64390c2cff18472d446ed4a943eaaacff6f24c50aa15393ee91007d4b218976f25299aca", qy, 48);
+  ptr r = alloc(48);  from_hex("cb6d0d742f4370abdcfedeee1baf391a73988503d63cb5e7061964186d8e896e7f5ddc06344d2604274866fd866d1bcd", r, 48);
+  ptr s = alloc(48);  from_hex("f7bfa144f940bd8748c05e4094889d3d8c5cea2625317788b8743dab81a0b9809e0b0e165b417f513286b4959aab0b58", s, 48);
+
+  string msg = "Jink ECDSA P-384 test vector";
+  let d = sha384(msg, strlen(msg));
+  ptr hash = alloc(48);
+  sha384_to_bytes(d, hash);
+
+  fails = fails + check_int("p384-verify-valid", ecdsa_p384_verify(qx, qy, r, s, hash), 1);
+
+  int saved = __ptr_read_byte(r, 10);
+  __ptr_write_byte(r, 10, saved ^ 1);
+  fails = fails + check_int("p384-verify-tampered", ecdsa_p384_verify(qx, qy, r, s, hash), 0);
+
+  exit(fails);
+}
+
+run();

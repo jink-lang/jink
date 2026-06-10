@@ -1,0 +1,41 @@
+import from std.crypto.chacha20poly1305 { aead_seal, aead_open };
+import from std.testing { check_hex, check_int };
+import from std.mem.raw { alloc };
+import from jink.ext.libc { strlen, exit };
+
+fun run() -> void {
+  int fails = 0;
+  int i = 0;
+
+  // RFC 8439 2.8.2
+  ptr key = alloc(32);
+  i = 0; while (i < 32) { __ptr_write_byte(key, i, 0x80 + i); i = i + 1; }
+  ptr nonce = alloc(12);
+  i = 0; while (i < 12) { __ptr_write_byte(nonce, i, 0); i = i + 1; }
+  __ptr_write_byte(nonce, 0, 0x07);
+  i = 0; while (i < 8) { __ptr_write_byte(nonce, 4 + i, 0x40 + i); i = i + 1; }
+  ptr aad = alloc(12);
+  i = 0; while (i < 4) { __ptr_write_byte(aad, i, 0x50 + i); i = i + 1; }
+  i = 0; while (i < 8) { __ptr_write_byte(aad, 4 + i, 0xc0 + i); i = i + 1; }
+
+  string pt = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+  int ptlen = strlen(pt);
+  ptr ct = alloc(ptlen);
+  ptr tag = alloc(16);
+  aead_seal(key, nonce, aad, 12, pt, ptlen, ct, tag);
+
+  fails = fails + check_hex("aead-ciphertext", ct, ptlen,
+    "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116");
+  fails = fails + check_hex("aead-tag", tag, 16, "1ae10b594f09e26a7e902ecbd0600691");
+
+  ptr rec = alloc(ptlen);
+  fails = fails + check_int("aead-open-valid", aead_open(key, nonce, aad, 12, ct, ptlen, tag, rec), 1);
+
+  int saved = __ptr_read_byte(ct, 0);
+  __ptr_write_byte(ct, 0, saved ^ 1);
+  fails = fails + check_int("aead-open-tampered", aead_open(key, nonce, aad, 12, ct, ptlen, tag, rec), 0);
+
+  exit(fails);
+}
+
+run();

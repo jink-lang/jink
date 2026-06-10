@@ -1,0 +1,41 @@
+import from std.sys.random { rand_bytes };
+import from std.testing { check_int };
+import from std.mem.raw { alloc };
+import from jink.ext.libc { exit };
+
+fun all_zero(ptr p, int n) -> int {
+  int i = 0;
+  while (i < n) {
+    int v = __ptr_read_byte(p, i);
+    if (v != 0) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+fun differ(ptr a, ptr b, int n) -> int {
+  int i = 0;
+  while (i < n) {
+    int av = __ptr_read_byte(a, i);
+    int bv = __ptr_read_byte(b, i);
+    if (av != bv) { return 1; }
+    i = i + 1;
+  }
+  return 0;
+}
+
+fun run() -> void {
+  int fails = 0;
+  ptr a = alloc(32);
+  ptr b = alloc(32);
+  rand_bytes(a, 32);
+  rand_bytes(b, 32);
+
+  // Sanity (not vectors): a fresh 32-byte draw isn't all zero, and two draws differ
+  fails = fails + check_int("rand-nonzero", all_zero(a, 32), 0);
+  fails = fails + check_int("rand-distinct", differ(a, b, 32), 1);
+
+  exit(fails);
+}
+
+run();

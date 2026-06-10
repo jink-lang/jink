@@ -1,0 +1,26 @@
+import from std.crypto.sha512 { sha384, sha384_to_bytes };
+import from std.testing { check_hex };
+import from std.mem.raw { alloc };
+import from jink.ext.libc { strlen, exit };
+
+fun dg(string m, ptr out) -> void {
+  let d = sha384(m, strlen(m));
+  sha384_to_bytes(d, out);
+}
+
+fun run() -> void {
+  int fails = 0;
+  ptr out = alloc(48);
+
+  dg("abc", out);
+  fails = fails + check_hex("sha384(abc)", out, 48,
+    "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7");
+
+  dg("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu", out);
+  fails = fails + check_hex("sha384(two-block)", out, 48,
+    "09330c33f71147e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039");
+
+  exit(fails);
+}
+
+run();

@@ -1,0 +1,26 @@
+import from std.crypto.sha256 { sha256, sha256_to_bytes };
+import from std.testing { check_hex };
+import from std.mem.raw { alloc };
+import from jink.ext.libc { strlen, exit };
+
+fun digest(string m, ptr out) -> void {
+  let d = sha256(m, strlen(m));
+  sha256_to_bytes(d, out);
+}
+
+fun run() -> void {
+  int fails = 0;
+  ptr out = alloc(32);
+
+  digest("abc", out);
+  fails = fails + check_hex("sha256(abc)", out, 32,
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+
+  digest("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", out);
+  fails = fails + check_hex("sha256(two-block)", out, 32,
+    "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+
+  exit(fails);
+}
+
+run();

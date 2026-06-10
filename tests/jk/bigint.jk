@@ -1,0 +1,27 @@
+import from std.crypto.bigint { bn_from_int, bn_modexp_int, bn_get };
+import from std.testing { check_int };
+import from std.mem.raw { alloc };
+import from jink.ext.libc { exit };
+
+fun run() -> void {
+  int fails = 0;
+  ptr base = alloc(16);
+  ptr m = alloc(16);
+  ptr out = alloc(16);
+
+  bn_from_int(base, 2, 4); bn_from_int(m, 2, 497);
+  bn_modexp_int(base, 13, m, 2, out);
+  fails = fails + check_int("4^13 mod 497", bn_get(out, 0), 445);
+
+  bn_from_int(base, 2, 2); bn_from_int(m, 2, 1000);
+  bn_modexp_int(base, 10, m, 2, out);
+  fails = fails + check_int("2^10 mod 1000", bn_get(out, 0), 24);
+
+  bn_from_int(base, 2, 3); bn_from_int(m, 2, 100);
+  bn_modexp_int(base, 7, m, 2, out);
+  fails = fails + check_int("3^7 mod 100", bn_get(out, 0), 87);
+
+  exit(fails);
+}
+
+run();

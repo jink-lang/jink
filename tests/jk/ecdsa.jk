@@ -1,0 +1,36 @@
+import from std.crypto.ecdsa_p256 { ecdsa_p256_verify, ecdsa_p256_base_x };
+import from std.crypto.sha256 { sha256, sha256_to_bytes };
+import from std.testing { check_hex, check_int, from_hex };
+import from std.mem.raw { alloc };
+import from jink.ext.libc { strlen, exit };
+
+fun run() -> void {
+  int fails = 0;
+
+  ptr k = alloc(32);
+  from_hex("0123456789abcdeffedcba98765432100f1e2d3c4b5a69788796a5b4c3d2e1f0", k, 32);
+  ptr sx = alloc(32);
+  ecdsa_p256_base_x(sx, k);
+  fails = fails + check_hex("ecdsa-scalarmult", sx, 32,
+    "bab47346ed163f061ac6d2191c3deea7bd5070ca32f929656837d6ba05d64b27");
+
+  ptr qx = alloc(32); from_hex("20980e46d7b283a119e503e02ec835a4e68c0ed99a949018b40f6cad20b193a4", qx, 32);
+  ptr qy = alloc(32); from_hex("16e199db52996a7319182eaaa3e2c550f55651481df9d8cfdc5df984725a090e", qy, 32);
+  ptr r = alloc(32);  from_hex("87ac740acfef792bbe6fc286ee0193d901fe59c4d5647e0dc14d1285032f53d9", r, 32);
+  ptr s = alloc(32);  from_hex("f62f3e2ee6a768dfefa4a72ee3a9e36c542d21ad2543fec7743f5eaa1bf69ab5", s, 32);
+
+  string msg = "Jink ECDSA P-256 test vector";
+  let d = sha256(msg, strlen(msg));
+  ptr hash = alloc(32);
+  sha256_to_bytes(d, hash);
+
+  fails = fails + check_int("ecdsa-verify-valid", ecdsa_p256_verify(qx, qy, r, s, hash), 1);
+
+  int saved = __ptr_read_byte(r, 10);
+  __ptr_write_byte(r, 10, saved ^ 1);
+  fails = fails + check_int("ecdsa-verify-tampered", ecdsa_p256_verify(qx, qy, r, s, hash), 0);
+
+  exit(fails);
+}
+
+run();

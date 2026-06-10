@@ -1,0 +1,21 @@
+import from std.crypto.poly1305 { poly1305_mac };
+import from std.testing { check_hex, from_hex };
+import from std.mem.raw { alloc };
+import from jink.ext.libc { strlen, exit };
+
+fun run() -> void {
+  int fails = 0;
+
+  // RFC 8439 2.5.2
+  ptr key = alloc(32);
+  from_hex("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b", key, 32);
+
+  string msg = "Cryptographic Forum Research Group";
+  ptr tag = alloc(16);
+  poly1305_mac(msg, strlen(msg), key, tag);
+  fails = fails + check_hex("poly1305", tag, 16, "a8061dc1305136c6c22b8baf0c0127a9");
+
+  exit(fails);
+}
+
+run();

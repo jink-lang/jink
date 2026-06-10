@@ -1,0 +1,56 @@
+// std.crypto.rootstore.dn_chain_ok: a child cert's issuer DN must byte-equal its
+// parent's subject DN. Exercises x509_issuer_pos / x509_subject_pos / der_elem_eq
+// (the name-chaining the trust anchor relies on). The same Jink Root -> Inter ->
+// leaf chain used by x509_chain. (anchor_to_root_store itself needs the live
+// Windows store, so it's covered by the live tls demo, not here.)
+
+import from std.crypto.rootstore { dn_chain_ok, anchor_to_root_store };
+import from std.testing { check_int };
+import from std.mem.raw { alloc };
+import from jink.ext.libc { strlen, exit };
+
+fun hexval(int ch) -> int {
+  if (ch >= 97) { return ch - 87; }
+  return ch - 48;
+}
+fun load(string h, ptr out) -> void {
+  int n = strlen(h) / 2;
+  int i = 0;
+  while (i < n) {
+    int hi = hexval(__ptr_read_byte(h, 2 * i));
+    int lo = hexval(__ptr_read_byte(h, 2 * i + 1));
+    __ptr_write_byte(out, i, (hi << 4) | lo);
+    i = i + 1;
+  }
+}
+
+fun run() -> void {
+  int fails = 0;
+
+  ptr leaf = alloc(1024);
+  load("308201483081f0a00302010202143d7d666e611bd44673f17330844337798865e084300a06082a8648ce3d040302301c311a301806035504030c114a696e6b20496e7465726d656469617465301e170d3235303130313030303030305a170d3335303130313030303030305a30143112301006035504030c096a696e6b2e746573743059301306072a8648ce3d020106082a8648ce3d0301070342000410134153029318de17125b5108fb4d9c0df632a04b5a861d42c35aaabd46a0548fd7d9f4791ce32cdd49e3cadb34a2c4b53cfff520a7a4bd770b85cbd1afaad3a318301630140603551d11040d300b82096a696e6b2e74657374300a06082a8648ce3d04030203470030440220514d5f63d09294a3ee831228b07b95a63e2b4a6a167e19df42bc64d4310e73d1022004fc2ab93b27eb98efc1f398948ba44f2b7835ecee6bbb6d80e8f7a4c0c8ced0", leaf);
+
+  ptr inter = alloc(1024);
+  load("308201473081eea0030201020214735f90e7f3165206be4fd29470000d6dfede715c300a06082a8648ce3d04030230143112301006035504030c094a696e6b20526f6f74301e170d3235303130313030303030305a170d3335303130313030303030305a301c311a301806035504030c114a696e6b20496e7465726d6564696174653059301306072a8648ce3d020106082a8648ce3d030107034200041db5b5b1aa8f165d897c19bc855ec4d809f59631ec9ddf121060d36b14eb7bbaaa8396ab145b56fb1cb7fdc4a2072c9282e448b25dfb32627cf4eb6e1008b28da316301430120603551d130101ff040830060101ff020100300a06082a8648ce3d0403020348003045022047ef8ba5be57c3b4a8fe1cc275d1c3e1316b128cc7af05bd17838a1e6b72d0250221008fb627bbe0e1c4b5c36034b2e42dba04f4035507377b9a6a306d928ee487b825", inter);
+
+  ptr root = alloc(1024);
+  load("3082013d3081e3a0030201020214242703a935d1588891abf54d4afc688c8c53e430300a06082a8648ce3d04030230143112301006035504030c094a696e6b20526f6f74301e170d3235303130313030303030305a170d3335303130313030303030305a30143112301006035504030c094a696e6b20526f6f743059301306072a8648ce3d020106082a8648ce3d03010703420004a838a4d2891ccf9cc3151d012fe10c6b6656033a1c0de204c4499df3f83cafb92d1eca388a555efabbae0af38f7ba8ab304f48ba563e73a98eebd999c50c99cba3133011300f0603551d130101ff040530030101ff300a06082a8648ce3d0403020349003046022100ebf8bb484fc5a78df759b8ca5795346c46a3a1f96b4a4faf8be3ae328a92d1b8022100d4c9f438b4d69f756cb5c282c27eab9decae3d441e7cc97fd0a919b362bf891a", root);
+
+  // leaf.issuer "Jink Intermediate" == inter.subject
+  fails = fails + check_int("dn-leaf-to-inter", dn_chain_ok(leaf, inter), 1);
+  // inter.issuer "Jink Root" == root.subject
+  fails = fails + check_int("dn-inter-to-root", dn_chain_ok(inter, root), 1);
+  // root is self-signed: issuer == subject
+  fails = fails + check_int("dn-root-self", dn_chain_ok(root, root), 1);
+  // leaf does NOT chain straight to root ("Intermediate" != "Root")
+  fails = fails + check_int("dn-leaf-to-root-no", dn_chain_ok(leaf, root), 0);
+
+  // Fail-closed: this synthetic "Jink Root" is NOT in the OS trust store, so the
+  // intermediate (whose issuer is "Jink Root") must NOT anchor. Proves the anchor
+  // rejects chains that don't lead to a trusted root, via the live crypt32 query
+  fails = fails + check_int("anchor-untrusted-rejected", anchor_to_root_store(inter), 0);
+
+  exit(fails);
+}
+
+run();

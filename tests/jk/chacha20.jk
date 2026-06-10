@@ -1,0 +1,37 @@
+import from std.crypto.chacha20 { chacha20_block, chacha20_xor };
+import from std.testing { check_hex };
+import from std.mem.raw { alloc };
+import from jink.ext.libc { strlen, exit };
+
+fun run() -> void {
+  int fails = 0;
+  int i = 0;
+
+  ptr key = alloc(32);
+  i = 0; while (i < 32) { __ptr_write_byte(key, i, i); i = i + 1; }
+
+  // RFC 8439 2.3.2: block function. counter=1, nonce 00 00 00 09 00 00 00 4a 00 00 00 00
+  ptr nonce = alloc(12);
+  i = 0; while (i < 12) { __ptr_write_byte(nonce, i, 0); i = i + 1; }
+  __ptr_write_byte(nonce, 3, 0x09);
+  __ptr_write_byte(nonce, 7, 0x4a);
+  ptr block = alloc(64);
+  chacha20_block(key, 1, nonce, block);
+  fails = fails + check_hex("chacha20-block", block, 64,
+    "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4ed2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e");
+
+  // RFC 8439 2.4.2: encryption. counter=1, nonce 00..00 4a 00 00 00 00
+  ptr nonce2 = alloc(12);
+  i = 0; while (i < 12) { __ptr_write_byte(nonce2, i, 0); i = i + 1; }
+  __ptr_write_byte(nonce2, 7, 0x4a);
+  string pt = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+  int len = strlen(pt);
+  ptr ct = alloc(len);
+  chacha20_xor(key, 1, nonce2, pt, len, ct);
+  fails = fails + check_hex("chacha20-encrypt", ct, len,
+    "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0bf91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d807ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab77937365af90bbf74a35be6b40b8eedf2785e42874d");
+
+  exit(fails);
+}
+
+run();

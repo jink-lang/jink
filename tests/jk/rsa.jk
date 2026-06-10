@@ -1,0 +1,25 @@
+import from std.crypto.rsa { rsa_pkcs1_sha256_verify };
+import from std.testing { check_int, from_hex };
+import from std.mem.raw { alloc };
+import from jink.ext.libc { strlen, exit };
+
+fun run() -> void {
+  int fails = 0;
+  ptr n = alloc(256);
+  from_hex("d9f720551b14bc419d2a1f8155633b9dd78faeb8d6e287b5c8701e5bede08e41178fbdb944b7832b716f3fbfe733328456ba6d65bafcb372ceaf58528afa34eaa30e690f1e01a74e72a50a51121f536b666cefe3aac5c28fee47f61713994ebfebcf38b78a2646270a6bc9c5c3c5fe20a41392de4fd0cee4db2cdd6d51cf25e480a16b616065af9c06e2d293a4af3bac9c9b0918ceb1941f39562a1539ee4c186609298f13a104ce485e5c996ff43d852a42ad0ccaaadf710a494109f1fd69ad9c1cfb38c4259c5396309b287ec98babb099da9a78f2cf4aaa607a91b9a638e99a7a5c9bbf99a0bdb0c488a6efa65ea75c0b8ba3183eaefe1e7563e9f4bd215b", n, 256);
+  ptr sig = alloc(256);
+  from_hex("420bae6db68f6cc6c30bee43f56599f5b8b8a774b0ce88c881b1314d0490729c34933617bda1cfb196b3f360b1f71d1eb292289dcc2dc80d983c83dcbee1ba2d38d3e3ba02fe84ffb5f5bdd6a7f8b25a8475b820ec8e2e8a3a14b7bc71bfd889b368332dd7442b8003bb47bb0e6ff011bda9ddac60661f70c128ebe20b701ece00572146bbeebf2f681587aa39229b8122bcf3ae1660052e23197f4062b977ecd571e45105123620217e4f5664eaf818d59bcd090eef8ac3e3335916ee371e7975eca946905eb13c7ee419dc565da04d6fb618c647b5d819fa408dc7eadc03bb74fc1c6e9d695140f61641765a62d28273e63b58767eeb111903686b65be7b4c", sig, 256);
+
+  string msg = "Jink RSA test vector";
+  fails = fails + check_int("rsa-verify-valid",
+    rsa_pkcs1_sha256_verify(n, 256, 65537, sig, msg, strlen(msg)), 1);
+
+  int saved = __ptr_read_byte(sig, 100);
+  __ptr_write_byte(sig, 100, saved ^ 1);
+  fails = fails + check_int("rsa-verify-tampered",
+    rsa_pkcs1_sha256_verify(n, 256, 65537, sig, msg, strlen(msg)), 0);
+
+  exit(fails);
+}
+
+run();
