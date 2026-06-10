@@ -1,0 +1,107 @@
+// TLS 1.3 record protection (RFC 8446 section 5)
+//
+// A protected record is: opaque_type(0x17) || 0x0303 || length(2) || AEAD output.
+// The AEAD plaintext is the inner content followed by the real content type (and
+// optional zero padding). Per-record nonce = static_iv XOR seq (seq right-aligned
+// in 8 bytes); the additional data is the 5-byte record header
+//
+// Uses TLS_CHACHA20_POLY1305_SHA256 (our only suite). Framing read/write over a
+// TcpStream lives in std.net.tls alongside the handshake
+
+import from std.mem.raw { alloc, release };
+import from std.crypto.chacha20poly1305 { aead_seal, aead_open };
+
+// 12-byte nonce = iv XOR seq, with seq in the low 8 bytes (big-endian)
+fun record_nonce(ptr iv, int seq, ptr out) -> void {
+  int i = 0;
+  while (i < 12) { __ptr_write_byte(out, i, __ptr_read_byte(iv, i)); i = i + 1; }
+  int s = seq;
+  int j = 11;
+  int k = 0;
+  while (k < 8) {
+    int b = __ptr_read_byte(out, j);
+    __ptr_write_byte(out, j, b ^ (s & 255));
+    s = s >> 8;
+    j = j - 1;
+    k = k + 1;
+  }
+}
+
+// Encrypt content (clen bytes) of real type rtype into a full record at out
+// Returns the total record length (header + ciphertext + tag)
+pub fun tls_protect(ptr key, ptr iv, int seq, ptr content, int clen, int rtype, ptr out) -> int {
+  int inner_len = clen + 1;    // content || real_type (no padding)
+  ptr inner = alloc(inner_len);
+  int i = 0;
+  while (i < clen) { __ptr_write_byte(inner, i, __ptr_read_byte(content, i)); i = i + 1; }
+  __ptr_write_byte(inner, clen, rtype);
+
+  int ct_len = inner_len + 16; // ciphertext + tag
+  __ptr_write_byte(out, 0, 23);
+  __ptr_write_byte(out, 1, 3);
+  __ptr_write_byte(out, 2, 3);
+  __ptr_write_byte(out, 3, (ct_len >> 8) & 255);
+  __ptr_write_byte(out, 4, ct_len & 255);
+
+  ptr aad = alloc(5);
+  i = 0;
+  while (i < 5) { __ptr_write_byte(aad, i, __ptr_read_byte(out, i)); i = i + 1; }
+
+  ptr nonce = alloc(12);
+  record_nonce(iv, seq, nonce);
+  ptr ct = alloc(inner_len);
+  ptr tag = alloc(16);
+  aead_seal(key, nonce, aad, 5, inner, inner_len, ct, tag);
+
+  i = 0;
+  while (i < inner_len) { __ptr_write_byte(out, 5 + i, __ptr_read_byte(ct, i)); i = i + 1; }
+  i = 0;
+  while (i < 16) { __ptr_write_byte(out, 5 + inner_len + i, __ptr_read_byte(tag, i)); i = i + 1; }
+
+  release(inner); release(aad); release(nonce); release(ct); release(tag);
+  return 5 + ct_len;
+}
+
+// Decrypt a record payload (ciphertext+tag, plen bytes) whose 5-byte header is at
+// `header`. Writes the inner content to out_content and the real type byte to
+// out_type. Returns the content length, or -1 on authentication failure
+pub fun tls_unprotect(ptr key, ptr iv, int seq, ptr header, ptr payload, int plen,
+                      ptr out_content, ptr out_type) -> int {
+  int inner_len = plen - 16;
+  ptr nonce = alloc(12);
+  record_nonce(iv, seq, nonce);
+
+  ptr ct = alloc(inner_len);
+  ptr tag = alloc(16);
+  int i = 0;
+  while (i < inner_len) { __ptr_write_byte(ct, i, __ptr_read_byte(payload, i)); i = i + 1; }
+  i = 0;
+  while (i < 16) { __ptr_write_byte(tag, i, __ptr_read_byte(payload, inner_len + i)); i = i + 1; }
+
+  ptr inner = alloc(inner_len);
+  int ok = aead_open(key, nonce, header, 5, ct, inner_len, tag, inner);
+  release(nonce); release(ct); release(tag);
+  if (ok == 0) {
+    release(inner);
+    return 0 - 1;
+  }
+
+  // Strip trailing zero padding - the last remaining byte is the real type
+  int n = inner_len;
+  int scanning = 1;
+  while (scanning == 1) {
+    if (n <= 0) {
+      scanning = 0;
+    } else {
+      int b = __ptr_read_byte(inner, n - 1);
+      if (b == 0) { n = n - 1; } else { scanning = 0; }
+    }
+  }
+  int rtype = __ptr_read_byte(inner, n - 1);
+  __ptr_write_byte(out_type, 0, rtype);
+  int clen = n - 1;
+  i = 0;
+  while (i < clen) { __ptr_write_byte(out_content, i, __ptr_read_byte(inner, i)); i = i + 1; }
+  release(inner);
+  return clen;
+}

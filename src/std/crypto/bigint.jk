@@ -1,0 +1,238 @@
+// Minimal big-integer arithmetic for RSA verification
+//
+// A bignum is an array of i64 limbs, each holding a 16-bit digit, little-endian
+// (limb 0 = least significant). All values are non-negative, so logical
+// >> is the correct shift. Lengths (limb counts) are passed explicitly
+//
+// Only what RSA verify needs: compare, subtract, multiply, mod (bit-by-bit long
+// division), modmul, and modexp (square-and-multiply with a small int exponent)
+
+import from std.mem.raw { alloc, release };
+import from jink.ext.libc { printf };
+
+pub fun bn_get(ptr a, int i) -> int { return __ptr_read_int(a, i); }
+pub fun bn_set(ptr a, int i, int v) -> void { __ptr_write_int(a, i, v); }
+
+pub fun bn_zero(ptr a, int n) -> void {
+  int i = 0; while (i < n) { bn_set(a, i, 0); i = i + 1; }
+}
+
+pub fun bn_copy(ptr dst, ptr src, int n) -> void {
+  int i = 0; while (i < n) { bn_set(dst, i, bn_get(src, i)); i = i + 1; }
+}
+
+// Compare n-limb a, b: 1 if a > b, -1 if a < b, 0 if equal
+pub fun bn_cmp(ptr a, ptr b, int n) -> int {
+  int i = n - 1;
+  while (i >= 0) {
+    int ai = bn_get(a, i);
+    int bi = bn_get(b, i);
+    if (ai > bi) { return 1; }
+    if (ai < bi) { return 0 - 1; }
+    i = i - 1;
+  }
+  return 0;
+}
+
+// out = a - b (n limbs), assuming a >= b
+pub fun bn_sub(ptr a, ptr b, ptr out, int n) -> void {
+  int borrow = 0;
+  int i = 0;
+  while (i < n) {
+    int t = bn_get(a, i) - bn_get(b, i) - borrow;
+    if (t < 0) { t = t + 65536; borrow = 1; } else { borrow = 0; }
+    bn_set(out, i, t);
+    i = i + 1;
+  }
+}
+
+// out = a * b. a has alen limbs, b has blen; out must hold alen+blen limbs
+fun bn_mul(ptr a, int alen, ptr b, int blen, ptr out) -> void {
+  bn_zero(out, alen + blen);
+  int i = 0;
+  while (i < alen) {
+    int ai = bn_get(a, i);
+    int carry = 0;
+    int j = 0;
+    while (j < blen) {
+      int t = bn_get(out, i + j) + ai * bn_get(b, j) + carry;
+      bn_set(out, i + j, t & 65535);
+      carry = t >> 16;
+      j = j + 1;
+    }
+    int k = i + blen;
+    while (carry != 0) {
+      int t = bn_get(out, k) + carry;
+      bn_set(out, k, t & 65535);
+      carry = t >> 16;
+      k = k + 1;
+    }
+    i = i + 1;
+  }
+}
+
+// Shift an n-limb value left by one bit, in place
+fun bn_shl1(ptr a, int n) -> void {
+  int carry = 0;
+  int i = 0;
+  while (i < n) {
+    int v = (bn_get(a, i) << 1) | carry;
+    bn_set(a, i, v & 65535);
+    carry = v >> 16;
+    i = i + 1;
+  }
+}
+
+// out = x mod m. x has xlen limbs, m has mlen; out holds mlen limbs
+// Bit-by-bit long division (MSB first)
+pub fun bn_mod(ptr x, int xlen, ptr m, int mlen, ptr out) -> void {
+  int rlen = mlen + 1;
+  ptr r = alloc(rlen * 8);
+  bn_zero(r, rlen);
+  ptr me = alloc(rlen * 8); // m zero-extended to rlen limbs
+  bn_copy(me, m, mlen);
+  bn_set(me, mlen, 0);
+
+  int bit = xlen * 16 - 1;
+  while (bit >= 0) {
+    bn_shl1(r, rlen);
+    int limb = bit >> 4;
+    int pos = bit & 15;
+    int b = (bn_get(x, limb) >> pos) & 1;
+    bn_set(r, 0, bn_get(r, 0) | b);
+    if (bn_cmp(r, me, rlen) >= 0) {
+      bn_sub(r, me, r, rlen);
+    }
+    bit = bit - 1;
+  }
+
+  bn_copy(out, r, mlen);
+  release(r);
+  release(me);
+}
+
+// out = (a * b) mod m, all operands mlen limbs
+pub fun bn_modmul(ptr a, ptr b, ptr m, int mlen, ptr out) -> void {
+  ptr prod = alloc(2 * mlen * 8);
+  bn_mul(a, mlen, b, mlen, prod);
+  bn_mod(prod, 2 * mlen, m, mlen, out);
+  release(prod);
+}
+
+// out = (a + b) mod m, all n-limb (a, b < m)
+// Carries via an (n+1)-limb temp
+pub fun bn_modadd(ptr a, ptr b, ptr m, int n, ptr out) -> void {
+  int nn = n + 1;
+  ptr sum = alloc(nn * 8);
+  ptr me = alloc(nn * 8);
+  int carry = 0;
+  int i = 0;
+  while (i < n) {
+    int t = bn_get(a, i) + bn_get(b, i) + carry;
+    bn_set(sum, i, t & 65535);
+    carry = t >> 16;
+    i = i + 1;
+  }
+  bn_set(sum, n, carry);
+  bn_copy(me, m, n);
+  bn_set(me, n, 0);
+  if (bn_cmp(sum, me, nn) >= 0) {
+    bn_sub(sum, me, sum, nn);
+  }
+  bn_copy(out, sum, n);
+  release(sum);
+  release(me);
+}
+
+// out = (a - b) mod m, all n-limb (a, b < m)
+pub fun bn_modsub(ptr a, ptr b, ptr m, int n, ptr out) -> void {
+  if (bn_cmp(a, b, n) >= 0) {
+    bn_sub(a, b, out, n);
+  } else {
+    ptr t = alloc(n * 8);
+    bn_sub(b, a, t, n);   // t = b - a
+    bn_sub(m, t, out, n); // out = m - (b - a) = a - b + m
+    release(t);
+  }
+}
+
+// out = base^e mod m, e an elen-limb bignum. base must be < m
+pub fun bn_modexp(ptr base, ptr e, int elen, ptr m, int mlen, ptr out) -> void {
+  ptr result = alloc(mlen * 8);
+  bn_zero(result, mlen);
+  bn_set(result, 0, 1);
+  ptr tmp = alloc(mlen * 8);
+  int bit = elen * 16 - 1;
+  while (bit >= 0) {
+    int limb = bn_get(e, bit >> 4);
+    int eb = (limb >> (bit & 15)) & 1;
+    bn_modmul(result, result, m, mlen, tmp);
+    bn_copy(result, tmp, mlen);
+    if (eb == 1) {
+      bn_modmul(result, base, m, mlen, tmp);
+      bn_copy(result, tmp, mlen);
+    }
+    bit = bit - 1;
+  }
+  bn_copy(out, result, mlen);
+  release(result);
+  release(tmp);
+}
+
+// out = base^e mod m, with a small integer exponent e. base must be < m
+pub fun bn_modexp_int(ptr base, int e, ptr m, int mlen, ptr out) -> void {
+  ptr result = alloc(mlen * 8);
+  bn_zero(result, mlen);
+  bn_set(result, 0, 1);
+  ptr tmp = alloc(mlen * 8);
+
+  // Highest set bit of e
+  int top = 0;
+  int ee = e;
+  while (ee > 0) { top = top + 1; ee = ee >> 1; }
+
+  int i = top - 1;
+  while (i >= 0) {
+    bn_modmul(result, result, m, mlen, tmp);
+    bn_copy(result, tmp, mlen);
+    if (((e >> i) & 1) == 1) {
+      bn_modmul(result, base, m, mlen, tmp);
+      bn_copy(result, tmp, mlen);
+    }
+    i = i - 1;
+  }
+
+  bn_copy(out, result, mlen);
+  release(result);
+  release(tmp);
+}
+
+// Load a big-endian byte string into an outlimbs-limb bignum (16-bit limbs)
+pub fun bn_from_bytes_be(ptr bytes, int bytelen, ptr out, int outlimbs) -> void {
+  bn_zero(out, outlimbs);
+  int k = 0; // little-endian byte index
+  while (k < bytelen) {
+    int byteval = __ptr_read_byte(bytes, bytelen - 1 - k);
+    int limb = k >> 1;
+    if ((k & 1) == 0) {
+      bn_set(out, limb, bn_get(out, limb) | byteval);
+    } else {
+      bn_set(out, limb, bn_get(out, limb) | (byteval << 8));
+    }
+    k = k + 1;
+  }
+}
+
+// Build an mlen-limb bignum from a small (<= 32-bit) integer
+pub fun bn_from_int(ptr a, int n, int v) -> void {
+  bn_zero(a, n);
+  bn_set(a, 0, v & 65535);
+  if (n > 1) { bn_set(a, 1, (v >> 16) & 65535); }
+}
+
+// Print an n-limb bignum as a decimal-free hex dump (most-significant limb first)
+pub fun bn_print(ptr a, int n) -> void {
+  int i = n - 1;
+  while (i >= 0) { printf("%04x", bn_get(a, i)); i = i - 1; }
+  printf("\n");
+}

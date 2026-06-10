@@ -1,0 +1,41 @@
+// Current UTC wall-clock time in the 14-char "YYYYMMDDHHMMSS" form that
+// std.crypto.x509_chain uses to compare certificate validity windows
+//
+// Windows-only (GetSystemTime) - Unix variant will use clock_gettime/gmtime
+
+import from std.mem.raw { alloc, zero, release };
+import from jink.ext.kernel32 { GetSystemTime };
+
+// Read a 16-bit little-endian WORD at byte offset off
+fun u16le(ptr p, int off) -> int {
+  int b0 = __ptr_read_byte(p, off);
+  int b1 = __ptr_read_byte(p, off + 1);
+  return b0 | (b1 << 8);
+}
+
+// Write v (0..99) as two zero-padded ASCII digits at out[pos]
+fun write2(ptr out, int pos, int v) -> void {
+  __ptr_write_byte(out, pos, 48 + (v / 10));
+  __ptr_write_byte(out, pos + 1, 48 + (v % 10));
+}
+
+// Fill out (>= 14 bytes) with the current UTC time as YYYYMMDDHHMMSS
+pub fun now_utc(ptr out) -> void {
+  ptr st = alloc(16);
+  zero(st, 16);
+  GetSystemTime(st);
+  int year = u16le(st, 0);
+  int month = u16le(st, 2);
+  int day = u16le(st, 6);
+  int hour = u16le(st, 8);
+  int minute = u16le(st, 10);
+  int second = u16le(st, 12);
+  write2(out, 0, year / 100); // century
+  write2(out, 2, year % 100); // year-of-century
+  write2(out, 4, month);
+  write2(out, 6, day);
+  write2(out, 8, hour);
+  write2(out, 10, minute);
+  write2(out, 12, second);
+  release(st);
+}

@@ -1,0 +1,7 @@
+// Windows kernel32 bindings - kernel32 is linked by default, so no extra -l flag
+
+// GetSystemTime fills a SYSTEMTIME (16 bytes of little-endian WORDs) with the
+// current UTC wall-clock time:
+//   off 0 wYear, 2 wMonth, 4 wDayOfWeek, 6 wDay,
+//   off 8 wHour, 10 wMinute, 12 wSecond, 14 wMilliseconds
+pub extern("C") GetSystemTime(ptr systime) -> void;

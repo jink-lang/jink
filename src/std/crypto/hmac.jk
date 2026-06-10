@@ -1,0 +1,66 @@
+// HMAC-SHA256 (RFC 2104) - builds on std.crypto.sha256
+//
+// HMAC(K, m) = H( (K0 ^ opad) || H( (K0 ^ ipad) || m ) )
+// where K0 is K padded/hashed to the 64-byte block size
+//
+// NOTE: leaks the small per-hash IntArrays/buffers (no GC yet); fine for now
+
+import from std.array { IntArray };
+import from std.mem.raw { alloc, zero, release };
+import from std.crypto.sha256 { sha256, sha256_to_bytes };
+
+// Compute HMAC-SHA256 of msg under key
+// Writes 32 bytes to out
+pub fun hmac_sha256(ptr key, int keylen, ptr msg, int msglen, ptr out) -> void {
+  // K0: key reduced (if long) and zero-padded to the 64-byte block size
+  ptr k0 = alloc(64);
+  zero(k0, 64);
+  int i = 0;
+  if (keylen > 64) {
+    let kh = sha256(key, keylen);
+    sha256_to_bytes(kh, k0); // 32 bytes, remaining 32 stay zero
+  } else {
+    while (i < keylen) {
+      __ptr_write_byte(k0, i, __ptr_read_byte(key, i));
+      i = i + 1;
+    }
+  }
+
+  // inner = SHA256( (K0 ^ 0x36) || msg )
+  ptr inner_in = alloc(64 + msglen);
+  i = 0;
+  while (i < 64) {
+    int kb = __ptr_read_byte(k0, i); // bind to int so `^` sees Integer operands
+    __ptr_write_byte(inner_in, i, kb ^ 0x36);
+    i = i + 1;
+  }
+  i = 0;
+  while (i < msglen) {
+    __ptr_write_byte(inner_in, 64 + i, __ptr_read_byte(msg, i));
+    i = i + 1;
+  }
+  let inner = sha256(inner_in, 64 + msglen);
+  ptr inner_bytes = alloc(32);
+  sha256_to_bytes(inner, inner_bytes);
+
+  // out = SHA256( (K0 ^ 0x5c) || inner )
+  ptr outer_in = alloc(96);
+  i = 0;
+  while (i < 64) {
+    int kb = __ptr_read_byte(k0, i);
+    __ptr_write_byte(outer_in, i, kb ^ 0x5c);
+    i = i + 1;
+  }
+  i = 0;
+  while (i < 32) {
+    __ptr_write_byte(outer_in, 64 + i, __ptr_read_byte(inner_bytes, i));
+    i = i + 1;
+  }
+  let result = sha256(outer_in, 96);
+  sha256_to_bytes(result, out);
+
+  release(k0);
+  release(inner_in);
+  release(inner_bytes);
+  release(outer_in);
+}

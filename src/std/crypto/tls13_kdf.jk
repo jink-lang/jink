@@ -1,0 +1,35 @@
+// TLS 1.3 key-schedule KDF (RFC 8446 section 7.1)
+//
+// The deterministic heart of the handshake: HKDF-Expand-Label and Derive-Secret,
+// from which all traffic secrets/keys/ivs and the Finished keys are derived. Pure
+// crypto (no networking), so it's vector-testable on its own. The record/protocol
+// state machine that consumes these will live in std.net.tls
+
+import from std.mem.buf { ByteBuf };
+import from std.crypto.hkdf { hkdf_expand };
+import from jink.ext.libc { strlen };
+
+// HKDF-Expand-Label(secret, label, context, length)
+// HkdfLabel = { uint16 length; opaque label<7..255> = "tls13 "+label; opaque context }
+pub fun hkdf_expand_label(ptr secret, int secretlen, string label, ptr context, int ctxlen, ptr out, int outlen) -> void {
+  int lablen = strlen(label);
+  ByteBuf b = ByteBuf();
+  b.push((outlen >> 8) & 255);  // length, big-endian
+  b.push(outlen & 255);
+  b.push(6 + lablen);           // length of "tls13 " + label
+  b.push_str("tls13 ");
+  b.push_str(label);
+  b.push(ctxlen);               // context length
+  int i = 0;
+  while (i < ctxlen) {
+    b.push(__ptr_read_byte(context, i));
+    i = i + 1;
+  }
+  hkdf_expand(secret, secretlen, b.raw(), b.size(), out, outlen);
+}
+
+// Derive-Secret(secret, label, transcript-hash). For SHA-256 the secret and the
+// transcript hash are both 32 bytes, and the output is 32 bytes
+pub fun derive_secret(ptr secret, string label, ptr thash, ptr out) -> void {
+  hkdf_expand_label(secret, 32, label, thash, 32, out, 32);
+}

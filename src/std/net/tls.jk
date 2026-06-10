@@ -1,0 +1,533 @@
+// Minimal TLS 1.3 client (RFC 8446). Ties together X25519, the
+// HKDF key schedule, the ChaCha20-Poly1305 record layer, and cert parsing into a
+// real handshake + encrypted GET. Cipher suite: TLS_CHACHA20_POLY1305_SHA256
+//
+// Completes the handshake (verifies the server Finished AND CertificateVerify --
+// the server proving it holds the leaf private key over the transcript), then
+// performs full trust validation: every sent cert is signed by the next (RSA /
+// ECDSA P-256 / P-384), the hostname matches the leaf SAN, every cert is within
+// its validity window (system UTC clock), and the top sent cert chains to a root
+// in the Windows OS trust store. Only then does it exchange application data
+// CertificateVerify here requires an ECDSA-P256 leaf
+
+import from std.mem.raw { alloc, release };
+import from std.mem.buf { ByteBuf };
+import from std.net.socket { TcpStream };
+import from std.net.tls_record { tls_protect, tls_unprotect };
+import from std.crypto.sha256 { sha256, sha256_to_bytes };
+import from std.crypto.hmac { hmac_sha256 };
+import from std.crypto.hkdf { hkdf_extract };
+import from std.crypto.tls13_kdf { hkdf_expand_label, derive_secret };
+import from std.crypto.x25519 { x25519, x25519_base };
+import from std.crypto.asn1 { der_content, der_len, der_next };
+import from std.crypto.ecdsa_p256 { ecdsa_p256_verify };
+import from std.crypto.x509 { x509_ec_point, x509_verify_sig, x509_spki_pos };
+import from std.crypto.x509_chain { check_host, valid_at };
+import from std.crypto.rootstore { anchor_to_root_store, dn_chain_ok };
+import from std.sys.random { rand_bytes };
+import from std.sys.time { now_utc };
+import from jink.ext.libc { printf, strlen };
+
+// --- small byte-buffer helpers ---------------------------------------------
+
+fun push_u16(ByteBuf b, int v) -> void { b.push((v >> 8) & 255); b.push(v & 255); }
+fun push_u24(ByteBuf b, int v) -> void { b.push((v >> 16) & 255); b.push((v >> 8) & 255); b.push(v & 255); }
+
+fun append(ByteBuf dst, ByteBuf src) -> void {
+  int n = src.size();
+  int i = 0;
+  while (i < n) { dst.push(src.get(i)); i = i + 1; }
+}
+fun append_raw(ByteBuf dst, ptr p, int n) -> void {
+  int i = 0;
+  while (i < n) { dst.push(__ptr_read_byte(p, i)); i = i + 1; }
+}
+
+// Extract a DER INTEGER into a right-aligned 32-byte buffer (for ECDSA r / s)
+fun der_int_32(ptr buf, int int_pos, ptr out) -> void {
+  int off = der_content(buf, int_pos);
+  int len = der_len(buf, int_pos);
+  int fb = __ptr_read_byte(buf, off);
+  if (fb == 0) { off = off + 1; len = len - 1; }
+  int i = 0;
+  while (i < 32) { __ptr_write_byte(out, i, 0); i = i + 1; }
+  i = 0;
+  while (i < len) { __ptr_write_byte(out, 32 - len + i, __ptr_read_byte(buf, off + i)); i = i + 1; }
+}
+
+// --- socket framing ---------------------------------------------------------
+
+// Read exactly n bytes into buf. Returns 1 on success, 0 on close/error
+fun read_full(TcpStream conn, ptr buf, int n) -> int {
+  ptr tmp = alloc(n);
+  int got = 0;
+  int ok = 1;
+  int run = 1;
+  while (run == 1) {
+    if (got >= n) { run = 0; } else {
+      int r = conn.read(tmp, n - got);
+      if (r == 0) { ok = 0; run = 0; }
+      elseif (r > n - got) { ok = 0; run = 0; } // recv error sentinel
+      else {
+        int i = 0;
+        while (i < r) { __ptr_write_byte(buf, got + i, __ptr_read_byte(tmp, i)); i = i + 1; }
+        got = got + r;
+      }
+    }
+  }
+  release(tmp);
+  return ok;
+}
+
+// Read one TLS record: 5-byte header into hdr, payload into payload
+// Returns payload length, or -1 on error
+fun read_record(TcpStream conn, ptr hdr, ptr payload) -> int {
+  if (read_full(conn, hdr, 5) == 0) { return 0 - 1; }
+  int h3 = __ptr_read_byte(hdr, 3);
+  int h4 = __ptr_read_byte(hdr, 4);
+  int len = (h3 << 8) | h4;
+  if (read_full(conn, payload, len) == 0) { return 0 - 1; }
+  return len;
+}
+
+// --- key-schedule helpers ---------------------------------------------------
+
+fun traffic_keys(ptr secret, ptr key, ptr iv) -> void {
+  ptr dummy = alloc(1);
+  hkdf_expand_label(secret, 32, "key", dummy, 0, key, 32);
+  hkdf_expand_label(secret, 32, "iv", dummy, 0, iv, 12);
+  release(dummy);
+}
+fun finished_key(ptr secret, ptr out) -> void {
+  ptr dummy = alloc(1);
+  hkdf_expand_label(secret, 32, "finished", dummy, 0, out, 32);
+  release(dummy);
+}
+// SHA-256 of a ByteBuf's current contents into out (32 bytes)
+fun buf_hash(ByteBuf b, ptr out) -> void {
+  let d = sha256(b.raw(), b.size());
+  sha256_to_bytes(d, out);
+}
+
+// --- handshake --------------------------------------------------------------
+
+// Perform a TLS 1.3 handshake to host:443, fully validate the server certificate
+// against verify_name, then GET path and print the response. Returns 1 on a
+// completed + fully validated handshake + response, 0 on any failure
+//
+// verify_name is normally the same as host; passing a name the cert does not
+// cover lets you prove the hostname binding rejects an otherwise-valid, trusted,
+// live connection (host is still used for DNS, the TCP connect, and SNI)
+pub fun tls_get_verify(string host, string verify_name, string path) -> int {
+  TcpStream conn = TcpStream();
+  if (conn.open(host, "443") == 0) { printf("[tls] connect failed\n"); return 0; }
+
+  // Ephemeral X25519 key pair
+  ptr priv = alloc(32);
+  rand_bytes(priv, 32);
+  ptr pubk = alloc(32);
+  x25519_base(pubk, priv);
+
+  ptr client_random = alloc(32);
+  rand_bytes(client_random, 32);
+  ptr session_id = alloc(32);
+  rand_bytes(session_id, 32);
+
+  ByteBuf tr = ByteBuf(); // running handshake transcript
+
+  // ---- ClientHello ----
+  ByteBuf ch = ByteBuf();
+  ch.push(3); ch.push(3);
+  append_raw(ch, client_random, 32);
+  ch.push(32); append_raw(ch, session_id, 32);
+  push_u16(ch, 2); ch.push(0x13); ch.push(0x03); // cipher_suites = [TLS_CHACHA20_POLY1305_SHA256]
+  ch.push(1); ch.push(0);                        // compression = null
+
+  ByteBuf ext = ByteBuf();
+  // server_name
+  int hlen = strlen(host);
+  push_u16(ext, 0); push_u16(ext, 5 + hlen);
+  push_u16(ext, 3 + hlen); ext.push(0); push_u16(ext, hlen); ext.push_str(host);
+  // supported_groups = x25519
+  push_u16(ext, 10); push_u16(ext, 4); push_u16(ext, 2); ext.push(0x00); ext.push(0x1d);
+  // signature_algorithms = ecdsa_secp256r1_sha256, rsa_pss_rsae_sha256, rsa_pkcs1_sha256
+  push_u16(ext, 13); push_u16(ext, 8); push_u16(ext, 6);
+  ext.push(0x04); ext.push(0x03); ext.push(0x08); ext.push(0x04); ext.push(0x04); ext.push(0x01);
+  // supported_versions = TLS 1.3
+  push_u16(ext, 43); push_u16(ext, 3); ext.push(2); ext.push(0x03); ext.push(0x04);
+  // key_share = x25519 + pub
+  push_u16(ext, 51); push_u16(ext, 38); push_u16(ext, 36);
+  ext.push(0x00); ext.push(0x1d); push_u16(ext, 32); append_raw(ext, pubk, 32);
+
+  push_u16(ch, ext.size());
+  append(ch, ext);
+
+  ByteBuf hs = ByteBuf();
+  hs.push(1); push_u24(hs, ch.size()); append(hs, ch);
+  append(tr, hs);  // transcript += ClientHello
+
+  ByteBuf rec = ByteBuf();
+  rec.push(22); rec.push(3); rec.push(1); push_u16(rec, hs.size()); append(rec, hs);
+  conn.write(rec.raw(), rec.size());
+  printf("[tls] sent ClientHello (%d bytes)\n", rec.size());
+
+  // ---- ServerHello ----
+  ptr hdr = alloc(8);
+  ptr payload = alloc(20000);
+  int plen = read_record(conn, hdr, payload);
+  int rtype = __ptr_read_byte(hdr, 0);
+  if (plen < 0) { printf("[tls] no ServerHello\n"); return 0; }
+  if (rtype == 21) { printf("[tls] alert during hello\n"); return 0; }
+  if (rtype != 22) { printf("[tls] expected handshake, got type %d\n", rtype); return 0; }
+
+  // transcript += ServerHello (the record payload is the handshake message)
+  append_raw(tr, payload, plen);
+
+  // Find the server key_share (extension 51): x25519 pubkey (32 bytes)
+  // ServerHello layout: 2(version)+32(random)+1+sidlen+2(cipher)+1(comp)+2(extlen)+exts
+  // payload[0..4] is the handshake header (type 2 + u24 len); body starts at 4
+  int b = 4;      // start of ServerHello body
+  b = b + 2 + 32; // version + random
+  int sid = __ptr_read_byte(payload, b); b = b + 1 + sid;  // session id echo
+  b = b + 2 + 1;  // cipher suite + compression
+  int ext_total_hi = __ptr_read_byte(payload, b);
+  int ext_total_lo = __ptr_read_byte(payload, b + 1);
+  int ext_total = (ext_total_hi << 8) | ext_total_lo;
+  b = b + 2;
+  int ext_end = b + ext_total;
+  ptr server_pub = alloc(32);
+  int found_ks = 0;
+  while (b < ext_end) {
+    int e0 = __ptr_read_byte(payload, b);
+    int e1 = __ptr_read_byte(payload, b + 1);
+    int etype = (e0 << 8) | e1;
+    int l0 = __ptr_read_byte(payload, b + 2);
+    int l1 = __ptr_read_byte(payload, b + 3);
+    int elen = (l0 << 8) | l1;
+    if (etype == 51) {
+      // key_share: group(2) + keylen(2) + key
+      int j = 0;
+      while (j < 32) { __ptr_write_byte(server_pub, j, __ptr_read_byte(payload, b + 4 + 4 + j)); j = j + 1; }
+      found_ks = 1;
+    }
+    b = b + 4 + elen;
+  }
+  if (found_ks == 0) { printf("[tls] no server key_share\n"); return 0; }
+  printf("[tls] got ServerHello\n");
+
+  // ---- key schedule (handshake) ----
+  ptr shared = alloc(32);
+  x25519(shared, priv, server_pub);
+
+  ptr zeros = alloc(32);
+  int z = 0; while (z < 32) { __ptr_write_byte(zeros, z, 0); z = z + 1; }
+  ptr emptyhash = alloc(32);
+  let eh = sha256(zeros, 0); // SHA256("")
+  sha256_to_bytes(eh, emptyhash);
+
+  ptr early = alloc(32);
+  hkdf_extract(zeros, 0, zeros, 32, early);
+  ptr derived1 = alloc(32);
+  derive_secret(early, "derived", emptyhash, derived1);
+  ptr hs_secret = alloc(32);
+  hkdf_extract(derived1, 32, shared, 32, hs_secret);
+
+  ptr th = alloc(32);
+  buf_hash(tr, th); // transcript hash CH||SH
+  ptr c_hs = alloc(32);
+  ptr s_hs = alloc(32);
+  derive_secret(hs_secret, "c hs traffic", th, c_hs);
+  derive_secret(hs_secret, "s hs traffic", th, s_hs);
+
+  ptr c_hs_key = alloc(32); ptr c_hs_iv = alloc(12);
+  ptr s_hs_key = alloc(32); ptr s_hs_iv = alloc(12);
+  traffic_keys(c_hs, c_hs_key, c_hs_iv);
+  traffic_keys(s_hs, s_hs_key, s_hs_iv);
+
+  // ---- read + decrypt the server flight ----
+  ByteBuf flight = ByteBuf();
+  int s_seq = 0;
+  ptr dec = alloc(20000);
+  ptr dtype = alloc(1);
+  int sfin_seen = 0;
+  int off = 0;
+  ptr fin_hash = alloc(32); // transcript hash up to (not incl) server Finished
+  ptr cert_msg = alloc(20000); int cert_total = 0; // captured Certificate message
+  ptr cv_msg = alloc(2048);    int cv_total = 0;   // captured CertificateVerify message
+  ptr cv_hash = alloc(32);  // transcript hash up to (not incl) CertificateVerify
+
+  while (sfin_seen == 0) {
+    int rlen = read_record(conn, hdr, payload);
+    if (rlen < 0) { printf("[tls] flight read failed\n"); return 0; }
+    int rt = __ptr_read_byte(hdr, 0);
+    if (rt == 20) {
+      // ChangeCipherSpec: ignore
+    } elseif (rt == 23) {
+      int clen = tls_unprotect(s_hs_key, s_hs_iv, s_seq, hdr, payload, rlen, dec, dtype);
+      s_seq = s_seq + 1;
+      if (clen < 0) { printf("[tls] flight decrypt failed (seq %d)\n", s_seq - 1); return 0; }
+      append_raw(flight, dec, clen);
+      // parse complete handshake messages from flight
+      int parsing = 1;
+      while (parsing == 1) {
+        if (off + 4 > flight.size()) { parsing = 0; } else {
+          int t = flight.get(off);
+          int m1 = flight.get(off + 1);
+          int m2 = flight.get(off + 2);
+          int m3 = flight.get(off + 3);
+          int mlen = (m1 << 16) | (m2 << 8) | m3;
+          if (off + 4 + mlen > flight.size()) { parsing = 0; } else {
+            if (t == 20) {
+              // server Finished: hash transcript BEFORE appending it
+              buf_hash(tr, fin_hash);
+            }
+            if (t == 15) {
+              // CertificateVerify: transcript hash is over CH..Certificate
+              buf_hash(tr, cv_hash);
+              cv_total = 4 + mlen;
+              int ci = 0;
+              while (ci < cv_total) { __ptr_write_byte(cv_msg, ci, flight.get(off + ci)); ci = ci + 1; }
+            }
+            if (t == 11) {
+              cert_total = 4 + mlen;
+              int ci = 0;
+              while (ci < cert_total) { __ptr_write_byte(cert_msg, ci, flight.get(off + ci)); ci = ci + 1; }
+            }
+            // append this message (header+body) to transcript
+            int i = 0;
+            while (i < 4 + mlen) { tr.push(flight.get(off + i)); i = i + 1; }
+            if (t == 20) { sfin_seen = 1; }
+            off = off + 4 + mlen;
+          }
+        }
+      }
+    } else {
+      printf("[tls] unexpected record type %d in flight\n", rt);
+      return 0;
+    }
+  }
+  printf("[tls] received server flight\n");
+
+  // ---- verify server Finished ----
+  ptr s_fin_key = alloc(32);
+  finished_key(s_hs, s_fin_key);
+  ptr expected = alloc(32);
+  hmac_sha256(s_fin_key, 32, fin_hash, 32, expected);
+  // the server Finished body is the last 32 bytes appended to tr
+  ptr got_fin = alloc(32);
+  int trn = tr.size();
+  int gi = 0;
+  while (gi < 32) { __ptr_write_byte(got_fin, gi, tr.get(trn - 32 + gi)); gi = gi + 1; }
+  int fin_ok = 1;
+  gi = 0;
+  while (gi < 32) {
+    int a = __ptr_read_byte(expected, gi);
+    int bb = __ptr_read_byte(got_fin, gi);
+    if (a != bb) { fin_ok = 0; }
+    gi = gi + 1;
+  }
+  if (fin_ok == 0) { printf("[tls] server Finished MISMATCH\n"); return 0; }
+  printf("[tls] server Finished verified\n");
+
+  // ---- CertificateVerify: the server signs the transcript with its leaf key ----
+  // Extract the leaf certificate DER from the Certificate message
+  int cp = 4;         // skip handshake header
+  int ctxl = __ptr_read_byte(cert_msg, cp);
+  cp = cp + 1 + ctxl; // certificate_request_context
+  cp = cp + 3;        // certificate_list length (u24)
+  int cl0 = __ptr_read_byte(cert_msg, cp);
+  int cl1 = __ptr_read_byte(cert_msg, cp + 1);
+  int cl2 = __ptr_read_byte(cert_msg, cp + 2);
+  int leaf_len = (cl0 << 16) | (cl1 << 8) | cl2;
+  cp = cp + 3;
+  ptr leaf = alloc(leaf_len);
+  int li = 0;
+  while (li < leaf_len) { __ptr_write_byte(leaf, li, __ptr_read_byte(cert_msg, cp + li)); li = li + 1; }
+
+  int cva = __ptr_read_byte(cv_msg, 4);
+  int cvb = __ptr_read_byte(cv_msg, 5);
+  int cv_alg = (cva << 8) | cvb;
+  if (cv_alg != 0x0403) {
+    printf("[tls] CertificateVerify alg %d unsupported (need ecdsa_secp256r1_sha256)\n", cv_alg);
+    return 0;
+  }
+
+  ptr qx = alloc(32); ptr qy = alloc(32);
+  x509_ec_point(leaf, qx, qy);
+
+  // signed content = 0x20*64 || "TLS 1.3, server CertificateVerify" || 0x00 || cv_hash
+  ByteBuf content = ByteBuf();
+  int sp = 0;
+  while (sp < 64) { content.push(0x20); sp = sp + 1; }
+  content.push_str("TLS 1.3, server CertificateVerify");
+  content.push(0);
+  append_raw(content, cv_hash, 32);
+  ptr sighash = alloc(32);
+  let cd = sha256(content.raw(), content.size());
+  sha256_to_bytes(cd, sighash);
+
+  int sigseq = 8; // DER SEQUENCE { r, s } in cv_msg body
+  int r_pos = der_content(cv_msg, sigseq);
+  int s_pos = der_next(cv_msg, r_pos);
+  ptr cvr = alloc(32); der_int_32(cv_msg, r_pos, cvr);
+  ptr cvs = alloc(32); der_int_32(cv_msg, s_pos, cvs);
+  int cvok = ecdsa_p256_verify(qx, qy, cvr, cvs, sighash);
+  if (cvok == 0) { printf("[tls] CertificateVerify FAILED\n"); return 0; }
+  printf("[tls] CertificateVerify ok (server proved possession of the leaf key)\n");
+
+  // ---- chain: each cert signed by the next, hostname, dates, then anchor ----
+  // (RSA / ECDSA P-256 / ECDSA P-384 links supported)
+  ptr chain = alloc(128); // up to 16 cert pointers
+  int nchain = 0;
+  int q = 4;
+  int qctx = __ptr_read_byte(cert_msg, q);
+  q = q + 1 + qctx;       // certificate_request_context
+  q = q + 3;              // certificate_list length (u24)
+  int parsing2 = 1;
+  while (parsing2 == 1) {
+    if (q + 3 > cert_total) { parsing2 = 0; } else {
+      int e0 = __ptr_read_byte(cert_msg, q);
+      int e1 = __ptr_read_byte(cert_msg, q + 1);
+      int e2 = __ptr_read_byte(cert_msg, q + 2);
+      int dlen = (e0 << 16) | (e1 << 8) | e2;
+      q = q + 3;
+      ptr c = alloc(dlen);
+      int ci = 0;
+      while (ci < dlen) { __ptr_write_byte(c, ci, __ptr_read_byte(cert_msg, q + ci)); ci = ci + 1; }
+      __ptr_write_ptr(chain, nchain, c);
+      nchain = nchain + 1;
+      q = q + dlen;
+      int x0 = __ptr_read_byte(cert_msg, q);
+      int x1 = __ptr_read_byte(cert_msg, q + 1);
+      int xlen = (x0 << 8) | x1;
+      q = q + 2 + xlen; // skip per-entry extensions
+      if (q >= cert_total) { parsing2 = 0; }
+    }
+  }
+
+  int ix = 0;
+  while (ix < nchain - 1) {
+    ptr ch_c = __ptr_read_ptr(chain, ix);
+    ptr ch_p = __ptr_read_ptr(chain, ix + 1);
+    if (x509_verify_sig(ch_c, ch_p, x509_spki_pos(ch_p)) == 0) {
+      printf("[tls] chain link %d FAILED\n", ix);
+      return 0;
+    }
+    ix = ix + 1;
+  }
+  printf("[tls] chain links verified (%d certs sent)\n", nchain);
+
+  // ---- the names must chain too: each cert's issuer DN == next's subject DN ----
+  int ni = 0;
+  while (ni < nchain - 1) {
+    ptr nc = __ptr_read_ptr(chain, ni);
+    ptr np = __ptr_read_ptr(chain, ni + 1);
+    if (dn_chain_ok(nc, np) == 0) { printf("[tls] name chain breaks at link %d\n", ni); return 0; }
+    ni = ni + 1;
+  }
+
+  // ---- validity dates: every sent cert must be current (system UTC clock) ----
+  ptr nowbuf = alloc(14);
+  now_utc(nowbuf);
+  int di = 0;
+  while (di < nchain) {
+    ptr cc = __ptr_read_ptr(chain, di);
+    if (valid_at(cc, nowbuf) == 0) { printf("[tls] cert %d outside its validity window\n", di); return 0; }
+    di = di + 1;
+  }
+  printf("[tls] all certs within validity window\n");
+
+  // ---- trust anchor: top sent cert must chain to a root in the OS store ----
+  ptr topc = __ptr_read_ptr(chain, nchain - 1);
+  if (anchor_to_root_store(topc) == 0) {
+    printf("[tls] top cert NOT anchored to a trusted root\n");
+    return 0;
+  }
+  printf("[tls] anchored to a trusted root in the Windows store\n");
+
+  // ---- hostname: the (now proven-trusted) leaf must be issued for this name ----
+  ptr leaf0 = __ptr_read_ptr(chain, 0);
+  if (check_host(leaf0, verify_name) == 0) {
+    printf("[tls] REJECT: trusted cert is not valid for '%s'\n", verify_name);
+    return 0;
+  }
+  printf("[tls] hostname '%s' matches leaf SAN\n", verify_name);
+
+  // ---- application keys (transcript through server Finished) ----
+  ptr derived2 = alloc(32);
+  derive_secret(hs_secret, "derived", emptyhash, derived2);
+  ptr master = alloc(32);
+  hkdf_extract(derived2, 32, zeros, 32, master);
+
+  ptr th2 = alloc(32);
+  buf_hash(tr, th2); // transcript hash CH..server Finished
+  ptr c_ap = alloc(32); ptr s_ap = alloc(32);
+  derive_secret(master, "c ap traffic", th2, c_ap);
+  derive_secret(master, "s ap traffic", th2, s_ap);
+  ptr c_ap_key = alloc(32); ptr c_ap_iv = alloc(12);
+  ptr s_ap_key = alloc(32); ptr s_ap_iv = alloc(12);
+  traffic_keys(c_ap, c_ap_key, c_ap_iv);
+  traffic_keys(s_ap, s_ap_key, s_ap_iv);
+
+  // ---- client Finished ----
+  ptr c_fin_key = alloc(32);
+  finished_key(c_hs, c_fin_key);
+  ptr cfh = alloc(32);
+  buf_hash(tr, cfh); // transcript through server Finished
+  ptr c_verify = alloc(32);
+  hmac_sha256(c_fin_key, 32, cfh, 32, c_verify);
+
+  ByteBuf cfin = ByteBuf();
+  cfin.push(20); push_u24(cfin, 32); append_raw(cfin, c_verify, 32);
+  ptr finrec = alloc(256);
+  int finlen = tls_protect(c_hs_key, c_hs_iv, 0, cfin.raw(), cfin.size(), 22, finrec);
+  conn.write(finrec, finlen);
+  printf("[tls] sent client Finished\n");
+
+  // ---- send the HTTP GET as application data ----
+  ByteBuf req = ByteBuf();
+  req.push_str("GET ");
+  req.push_str(path);
+  req.push_str(" HTTP/1.1\r\nHost: ");
+  req.push_str(host);
+  req.push_str("\r\nUser-Agent: jink/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n");
+  ptr appout = alloc(2048);
+  int applen = tls_protect(c_ap_key, c_ap_iv, 0, req.raw(), req.size(), 23, appout);
+  conn.write(appout, applen);
+  printf("[tls] sent GET, reading response...\n");
+
+  // ---- read + decrypt the response ----
+  int r_seq = 0;
+  int reading = 1;
+  while (reading == 1) {
+    int rlen = read_record(conn, hdr, payload);
+    if (rlen < 0) { reading = 0; } else {
+      int rt = __ptr_read_byte(hdr, 0);
+      if (rt == 23) {
+        int clen = tls_unprotect(s_ap_key, s_ap_iv, r_seq, hdr, payload, rlen, dec, dtype);
+        r_seq = r_seq + 1;
+        if (clen < 0) { printf("[tls] app decrypt failed\n"); reading = 0; } else {
+          int it = __ptr_read_byte(dtype, 0);
+          if (it == 23) {
+            int i = 0;
+            while (i < clen) { printf("%c", __ptr_read_byte(dec, i)); i = i + 1; }
+          } elseif (it == 21) {
+            printf("\n[tls] server closed (alert)\n");
+            reading = 0;
+          }
+          // it == 22 (NewSessionTicket): ignore
+        }
+      } elseif (rt == 21) {
+        reading = 0;
+      }
+    }
+  }
+  printf("\n[tls] done\n");
+  conn.close();
+  return 1;
+}
+
+// Convenience: validate the certificate against the same name we connected to.
+pub fun tls_get(string host, string path) -> int {
+  return tls_get_verify(host, host, path);
+}

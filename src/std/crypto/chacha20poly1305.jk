@@ -1,0 +1,77 @@
+// ChaCha20-Poly1305 AEAD (RFC 8439 section 2.8)
+//
+// seal: encrypt plaintext + authenticate (aad || ciphertext || lengths)
+// open: re-derive and constant-time-compare the tag, then decrypt on success
+// This is the TLS 1.3 record cipher (TLS_CHACHA20_POLY1305_SHA256)
+
+import from std.mem.raw { alloc, zero, release };
+import from std.crypto.chacha20 { chacha20_block, chacha20_xor };
+import from std.crypto.poly1305 { poly1305_mac };
+
+// Write a 64-bit little-endian length
+fun write_le64(ptr p, int off, int v) -> void {
+  int k = 0;
+  while (k < 8) {
+    __ptr_write_byte(p, off + k, (v >> (k * 8)) & 0xFF);
+    k = k + 1;
+  }
+}
+
+// Derive the one-time Poly1305 key and authenticate aad||ciphertext||lengths
+// Writes a 16-byte tag
+fun aead_tag(ptr key, ptr nonce, ptr aad, int aadlen, ptr ct, int ctlen, ptr tag) -> void {
+  // One-time key = first 32 bytes of the ChaCha20 keystream at counter 0
+  ptr block = alloc(64);
+  chacha20_block(key, 0, nonce, block);
+  ptr otk = alloc(32);
+  int i = 0;
+  while (i < 32) { __ptr_write_byte(otk, i, __ptr_read_byte(block, i)); i = i + 1; }
+
+  // mac_data = aad || pad16 || ciphertext || pad16 || le64(aadlen) || le64(ctlen)
+  int aadpad = (16 - (aadlen % 16)) % 16;
+  int ctpad = (16 - (ctlen % 16)) % 16;
+  int maclen = aadlen + aadpad + ctlen + ctpad + 16;
+  ptr mac_data = alloc(maclen);
+  zero(mac_data, maclen);
+
+  int pos = 0;
+  i = 0; while (i < aadlen) { __ptr_write_byte(mac_data, pos, __ptr_read_byte(aad, i)); pos = pos + 1; i = i + 1; }
+  pos = pos + aadpad;
+  i = 0; while (i < ctlen) { __ptr_write_byte(mac_data, pos, __ptr_read_byte(ct, i)); pos = pos + 1; i = i + 1; }
+  pos = pos + ctpad;
+  write_le64(mac_data, pos, aadlen); pos = pos + 8;
+  write_le64(mac_data, pos, ctlen); pos = pos + 8;
+
+  poly1305_mac(mac_data, maclen, otk, tag);
+
+  release(block);
+  release(otk);
+  release(mac_data);
+}
+
+// Encrypt ptlen bytes of pt to ct and write a 16-byte authentication tag
+pub fun aead_seal(ptr key, ptr nonce, ptr aad, int aadlen, ptr pt, int ptlen, ptr ct, ptr tag) -> void {
+  chacha20_xor(key, 1, nonce, pt, ptlen, ct);
+  aead_tag(key, nonce, aad, aadlen, ct, ptlen, tag);
+}
+
+// Verify tag over ct; on success decrypt into pt and return 1, else 0
+pub fun aead_open(ptr key, ptr nonce, ptr aad, int aadlen, ptr ct, int ctlen, ptr tag, ptr pt) -> int {
+  ptr expected = alloc(16);
+  aead_tag(key, nonce, aad, aadlen, ct, ctlen, expected);
+
+  // Constant-time tag comparison
+  int diff = 0;
+  int i = 0;
+  while (i < 16) {
+    int a = __ptr_read_byte(expected, i);
+    int b = __ptr_read_byte(tag, i);
+    diff = diff | (a ^ b);
+    i = i + 1;
+  }
+  release(expected);
+
+  if (diff != 0) { return 0; }
+  chacha20_xor(key, 1, nonce, ct, ctlen, pt);
+  return 1;
+}

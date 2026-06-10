@@ -1,0 +1,89 @@
+// ChaCha20 stream cipher (RFC 8439)
+//
+// Pure 32-bit add/xor/rotate on i64 lanes, masked with 0xFFFFFFFF for mod-2^32
+// State is 16 u32 words held in an IntArray
+//
+// NOTE: leaks the per-block IntArrays (no GC yet); fine for now
+
+import from std.array { IntArray };
+import from std.mem.raw { alloc, release };
+
+// 32-bit left rotate
+fun rotl(int x, int n) -> int {
+  return ((x << n) | (x >> (32 - n))) & 0xFFFFFFFF;
+}
+
+// Read 4 bytes little-endian as a u32
+fun u8to32le(ptr p, int o) -> int {
+  int b0 = __ptr_read_byte(p, o);
+  int b1 = __ptr_read_byte(p, o + 1);
+  int b2 = __ptr_read_byte(p, o + 2);
+  int b3 = __ptr_read_byte(p, o + 3);
+  return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & 0xFFFFFFFF;
+}
+
+// One ChaCha quarter-round on state words a,b,c,d (in place)
+fun qr(IntArray s, int a, int b, int c, int d) -> void {
+  int va = s.get(a); int vb = s.get(b); int vc = s.get(c); int vd = s.get(d);
+  va = (va + vb) & 0xFFFFFFFF; vd = vd ^ va; vd = rotl(vd, 16);
+  vc = (vc + vd) & 0xFFFFFFFF; vb = vb ^ vc; vb = rotl(vb, 12);
+  va = (va + vb) & 0xFFFFFFFF; vd = vd ^ va; vd = rotl(vd, 8);
+  vc = (vc + vd) & 0xFFFFFFFF; vb = vb ^ vc; vb = rotl(vb, 7);
+  s.set(a, va); s.set(b, vb); s.set(c, vc); s.set(d, vd);
+}
+
+// Produce one 64-byte keystream block for (key, counter, nonce) into out
+pub fun chacha20_block(ptr key, int counter, ptr nonce, ptr out) -> void {
+  IntArray s = IntArray();
+  s.push(0x61707865); s.push(0x3320646e); s.push(0x79622d32); s.push(0x6b206574);
+  int i = 0;
+  while (i < 8) { s.push(u8to32le(key, i * 4)); i = i + 1; }
+  s.push(counter & 0xFFFFFFFF);
+  s.push(u8to32le(nonce, 0)); s.push(u8to32le(nonce, 4)); s.push(u8to32le(nonce, 8));
+
+  // Working copy of the state
+  IntArray w = IntArray();
+  i = 0;
+  while (i < 16) { w.push(s.get(i)); i = i + 1; }
+
+  // 20 rounds = 10 * (4 column QRs + 4 diagonal QRs)
+  int round = 0;
+  while (round < 10) {
+    qr(w, 0, 4, 8, 12); qr(w, 1, 5, 9, 13); qr(w, 2, 6, 10, 14); qr(w, 3, 7, 11, 15);
+    qr(w, 0, 5, 10, 15); qr(w, 1, 6, 11, 12); qr(w, 2, 7, 8, 13); qr(w, 3, 4, 9, 14);
+    round = round + 1;
+  }
+
+  // out = (working + original), serialized little-endian
+  i = 0;
+  while (i < 16) {
+    int v = (w.get(i) + s.get(i)) & 0xFFFFFFFF;
+    __ptr_write_byte(out, i * 4,     v & 0xFF);
+    __ptr_write_byte(out, i * 4 + 1, (v >> 8) & 0xFF);
+    __ptr_write_byte(out, i * 4 + 2, (v >> 16) & 0xFF);
+    __ptr_write_byte(out, i * 4 + 3, (v >> 24) & 0xFF);
+    i = i + 1;
+  }
+}
+
+// Encrypt/decrypt len bytes of data into out (XOR with the keystream), starting at block counter
+pub fun chacha20_xor(ptr key, int counter, ptr nonce, ptr data, int len, ptr out) -> void {
+  ptr ks = alloc(64);
+  int off = 0;
+  int blk = 0;
+  while (off < len) {
+    chacha20_block(key, counter + blk, nonce, ks);
+    int n = 64;
+    if (64 > len - off) { n = len - off; }
+    int i = 0;
+    while (i < n) {
+      int d = __ptr_read_byte(data, off + i);
+      int k = __ptr_read_byte(ks, i);
+      __ptr_write_byte(out, off + i, (d ^ k) & 0xFF);
+      i = i + 1;
+    }
+    off = off + n;
+    blk = blk + 1;
+  }
+  release(ks);
+}

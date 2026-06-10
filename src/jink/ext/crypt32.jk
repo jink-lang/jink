@@ -1,0 +1,21 @@
+// Windows crypt32 bindings for reading the OS trust store. The "ROOT" system
+// store holds the root CA certificates the operating system trusts, the
+// trust anchor for TLS chain validation
+
+// CertOpenSystemStoreA(hProv, "ROOT") -> HCERTSTORE (null on failure)
+// hProv is an unused legacy provider handle here - pass 0
+pub extern("C") CertOpenSystemStoreA(int hProv, string subsystem) -> ptr;
+
+// Iterate the store: pass a null prev to start; returns the next CERT_CONTEXT* or
+// null at the end. The returned context is freed by the *next* enum call (and by
+// CertCloseStore), so read what you need from it before advancing
+pub extern("C") CertEnumCertificatesInStore(ptr store, ptr prev) -> ptr;
+
+// Targeted lookup. With findType = CERT_FIND_SUBJECT_NAME (0x20007) and pvFindPara
+// pointing at a CERT_NAME_BLOB { DWORD cbData; BYTE* pbData; }, returns the next
+// cert whose subject Name matches the blob (prev = null for the first match)
+// encType = X509_ASN_ENCODING | PKCS_7_ASN_ENCODING (0x10001)
+pub extern("C") CertFindCertificateInStore(ptr store, int encType, int findFlags, int findType, ptr findPara, ptr prev) -> ptr;
+
+// Release the store handle (flags = 0)
+pub extern("C") CertCloseStore(ptr store, int flags) -> int32;

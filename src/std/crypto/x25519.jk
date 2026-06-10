@@ -1,0 +1,236 @@
+// X25519 (RFC 7748) - port of TweetNaCl's crypto_scalarmult
+//
+// A field element ("gf") is 16 signed i64 limbs (radix 2^16) in a 128-byte
+// buffer. Intermediates are signed (subtraction goes negative) and products & carries stay within i64
+//
+// NOTE: the Montgomery ladder is NOT constant-time here (sel25519 is, but the
+// allocation pattern isn't a concern for a software TLS client). Good enough to
+// derive a shared secret, harden later if needed
+
+import from std.mem.raw { alloc, zero, release };
+
+// Arithmetic (sign-propagating) right shift built on logical >>
+fun sar(int x, int n) -> int {
+  if (x < 0) { return (x >> n) | ((0 - 1) << (64 - n)); }
+  return x >> n;
+}
+
+// gf limb load/store (typed -> int so they compose with arithmetic/bitwise)
+fun ld(ptr g, int i) -> int { return __ptr_read_int(g, i); }
+fun st(ptr g, int i, int v) -> void { __ptr_write_int(g, i, v); }
+
+// Allocate a zeroed field element (16 limbs)
+fun gf_new() -> ptr {
+  ptr g = alloc(128);
+  zero(g, 128);
+  return g;
+}
+
+// Carry/reduce a field element in place (mod 2^255 - 19)
+fun car25519(ptr o) -> void {
+  int i = 0;
+  while (i < 16) {
+    int oi = ld(o, i) + 65536;
+    int c = sar(oi, 16);
+    if (i < 15) {
+      st(o, i + 1, ld(o, i + 1) + c - 1);
+    } else {
+      st(o, 0, ld(o, 0) + 38 * (c - 1));
+    }
+    st(o, i, oi - (c << 16));
+    i = i + 1;
+  }
+}
+
+fun fadd(ptr o, ptr a, ptr b) -> void {
+  int i = 0;
+  while (i < 16) { st(o, i, ld(a, i) + ld(b, i)); i = i + 1; }
+}
+
+fun fsub(ptr o, ptr a, ptr b) -> void {
+  int i = 0;
+  while (i < 16) { st(o, i, ld(a, i) - ld(b, i)); i = i + 1; }
+}
+
+// o = a * b (mod 2^255 - 19)
+fun fmul(ptr o, ptr a, ptr b) -> void {
+  ptr t = alloc(248); // 31 limbs
+  int i = 0;
+  while (i < 31) { st(t, i, 0); i = i + 1; }
+  i = 0;
+  while (i < 16) {
+    int ai = ld(a, i);
+    int j = 0;
+    while (j < 16) {
+      st(t, i + j, ld(t, i + j) + ai * ld(b, j));
+      j = j + 1;
+    }
+    i = i + 1;
+  }
+  // fold the top half back in: 2^256 = 38 (mod p)
+  i = 0;
+  while (i < 15) { st(t, i, ld(t, i) + 38 * ld(t, i + 16)); i = i + 1; }
+  i = 0;
+  while (i < 16) { st(o, i, ld(t, i)); i = i + 1; }
+  car25519(o);
+  car25519(o);
+  release(t);
+}
+
+fun fsq(ptr o, ptr a) -> void { fmul(o, a, a); }
+
+// Constant-time conditional swap of p and q when b == 1
+fun sel25519(ptr p, ptr q, int b) -> void {
+  int c = 0 - b; // b=1 -> all ones, b=0 -> 0
+  int i = 0;
+  while (i < 16) {
+    int pi = ld(p, i);
+    int qi = ld(q, i);
+    int t = c & (pi ^ qi);
+    st(p, i, pi ^ t);
+    st(q, i, qi ^ t);
+    i = i + 1;
+  }
+}
+
+// Load 32 little-endian bytes into a field element; mask the top bit
+fun unpack25519(ptr o, ptr n) -> void {
+  int i = 0;
+  while (i < 16) {
+    int lo = __ptr_read_byte(n, 2 * i);
+    int hi = __ptr_read_byte(n, 2 * i + 1);
+    st(o, i, lo + (hi << 8));
+    i = i + 1;
+  }
+  st(o, 15, ld(o, 15) & 32767);
+}
+
+// Fully reduce and serialize a field element to 32 little-endian bytes
+fun pack25519(ptr o, ptr n) -> void {
+  ptr t = gf_new();
+  ptr m = gf_new();
+  int i = 0;
+  while (i < 16) { st(t, i, ld(n, i)); i = i + 1; }
+  car25519(t); car25519(t); car25519(t);
+  int j = 0;
+  while (j < 2) {
+    st(m, 0, ld(t, 0) - 65517); // 0xffed
+    i = 1;
+    while (i < 15) {
+      int borrow = sar(ld(m, i - 1), 16) & 1;
+      st(m, i, ld(t, i) - 65535 - borrow);
+      st(m, i - 1, ld(m, i - 1) & 65535);
+      i = i + 1;
+    }
+    int borrow2 = sar(ld(m, 14), 16) & 1;
+    st(m, 15, ld(t, 15) - 32767 - borrow2);
+    int b = sar(ld(m, 15), 16) & 1;
+    st(m, 14, ld(m, 14) & 65535);
+    sel25519(t, m, 1 - b);
+    j = j + 1;
+  }
+  i = 0;
+  while (i < 16) {
+    int ti = ld(t, i);
+    __ptr_write_byte(o, 2 * i, ti & 255);
+    __ptr_write_byte(o, 2 * i + 1, (ti >> 8) & 255);
+    i = i + 1;
+  }
+  release(t);
+  release(m);
+}
+
+// o = 1 / i  (mod p), via exponentiation by p - 2
+fun inv25519(ptr o, ptr inp) -> void {
+  ptr c = gf_new();
+  int a = 0;
+  while (a < 16) { st(c, a, ld(inp, a)); a = a + 1; }
+  a = 253;
+  while (a >= 0) {
+    fsq(c, c);
+    if (a != 2) {
+      if (a != 4) { fmul(c, c, inp); }
+    }
+    a = a - 1;
+  }
+  a = 0;
+  while (a < 16) { st(o, a, ld(c, a)); a = a + 1; }
+  release(c);
+}
+
+// q = scalar(n) * point(p), all 32-byte little-endian. q may equal neither input
+pub fun x25519(ptr q, ptr n, ptr p) -> void {
+  // Clamp the scalar into a private copy
+  ptr z = alloc(32);
+  int i = 0;
+  while (i < 32) { __ptr_write_byte(z, i, __ptr_read_byte(n, i)); i = i + 1; }
+  int z0 = __ptr_read_byte(z, 0);
+  __ptr_write_byte(z, 0, z0 & 248);
+  int z31 = __ptr_read_byte(z, 31);
+  __ptr_write_byte(z, 31, (z31 & 127) | 64);
+
+  ptr x = gf_new();
+  unpack25519(x, p);
+
+  ptr a = gf_new();
+  ptr b = gf_new();
+  ptr c = gf_new();
+  ptr d = gf_new();
+  ptr e = gf_new();
+  ptr f = gf_new();
+
+  i = 0;
+  while (i < 16) { st(b, i, ld(x, i)); i = i + 1; }
+  st(a, 0, 1);
+  st(d, 0, 1);
+
+  ptr a24 = gf_new(); // 121665 = 0x1DB41
+  st(a24, 0, 56129);  // 0xDB41
+  st(a24, 1, 1);
+
+  i = 254;
+  while (i >= 0) {
+    int byte = __ptr_read_byte(z, i >> 3);
+    int r = (byte >> (i & 7)) & 1;
+    sel25519(a, b, r);
+    sel25519(c, d, r);
+    fadd(e, a, c);
+    fsub(a, a, c);
+    fadd(c, b, d);
+    fsub(b, b, d);
+    fsq(d, e);
+    fsq(f, a);
+    fmul(a, c, a);
+    fmul(c, b, e);
+    fadd(e, a, c);
+    fsub(a, a, c);
+    fsq(b, a);
+    fsub(c, d, f);
+    fmul(a, c, a24);
+    fadd(a, a, d);
+    fmul(c, c, a);
+    fmul(a, d, f);
+    fmul(d, b, x);
+    fsq(b, e);
+    sel25519(a, b, r);
+    sel25519(c, d, r);
+    i = i - 1;
+  }
+
+  ptr cinv = gf_new();
+  inv25519(cinv, c);
+  fmul(a, a, cinv);
+  pack25519(q, a);
+
+  release(z); release(x); release(a); release(b); release(c);
+  release(d); release(e); release(f); release(a24); release(cinv);
+}
+
+// q = scalar(n) * basepoint(9). The common case for key generation
+pub fun x25519_base(ptr q, ptr n) -> void {
+  ptr base = alloc(32);
+  zero(base, 32);
+  __ptr_write_byte(base, 0, 9);
+  x25519(q, n, base);
+  release(base);
+}

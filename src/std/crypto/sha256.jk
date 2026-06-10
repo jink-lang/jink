@@ -15,8 +15,7 @@ fun rotr(int x, int n) -> int {
   return ((x >> n) | (x << (32 - n))) & 0xFFFFFFFF;
 }
 
-// SHA-256 round constants (first 32 bits of the fractional parts of the cube
-// roots of the first 64 primes)
+// SHA-256 round constants (first 32 bits of the fractional parts of the cube roots of the first 64 primes)
 fun sha256_k() -> IntArray {
   IntArray k = IntArray();
   k.push(0x428a2f98); k.push(0x71374491); k.push(0xb5c0fbcf); k.push(0xe9b5dba5);
@@ -38,7 +37,7 @@ fun sha256_k() -> IntArray {
   return k;
 }
 
-// Hash `len` bytes at `msg` - returns an IntArray of 8 u32 words (the digest)
+// Hash len bytes at msg - returns an IntArray of 8 u32 words (the digest)
 pub fun sha256(ptr msg, int len) -> IntArray {
   IntArray k = sha256_k();
 
@@ -46,7 +45,7 @@ pub fun sha256(ptr msg, int len) -> IntArray {
   h.push(0x6a09e667); h.push(0xbb67ae85); h.push(0x3c6ef372); h.push(0xa54ff53a);
   h.push(0x510e527f); h.push(0x9b05688c); h.push(0x1f83d9ab); h.push(0x5be0cd19);
 
-  // Pad to a multiple of 64 bytes: 0x80, zeros, then 8-byte big-endian bit length
+  // Pad to a multiple of 64 bytes - 0x80, zeros, then 8-byte big-endian bit length
   int bitlen = len * 8;
   int newlen = len + 1;
   while ((newlen % 64) != 56) { newlen = newlen + 1; }
@@ -125,6 +124,19 @@ pub fun sha256(ptr msg, int len) -> IntArray {
 
   release(buf);
   return h;
+}
+
+// Serialize an 8-word digest as 32 big-endian bytes into out
+pub fun sha256_to_bytes(IntArray h, ptr out) -> void {
+  int i = 0;
+  while (i < 8) {
+    int w = h.get(i);
+    __ptr_write_byte(out, i * 4,     (w >> 24) & 0xFF);
+    __ptr_write_byte(out, i * 4 + 1, (w >> 16) & 0xFF);
+    __ptr_write_byte(out, i * 4 + 2, (w >> 8) & 0xFF);
+    __ptr_write_byte(out, i * 4 + 3, w & 0xFF);
+    i = i + 1;
+  }
 }
 
 // Print a digest (8 u32 words) as lowercase hex

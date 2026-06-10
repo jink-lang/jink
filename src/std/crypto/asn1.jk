@@ -1,0 +1,41 @@
+// Minimal DER (ASN.1) navigation for X.509 parsing
+//
+// DER is tag-length-value. Each element at byte offset `pos` is:
+//   [tag:1][length][content...]
+// Length is short form (1 byte < 0x80) or long form (0x80|k, then k bytes)
+// These helpers compute the pieces so a parser can walk siblings/children by offset
+// buf is the DER byte buffer, offsets are byte indices into it
+
+// The tag byte at pos
+pub fun der_tag(ptr buf, int pos) -> int { return __ptr_read_byte(buf, pos); }
+
+// Content length of the element at pos
+pub fun der_len(ptr buf, int pos) -> int {
+  int b = __ptr_read_byte(buf, pos + 1);
+  if (b < 128) { return b; }
+  int num = b & 127;
+  int len = 0;
+  int i = 0;
+  while (i < num) {
+    int nb = __ptr_read_byte(buf, pos + 2 + i);
+    len = (len << 8) | nb;
+    i = i + 1;
+  }
+  return len;
+}
+
+// Header length (tag byte + length bytes) of the element at pos
+pub fun der_hdr(ptr buf, int pos) -> int {
+  int b = __ptr_read_byte(buf, pos + 1);
+  if (b < 128) { return 2; }
+  return 2 + (b & 127);
+}
+
+// Byte offset where the element's content begins
+pub fun der_content(ptr buf, int pos) -> int { return pos + der_hdr(buf, pos); }
+
+// Byte offset of the next sibling element
+pub fun der_next(ptr buf, int pos) -> int { return pos + der_hdr(buf, pos) + der_len(buf, pos); }
+
+// Total length of the element at pos (header + content) - e.g. the signed range
+pub fun der_total(ptr buf, int pos) -> int { return der_hdr(buf, pos) + der_len(buf, pos); }

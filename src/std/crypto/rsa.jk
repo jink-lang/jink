@@ -1,0 +1,104 @@
+// RSA PKCS#1 v1.5 signature verification with SHA-256 (RFC 8017)
+//
+// verify(s) recomputes m = s^e mod n, then checks the EMSA-PKCS1-v1_5 framing:
+//   EM = 0x00 0x01 (0xFF * PS) 0x00 || DigestInfo(SHA-256) || H(message)
+// All comparisons are length-checked but not constant-time (signature verify is
+// public-data, so that's acceptable)
+
+import from std.mem.raw { alloc, release };
+import from std.crypto.bigint { bn_modexp_int, bn_from_bytes_be };
+import from std.crypto.sha256 { sha256, sha256_to_bytes };
+
+// Verify against a precomputed 32-byte SHA-256 digest (used by X.509, which
+// hashes the tbsCertificate itself)
+// n_be / sig_be: big-endian byte arrays of length klen (modulus size in bytes).
+// e: public exponent (e.g. 65537). Returns 1 if the signature is valid, else 0.
+pub fun rsa_pkcs1_sha256_verify_hash(ptr n_be, int klen, int e, ptr sig_be, ptr hash32) -> int {
+  int nlimbs = klen / 2; // 16-bit limbs
+  ptr n = alloc(nlimbs * 8);
+  ptr s = alloc(nlimbs * 8);
+  bn_from_bytes_be(n_be, klen, n, nlimbs);
+  bn_from_bytes_be(sig_be, klen, s, nlimbs);
+
+  // m = s^e mod n
+  ptr m = alloc(nlimbs * 8);
+  bn_modexp_int(s, e, n, nlimbs, m);
+
+  // Serialize m to a big-endian encoded message EM of length klen
+  ptr em = alloc(klen);
+  int i = 0;
+  while (i < nlimbs) {
+    int limb = __ptr_read_int(m, i);
+    int lo = limb & 255;
+    int hi = (limb >> 8) & 255;
+    __ptr_write_byte(em, klen - 1 - 2 * i, lo);
+    __ptr_write_byte(em, klen - 1 - (2 * i + 1), hi);
+    i = i + 1;
+  }
+
+  // DigestInfo for SHA-256 (19 bytes)
+  ptr di = alloc(19);
+  __ptr_write_byte(di, 0, 0x30);  __ptr_write_byte(di, 1, 0x31);
+  __ptr_write_byte(di, 2, 0x30);  __ptr_write_byte(di, 3, 0x0d);
+  __ptr_write_byte(di, 4, 0x06);  __ptr_write_byte(di, 5, 0x09);
+  __ptr_write_byte(di, 6, 0x60);  __ptr_write_byte(di, 7, 0x86);
+  __ptr_write_byte(di, 8, 0x48);  __ptr_write_byte(di, 9, 0x01);
+  __ptr_write_byte(di, 10, 0x65); __ptr_write_byte(di, 11, 0x03);
+  __ptr_write_byte(di, 12, 0x04); __ptr_write_byte(di, 13, 0x02);
+  __ptr_write_byte(di, 14, 0x01); __ptr_write_byte(di, 15, 0x05);
+  __ptr_write_byte(di, 16, 0x00); __ptr_write_byte(di, 17, 0x04);
+  __ptr_write_byte(di, 18, 0x20);
+
+  int ok = 1;
+
+  // Leading 0x00 0x01
+  int b0 = __ptr_read_byte(em, 0);
+  int b1 = __ptr_read_byte(em, 1);
+  if (b0 != 0) { ok = 0; }
+  if (b1 != 1) { ok = 0; }
+
+  // Padding string of 0xFF up to the 0x00 separator
+  int tlen = 51;                 // 19 (DigestInfo) + 32 (hash)
+  int ps_end = klen - tlen - 1;  // index of the 0x00 separator
+  i = 2;
+  while (i < ps_end) {
+    int pb = __ptr_read_byte(em, i);
+    if (pb != 255) { ok = 0; }
+    i = i + 1;
+  }
+  int sep = __ptr_read_byte(em, ps_end);
+  if (sep != 0) { ok = 0; }
+
+  // DigestInfo bytes
+  int dstart = ps_end + 1;
+  i = 0;
+  while (i < 19) {
+    int eb = __ptr_read_byte(em, dstart + i);
+    int db = __ptr_read_byte(di, i);
+    if (eb != db) { ok = 0; }
+    i = i + 1;
+  }
+
+  // The 32-byte hash
+  int hstart = dstart + 19;
+  i = 0;
+  while (i < 32) {
+    int eh = __ptr_read_byte(em, hstart + i);
+    int hh = __ptr_read_byte(hash32, i);
+    if (eh != hh) { ok = 0; }
+    i = i + 1;
+  }
+
+  release(n); release(s); release(m); release(em); release(di);
+  return ok;
+}
+
+// Convenience wrapper: hash the message with SHA-256, then verify
+pub fun rsa_pkcs1_sha256_verify(ptr n_be, int klen, int e, ptr sig_be, ptr msg, int msglen) -> int {
+  let digest = sha256(msg, msglen);
+  ptr hash = alloc(32);
+  sha256_to_bytes(digest, hash);
+  int ok = rsa_pkcs1_sha256_verify_hash(n_be, klen, e, sig_be, hash);
+  release(hash);
+  return ok;
+}

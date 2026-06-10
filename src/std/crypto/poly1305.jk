@@ -1,0 +1,137 @@
+// Poly1305 one-time MAC (RFC 8439)
+//
+// Port of poly1305-donna-32: the 130-bit accumulator is held as five 26-bit
+// limbs, so every product (<=~2^56) and intermediate stays within an i64. The
+// modular reduction mod (2^130 - 5) uses the standard "multiply by 5 to fold the
+// top limb" trick
+
+import from std.mem.raw { alloc, zero, release };
+
+// Read 4 bytes little-endian as a u32. (Typed -> int, so it composes with &)
+fun u8to32le(ptr p, int o) -> int {
+  int b0 = __ptr_read_byte(p, o);
+  int b1 = __ptr_read_byte(p, o + 1);
+  int b2 = __ptr_read_byte(p, o + 2);
+  int b3 = __ptr_read_byte(p, o + 3);
+  return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & 0xFFFFFFFF;
+}
+
+// Compute the Poly1305 tag of msg under the 32-byte one-time key
+// Writes 16 bytes to tag
+pub fun poly1305_mac(ptr msg, int msglen, ptr key, ptr tag) -> void {
+  // Clamp r into five 26-bit limbs (the clamp mask is folded into the &-masks)
+  int r0 = (u8to32le(key, 0)) & 0x3ffffff;
+  int r1 = (u8to32le(key, 3) >> 2) & 0x3ffff03;
+  int r2 = (u8to32le(key, 6) >> 4) & 0x3ffc0ff;
+  int r3 = (u8to32le(key, 9) >> 6) & 0x3f03fff;
+  int r4 = (u8to32le(key, 12) >> 8) & 0x00fffff;
+
+  // Precompute r*5 for limbs 1..4 (used to fold the carry out of the top limb)
+  int s1 = r1 * 5;
+  int s2 = r2 * 5;
+  int s3 = r3 * 5;
+  int s4 = r4 * 5;
+
+  // s (pad), added at the very end.
+  int pad0 = u8to32le(key, 16);
+  int pad1 = u8to32le(key, 20);
+  int pad2 = u8to32le(key, 24);
+  int pad3 = u8to32le(key, 28);
+
+  // Accumulator h = 0
+  int h0 = 0; int h1 = 0; int h2 = 0; int h3 = 0; int h4 = 0;
+
+  ptr buf = alloc(16);
+  int off = 0;
+  while (off < msglen) {
+    // Assemble one 16-byte block. Full block => implicit 2^128 bit (hibit).
+    // Final short block => 0x01 byte after the data, hibit = 0
+    int rem = msglen - off;
+    int hibit = 16777216; // 1 << 24, i.e. bit 128 across the 26-bit limbs
+    zero(buf, 16);
+    if (rem >= 16) {
+      int j = 0;
+      while (j < 16) { __ptr_write_byte(buf, j, __ptr_read_byte(msg, off + j)); j = j + 1; }
+      off = off + 16;
+    } else {
+      int j = 0;
+      while (j < rem) { __ptr_write_byte(buf, j, __ptr_read_byte(msg, off + j)); j = j + 1; }
+      __ptr_write_byte(buf, rem, 1);
+      hibit = 0;
+      off = off + rem;
+    }
+
+    // h += block
+    h0 = h0 + (u8to32le(buf, 0) & 0x3ffffff);
+    h1 = h1 + ((u8to32le(buf, 3) >> 2) & 0x3ffffff);
+    h2 = h2 + ((u8to32le(buf, 6) >> 4) & 0x3ffffff);
+    h3 = h3 + ((u8to32le(buf, 9) >> 6) & 0x3ffffff);
+    h4 = h4 + ((u8to32le(buf, 12) >> 8) | hibit);
+
+    // h *= r  (schoolbook, folding the top limb back in via s = r*5)
+    int d0 = h0 * r0 + h1 * s4 + h2 * s3 + h3 * s2 + h4 * s1;
+    int d1 = h0 * r1 + h1 * r0 + h2 * s4 + h3 * s3 + h4 * s2;
+    int d2 = h0 * r2 + h1 * r1 + h2 * r0 + h3 * s4 + h4 * s3;
+    int d3 = h0 * r3 + h1 * r2 + h2 * r1 + h3 * r0 + h4 * s4;
+    int d4 = h0 * r4 + h1 * r3 + h2 * r2 + h3 * r1 + h4 * r0;
+
+    // Carry-propagate the limbs back to 26 bits
+    int c = d0 >> 26; h0 = d0 & 0x3ffffff;
+    d1 = d1 + c; c = d1 >> 26; h1 = d1 & 0x3ffffff;
+    d2 = d2 + c; c = d2 >> 26; h2 = d2 & 0x3ffffff;
+    d3 = d3 + c; c = d3 >> 26; h3 = d3 & 0x3ffffff;
+    d4 = d4 + c; c = d4 >> 26; h4 = d4 & 0x3ffffff;
+    h0 = h0 + c * 5; c = h0 >> 26; h0 = h0 & 0x3ffffff;
+    h1 = h1 + c;
+  }
+
+  // Final full carry
+  int c = h1 >> 26; h1 = h1 & 0x3ffffff;
+  h2 = h2 + c; c = h2 >> 26; h2 = h2 & 0x3ffffff;
+  h3 = h3 + c; c = h3 >> 26; h3 = h3 & 0x3ffffff;
+  h4 = h4 + c; c = h4 >> 26; h4 = h4 & 0x3ffffff;
+  h0 = h0 + c * 5; c = h0 >> 26; h0 = h0 & 0x3ffffff;
+  h1 = h1 + c;
+
+  // g = h + 5 - 2^130 (i.e. h - p). If g4 >= 0 then h >= p, so use g
+  int g0 = h0 + 5; c = g0 >> 26; g0 = g0 & 0x3ffffff;
+  int g1 = h1 + c; c = g1 >> 26; g1 = g1 & 0x3ffffff;
+  int g2 = h2 + c; c = g2 >> 26; g2 = g2 & 0x3ffffff;
+  int g3 = h3 + c; c = g3 >> 26; g3 = g3 & 0x3ffffff;
+  int g4 = h4 + c - 67108864; // - (1 << 26)
+  if (g4 >= 0) {
+    h0 = g0; h1 = g1; h2 = g2; h3 = g3; h4 = g4 & 0x3ffffff;
+  }
+
+  // Pack the five 26-bit limbs into four 32-bit words
+  int f0 = (h0 | (h1 << 26)) & 0xFFFFFFFF;
+  int f1 = ((h1 >> 6) | (h2 << 20)) & 0xFFFFFFFF;
+  int f2 = ((h2 >> 12) | (h3 << 14)) & 0xFFFFFFFF;
+  int f3 = ((h3 >> 18) | (h4 << 8)) & 0xFFFFFFFF;
+
+  // tag = (h + pad) mod 2^128, with carry between words
+  int f = f0 + pad0; f0 = f & 0xFFFFFFFF; int carry = f >> 32;
+  f = f1 + pad1 + carry; f1 = f & 0xFFFFFFFF; carry = f >> 32;
+  f = f2 + pad2 + carry; f2 = f & 0xFFFFFFFF; carry = f >> 32;
+  f = f3 + pad3 + carry; f3 = f & 0xFFFFFFFF;
+
+  // Emit 16 bytes little-endian
+  __ptr_write_byte(tag, 0, f0 & 0xFF);
+  __ptr_write_byte(tag, 1, (f0 >> 8) & 0xFF);
+  __ptr_write_byte(tag, 2, (f0 >> 16) & 0xFF);
+  __ptr_write_byte(tag, 3, (f0 >> 24) & 0xFF);
+  __ptr_write_byte(tag, 4, f1 & 0xFF);
+  __ptr_write_byte(tag, 5, (f1 >> 8) & 0xFF);
+  __ptr_write_byte(tag, 6, (f1 >> 16) & 0xFF);
+  __ptr_write_byte(tag, 7, (f1 >> 24) & 0xFF);
+  __ptr_write_byte(tag, 8, f2 & 0xFF);
+  __ptr_write_byte(tag, 9, (f2 >> 8) & 0xFF);
+  __ptr_write_byte(tag, 10, (f2 >> 16) & 0xFF);
+  __ptr_write_byte(tag, 11, (f2 >> 24) & 0xFF);
+  __ptr_write_byte(tag, 12, f3 & 0xFF);
+  __ptr_write_byte(tag, 13, (f3 >> 8) & 0xFF);
+  __ptr_write_byte(tag, 14, (f3 >> 16) & 0xFF);
+  __ptr_write_byte(tag, 15, (f3 >> 24) & 0xFF);
+
+  release(buf);
+}

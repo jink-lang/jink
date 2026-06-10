@@ -1,0 +1,144 @@
+// SHA-384 (FIPS 180-4), the SHA-512 core truncated to 384 bits
+//
+// SHA-512 works on 64-bit lanes; here that's a full i64 with natural wrap-around
+// on +, so (unlike SHA-256) no masking is needed. Shifts are logical >>,
+// which is correct for unsigned 64-bit words. Needed by ECDSA-P384 (ecdsa-with-
+// SHA384). Tables use IntArray; 64-bit constants rely on u64 hex-literal parsing
+
+import from std.array { IntArray };
+import from std.mem.raw { alloc, zero, release };
+
+// 64-bit right rotate (no mask: full-width i64)
+fun rotr64(int x, int n) -> int {
+  return (x >> n) | (x << (64 - n));
+}
+
+fun sha512_k() -> IntArray {
+  IntArray k = IntArray();
+  k.push(0x428a2f98d728ae22); k.push(0x7137449123ef65cd); k.push(0xb5c0fbcfec4d3b2f); k.push(0xe9b5dba58189dbbc);
+  k.push(0x3956c25bf348b538); k.push(0x59f111f1b605d019); k.push(0x923f82a4af194f9b); k.push(0xab1c5ed5da6d8118);
+  k.push(0xd807aa98a3030242); k.push(0x12835b0145706fbe); k.push(0x243185be4ee4b28c); k.push(0x550c7dc3d5ffb4e2);
+  k.push(0x72be5d74f27b896f); k.push(0x80deb1fe3b1696b1); k.push(0x9bdc06a725c71235); k.push(0xc19bf174cf692694);
+  k.push(0xe49b69c19ef14ad2); k.push(0xefbe4786384f25e3); k.push(0x0fc19dc68b8cd5b5); k.push(0x240ca1cc77ac9c65);
+  k.push(0x2de92c6f592b0275); k.push(0x4a7484aa6ea6e483); k.push(0x5cb0a9dcbd41fbd4); k.push(0x76f988da831153b5);
+  k.push(0x983e5152ee66dfab); k.push(0xa831c66d2db43210); k.push(0xb00327c898fb213f); k.push(0xbf597fc7beef0ee4);
+  k.push(0xc6e00bf33da88fc2); k.push(0xd5a79147930aa725); k.push(0x06ca6351e003826f); k.push(0x142929670a0e6e70);
+  k.push(0x27b70a8546d22ffc); k.push(0x2e1b21385c26c926); k.push(0x4d2c6dfc5ac42aed); k.push(0x53380d139d95b3df);
+  k.push(0x650a73548baf63de); k.push(0x766a0abb3c77b2a8); k.push(0x81c2c92e47edaee6); k.push(0x92722c851482353b);
+  k.push(0xa2bfe8a14cf10364); k.push(0xa81a664bbc423001); k.push(0xc24b8b70d0f89791); k.push(0xc76c51a30654be30);
+  k.push(0xd192e819d6ef5218); k.push(0xd69906245565a910); k.push(0xf40e35855771202a); k.push(0x106aa07032bbd1b8);
+  k.push(0x19a4c116b8d2d0c8); k.push(0x1e376c085141ab53); k.push(0x2748774cdf8eeb99); k.push(0x34b0bcb5e19b48a8);
+  k.push(0x391c0cb3c5c95a63); k.push(0x4ed8aa4ae3418acb); k.push(0x5b9cca4f7763e373); k.push(0x682e6ff3d6b2b8a3);
+  k.push(0x748f82ee5defb2fc); k.push(0x78a5636f43172f60); k.push(0x84c87814a1f0ab72); k.push(0x8cc702081a6439ec);
+  k.push(0x90befffa23631e28); k.push(0xa4506cebde82bde9); k.push(0xbef9a3f7b2c67915); k.push(0xc67178f2e372532b);
+  k.push(0xca273eceea26619c); k.push(0xd186b8c721c0c207); k.push(0xeada7dd6cde0eb1e); k.push(0xf57d4f7fee6ed178);
+  k.push(0x06f067aa72176fba); k.push(0x0a637dc5a2c898a6); k.push(0x113f9804bef90dae); k.push(0x1b710b35131c471b);
+  k.push(0x28db77f523047d84); k.push(0x32caab7b40c72493); k.push(0x3c9ebe0a15c9bebc); k.push(0x431d67c49c100d4c);
+  k.push(0x4cc5d4becb3e42b6); k.push(0x597f299cfc657e2a); k.push(0x5fcb6fab3ad6faec); k.push(0x6c44198c4a475817);
+  return k;
+}
+
+// Hash len bytes at msg with SHA-384 - returns an IntArray of 8 lanes; the digest is the first 6 (48 bytes)
+pub fun sha384(ptr msg, int len) -> IntArray {
+  IntArray k = sha512_k();
+
+  IntArray h = IntArray();
+  h.push(0xcbbb9d5dc1059ed8); h.push(0x629a292a367cd507); h.push(0x9159015a3070dd17); h.push(0x152fecd8f70e5939);
+  h.push(0x67332667ffc00b31); h.push(0x8eb44a8768581511); h.push(0xdb0c2e0d64f98fa7); h.push(0x47b5481dbefa4fa4);
+
+  // Pad to a multiple of 128: 0x80, zeros, then a 128-bit big-endian bit length
+  // (write only the low 64 bits; the high 64 stay zero)
+  int bitlen = len * 8;
+  int newlen = len + 1;
+  while ((newlen % 128) != 112) { newlen = newlen + 1; }
+  int total = newlen + 16;
+
+  ptr buf = alloc(total);
+  zero(buf, total);
+  int i = 0;
+  while (i < len) { __ptr_write_byte(buf, i, __ptr_read_byte(msg, i)); i = i + 1; }
+  __ptr_write_byte(buf, len, 0x80);
+  int kk = 0;
+  while (kk < 8) {
+    __ptr_write_byte(buf, total - 1 - kk, (bitlen >> (8 * kk)) & 0xFF);
+    kk = kk + 1;
+  }
+
+  int block = 0;
+  while (block < total) {
+    IntArray w = IntArray();
+    int t = 0;
+    while (t < 16) {
+      int j = block + t * 8;
+      int b0 = __ptr_read_byte(buf, j);
+      int b1 = __ptr_read_byte(buf, j + 1);
+      int b2 = __ptr_read_byte(buf, j + 2);
+      int b3 = __ptr_read_byte(buf, j + 3);
+      int b4 = __ptr_read_byte(buf, j + 4);
+      int b5 = __ptr_read_byte(buf, j + 5);
+      int b6 = __ptr_read_byte(buf, j + 6);
+      int b7 = __ptr_read_byte(buf, j + 7);
+      w.push((b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32) | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7);
+      t = t + 1;
+    }
+    while (t < 80) {
+      int w15 = w.get(t - 15);
+      int w2 = w.get(t - 2);
+      int s0 = rotr64(w15, 1) ^ rotr64(w15, 8) ^ (w15 >> 7);
+      int s1 = rotr64(w2, 19) ^ rotr64(w2, 61) ^ (w2 >> 6);
+      w.push(w.get(t - 16) + s0 + w.get(t - 7) + s1);
+      t = t + 1;
+    }
+
+    int a = h.get(0); int bb = h.get(1); int c = h.get(2); int d = h.get(3);
+    int e = h.get(4); int f = h.get(5); int g = h.get(6); int hh = h.get(7);
+    int allones = 0 - 1;
+
+    int r = 0;
+    while (r < 80) {
+      int big1 = rotr64(e, 14) ^ rotr64(e, 18) ^ rotr64(e, 41);
+      int ch = (e & f) ^ ((e ^ allones) & g);
+      int temp1 = hh + big1 + ch + k.get(r) + w.get(r);
+      int big0 = rotr64(a, 28) ^ rotr64(a, 34) ^ rotr64(a, 39);
+      int maj = (a & bb) ^ (a & c) ^ (bb & c);
+      int temp2 = big0 + maj;
+      hh = g;
+      g = f;
+      f = e;
+      e = d + temp1;
+      d = c;
+      c = bb;
+      bb = a;
+      a = temp1 + temp2;
+      r = r + 1;
+    }
+
+    h.set(0, h.get(0) + a);
+    h.set(1, h.get(1) + bb);
+    h.set(2, h.get(2) + c);
+    h.set(3, h.get(3) + d);
+    h.set(4, h.get(4) + e);
+    h.set(5, h.get(5) + f);
+    h.set(6, h.get(6) + g);
+    h.set(7, h.get(7) + hh);
+
+    block = block + 128;
+  }
+
+  release(buf);
+  return h;
+}
+
+// Serialize the first 6 lanes (48 bytes, big-endian) of an SHA-384 state
+pub fun sha384_to_bytes(IntArray h, ptr out) -> void {
+  int i = 0;
+  while (i < 6) {
+    int v = h.get(i);
+    int kk = 0;
+    while (kk < 8) {
+      __ptr_write_byte(out, i * 8 + kk, (v >> (8 * (7 - kk))) & 0xFF);
+      kk = kk + 1;
+    }
+    i = i + 1;
+  }
+}

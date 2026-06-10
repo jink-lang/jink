@@ -1,0 +1,102 @@
+// Trust anchor against the Windows system root store (crypt32 "ROOT")
+//
+// Server-sent TLS chains end at the highest intermediate, NOT at a root - the
+// root is expected to already live in the client's trust store. Given that top
+// certificate (whose issuer is a root CA), this asks the OS ROOT store for a cert
+// whose subject Name matches that issuer, then verifies the top cert's signature
+// against that root's public key. A match turns "the sent certs form a valid
+// signature chain" into "that chain is rooted in a CA the operating system
+// trusts"
+//
+// We use CertFindCertificateInStore(CERT_FIND_SUBJECT_NAME) rather than walking
+// the whole store: it returns the subject-name match directly, and the common
+// case (one matching root) needs a single call. Windows-only (crypt32)
+
+import from std.mem.raw { alloc, zero, release };
+import from std.crypto.asn1 { der_total };
+import from std.crypto.x509 { x509_verify_sig, x509_spki_pos, x509_issuer_pos, x509_subject_pos };
+import from jink.ext.crypt32 { CertOpenSystemStoreA, CertFindCertificateInStore, CertCloseStore };
+
+// A genuine null pointer value (read from a zeroed cell), for APIs that take null
+fun null_ptr() -> ptr {
+  ptr z = alloc(8);
+  zero(z, 8);
+  ptr n = __ptr_read_ptr(z, 0);
+  release(z);
+  return n;
+}
+
+// 1 if the DER element at a_pos in a equals the element at b_pos in b, byte for
+// byte including the tag/length header (RFC 5280 names chain by exact DER match)
+fun der_elem_eq(ptr a, int a_pos, ptr b, int b_pos) -> int {
+  int alen = der_total(a, a_pos);
+  int blen = der_total(b, b_pos);
+  if (alen != blen) { return 0; }
+  int i = 0;
+  while (i < alen) {
+    int av = __ptr_read_byte(a, a_pos + i);
+    int bv = __ptr_read_byte(b, b_pos + i);
+    if (av != bv) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+// 1 if child's issuer DN byte-equals parent's subject DN (the names chain)
+pub fun dn_chain_ok(ptr child, ptr parent) -> int {
+  return der_elem_eq(child, x509_issuer_pos(child), parent, x509_subject_pos(parent));
+}
+
+// 1 if top is signed by a trusted root in the Windows ROOT store, else 0.
+// CERT_CONTEXT.pbCertEncoded is at byte offset 8 (pointer index 1 on Win64).
+pub fun anchor_to_root_store(ptr top) -> int {
+  int top_issuer = x509_issuer_pos(top);
+  int ilen = der_total(top, top_issuer);
+
+  // Copy the issuer DN bytes out (no pointer arithmetic in Jink) and wrap them in
+  // a CERT_NAME_BLOB { DWORD cbData@0; BYTE* pbData@8; }
+  ptr namebuf = alloc(ilen);
+  int i = 0;
+  while (i < ilen) {
+    __ptr_write_byte(namebuf, i, __ptr_read_byte(top, top_issuer + i));
+    i = i + 1;
+  }
+  ptr blob = alloc(16);
+  zero(blob, 16);
+  __ptr_write_int(blob, 0, ilen);    // cbData (low 4 bytes); high 4 stay zero
+  __ptr_write_ptr(blob, 1, namebuf); // pbData at byte offset 8
+
+  ptr store = CertOpenSystemStoreA(0, "ROOT");
+  if (store == null) { release(namebuf); release(blob); return 0; }
+
+  // X509_ASN_ENCODING|PKCS_7_ASN_ENCODING = 0x10001; CERT_FIND_SUBJECT_NAME = 0x20007
+  int found = 0;
+  ptr cand = CertFindCertificateInStore(store, 65537, 0, 131079, blob, null_ptr());
+  int tries = 0;
+  int looping = 1;
+  while (looping == 1) {
+    if (cand == null) {
+      looping = 0;
+    } else {
+      ptr der = __ptr_read_ptr(cand, 1); // pbCertEncoded
+      if (x509_verify_sig(top, der, x509_spki_pos(der)) == 1) {
+        found = 1;
+        looping = 0;
+      } else {
+        // Same subject DN can name more than one root (renewed/cross-signed keys);
+        // try a bounded number of further matches before giving up
+        tries = tries + 1;
+        if (tries >= 4) {
+          looping = 0;
+        } else {
+          cand = CertFindCertificateInStore(store, 65537, 0, 131079, blob, cand);
+        }
+      }
+    }
+  }
+
+  CertCloseStore(store, 0);
+  release(namebuf);
+  release(blob);
+  return found;
+}

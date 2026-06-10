@@ -1,0 +1,207 @@
+// X.509 certificate chain validation - builds on std.crypto.x509
+//
+// Validates an ordered chain (leaf first) sent by a TLS server against a trusted
+// root: every cert is signed by the next, the top is signed by the root, every
+// cert is within its validity window, and the leaf's SAN matches the hostname.
+//
+// Simplifications (fine for a client talking to a registry; tighten later):
+//   * chain must be pre-ordered (TLS sends it that way); no issuer/subject search
+//   * `now` is supplied by the caller as a 14-char "YYYYMMDDHHMMSS" (UTC) string,
+//     so this stays deterministic / testable without a clock
+//   * hostname compare is case-sensitive; basicConstraints/keyUsage not checked
+
+import from std.mem.raw { alloc, release };
+import from std.crypto.asn1 { der_tag, der_len, der_hdr, der_content, der_next, der_total };
+import from std.crypto.x509 { x509_verify_sig, x509_spki_pos };
+import from jink.ext.libc { strlen };
+
+// --- validity dates ---------------------------------------------------------
+
+// Position of the validity SEQUENCE within a certificate
+fun validity_pos(ptr buf) -> int {
+  int tbs = der_content(buf, 0);
+  int p = der_content(buf, tbs);
+  if (der_tag(buf, p) == 160) { p = der_next(buf, p); } // [0] version
+  p = der_next(buf, p); // serialNumber
+  p = der_next(buf, p); // signature algid
+  p = der_next(buf, p); // issuer
+  return p;             // validity
+}
+
+// Normalize a Time element to 14 bytes "YYYYMMDDHHMMSS" in `out`
+fun norm_time(ptr buf, int pos, ptr out) -> void {
+  int tag = der_tag(buf, pos);
+  int off = der_content(buf, pos);
+  if (tag == 23) {
+    // UTCTime "YYMMDDHHMMSSZ": century is 19 if YY>=50 else 20
+    int d0 = __ptr_read_byte(buf, off);
+    int d1 = __ptr_read_byte(buf, off + 1);
+    int yy = (d0 - 48) * 10 + (d1 - 48);
+    if (yy >= 50) {
+      __ptr_write_byte(out, 0, 49); __ptr_write_byte(out, 1, 57); // "19"
+    } else {
+      __ptr_write_byte(out, 0, 50); __ptr_write_byte(out, 1, 48); // "20"
+    }
+    int i = 0;
+    while (i < 12) { __ptr_write_byte(out, 2 + i, __ptr_read_byte(buf, off + i)); i = i + 1; }
+  } else {
+    // GeneralizedTime "YYYYMMDDHHMMSSZ": first 14 chars
+    int i = 0;
+    while (i < 14) { __ptr_write_byte(out, i, __ptr_read_byte(buf, off + i)); i = i + 1; }
+  }
+}
+
+// Compare 14 bytes of a, b lexicographically: -1, 0, 1
+fun cmp14(ptr a, ptr b) -> int {
+  int i = 0;
+  while (i < 14) {
+    int av = __ptr_read_byte(a, i);
+    int bv = __ptr_read_byte(b, i);
+    if (av < bv) { return 0 - 1; }
+    if (av > bv) { return 1; }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 1 if notBefore <= now <= notAfter. `now` is 14 bytes "YYYYMMDDHHMMSS" (UTC);
+// accepts either a string literal or a raw buffer (e.g. from std.sys.time.now_utc)
+pub fun valid_at(ptr buf, ptr now) -> int {
+  int vpos = validity_pos(buf);
+  int nb_pos = der_content(buf, vpos);
+  int na_pos = der_next(buf, nb_pos);
+  ptr nb = alloc(14);
+  ptr na = alloc(14);
+  norm_time(buf, nb_pos, nb);
+  norm_time(buf, na_pos, na);
+  int ok = 1;
+  if (cmp14(nb, now) > 0) { ok = 0; }   // notBefore > now
+  if (cmp14(now, na) > 0) { ok = 0; }   // now > notAfter
+  release(nb);
+  release(na);
+  return ok;
+}
+
+// --- hostname / SubjectAltName ---------------------------------------------
+
+// Position of the extensions [3] element, or -1 if there are none
+fun extensions_pos(ptr buf) -> int {
+  int tbs = der_content(buf, 0);
+  int tbs_end = tbs + der_total(buf, tbs);
+  int p = der_next(buf, x509_spki_pos(buf));
+  if (p >= tbs_end) { return 0 - 1; }
+  if (der_tag(buf, p) == 163) { return p; } // [3]
+  return 0 - 1;
+}
+
+// Match a dNSName at buf[off..off+len) against host (exact or "*." wildcard)
+fun host_match(ptr buf, int off, int len, string host) -> int {
+  int hlen = strlen(host);
+  if (len >= 2) {
+    int c0 = __ptr_read_byte(buf, off);
+    if (c0 == 42) { // '*' wildcard: "*.suffix" matches one leading label
+      int suffix_len = len - 1;            // includes the leading '.'
+      if (hlen < suffix_len) { return 0; }
+      int hstart = hlen - suffix_len;
+      if (hstart <= 0) { return 0; }        // wildcard needs a non-empty label
+      int j = 0;
+      while (j < hstart) {
+        int hc = __ptr_read_byte(host, j);
+        if (hc == 46) { return 0; }         // label must not contain '.'
+        j = j + 1;
+      }
+      int k = 0;
+      while (k < suffix_len) {
+        int a = __ptr_read_byte(host, hstart + k);
+        int b = __ptr_read_byte(buf, off + 1 + k);
+        if (a != b) { return 0; }
+        k = k + 1;
+      }
+      return 1;
+    }
+  }
+  if (len != hlen) { return 0; }
+  int i = 0;
+  while (i < len) {
+    int a = __ptr_read_byte(buf, off + i);
+    int b = __ptr_read_byte(host, i);
+    if (a != b) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+// 1 if the leaf cert presents a SAN dNSName matching host
+pub fun check_host(ptr buf, string host) -> int {
+  int ext = extensions_pos(buf);
+  if (ext < 0) { return 0; }
+
+  int extseq = der_content(buf, ext);
+  int p = der_content(buf, extseq);
+  int end = extseq + der_total(buf, extseq);
+
+  int san = 0 - 1;
+  while (p < end) {
+    int oid = der_content(buf, p);
+    int oid_off = der_content(buf, oid);
+    int oid_len = der_len(buf, oid);
+    if (oid_len == 3) {
+      int o0 = __ptr_read_byte(buf, oid_off);
+      int o1 = __ptr_read_byte(buf, oid_off + 1);
+      int o2 = __ptr_read_byte(buf, oid_off + 2);
+      if (o0 == 85) { if (o1 == 29) { if (o2 == 17) {  // 2.5.29.17 = subjectAltName
+        int v = der_next(buf, oid);
+        if (der_tag(buf, v) == 1) { v = der_next(buf, v); } // skip critical BOOLEAN
+        san = v;                                            // OCTET STRING
+      } } }
+    }
+    p = der_next(buf, p);
+  }
+  if (san < 0) { return 0; }
+
+  // OCTET STRING content wraps a SEQUENCE OF GeneralName
+  int gnseq = der_content(buf, san);
+  int g = der_content(buf, gnseq);
+  int gend = gnseq + der_total(buf, gnseq);
+  int matched = 0;
+  while (g < gend) {
+    if (der_tag(buf, g) == 130) { // [2] dNSName
+      int name_off = der_content(buf, g);
+      int name_len = der_len(buf, g);
+      if (host_match(buf, name_off, name_len, host) == 1) { matched = 1; }
+    }
+    g = der_next(buf, g);
+  }
+  return matched;
+}
+
+// --- chain ------------------------------------------------------------------
+
+// Validate an ordered chain `certs` (array of n cert pointers, leaf at index 0)
+// against trusted `root`, for `host` at time `now` (YYYYMMDDHHMMSS). Returns 1/0
+pub fun x509_chain_verify(ptr certs, int n, ptr root, string host, string now) -> int {
+  // Each cert signed by the next in the chain
+  int i = 0;
+  while (i < n - 1) {
+    ptr child = __ptr_read_ptr(certs, i);
+    ptr parent = __ptr_read_ptr(certs, i + 1);
+    if (x509_verify_sig(child, parent, x509_spki_pos(parent)) == 0) { return 0; }
+    i = i + 1;
+  }
+
+  // Top of the sent chain signed by the trusted root
+  ptr top = __ptr_read_ptr(certs, n - 1);
+  if (x509_verify_sig(top, root, x509_spki_pos(root)) == 0) { return 0; }
+
+  // Validity window for every sent cert
+  i = 0;
+  while (i < n) {
+    if (valid_at(__ptr_read_ptr(certs, i), now) == 0) { return 0; }
+    i = i + 1;
+  }
+
+  // Hostname against the leaf's SAN
+  if (check_host(__ptr_read_ptr(certs, 0), host) == 0) { return 0; }
+
+  return 1;
+}

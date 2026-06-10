@@ -1,0 +1,272 @@
+// ECDSA signature verification on NIST P-256 (secp256r1)
+//
+// Field elements and scalars are 16-limb (16-bit) bignums from std.crypto.bigint
+// Points use Jacobian coordinates (X, Y, Z) = affine (X/Z^2, Y/Z^3), the point at infinity is Z == 0,
+// doubling is dbl-2009-l (a = -3), addition is add-2007-bl,
+// modular inverses use Fermat (modexp by p-2 / n-2), not constant-time which is fine for verifying public signatures
+//
+// NOTE: verify allocates a handful of bignums it doesn't free (one-shot use)
+
+import from std.mem.raw { alloc, release };
+import from std.crypto.bigint {
+  bn_get, bn_set, bn_zero, bn_copy, bn_cmp, bn_sub,
+  bn_mod, bn_modmul, bn_modadd, bn_modsub, bn_modexp, bn_from_bytes_be
+};
+
+fun gf() -> ptr { return alloc(128); } // 16 limbs
+
+fun hexbyte(int ch) -> int {
+  if (ch >= 97) { return ch - 87; } // a-f
+  return ch - 48;                   // 0-9
+}
+
+// Fill a 16-limb bignum from a 64-char big-endian hex string
+fun set_hex(ptr bn, string h) -> void {
+  ptr bytes = alloc(32);
+  int i = 0;
+  while (i < 32) {
+    int hi = hexbyte(__ptr_read_byte(h, 2 * i));
+    int lo = hexbyte(__ptr_read_byte(h, 2 * i + 1));
+    __ptr_write_byte(bytes, i, (hi << 4) | lo);
+    i = i + 1;
+  }
+  bn_from_bytes_be(bytes, 32, bn, 16);
+  release(bytes);
+}
+
+fun is_zero(ptr a) -> int {
+  int i = 0;
+  while (i < 16) {
+    if (bn_get(a, i) != 0) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+// Serialize a 16-limb bignum to 32 big-endian bytes
+fun bn_to_bytes_be(ptr a, ptr out) -> void {
+  int i = 0;
+  while (i < 16) {
+    int limb = bn_get(a, i);
+    int lo = limb & 255;
+    int hi = (limb >> 8) & 255;
+    __ptr_write_byte(out, 31 - 2 * i, lo);
+    __ptr_write_byte(out, 31 - (2 * i + 1), hi);
+    i = i + 1;
+  }
+}
+
+// Jacobian point doubling: (X3,Y3,Z3) = 2*(X1,Y1,Z1) over the field p. dbl-2009-l
+fun jdouble(ptr p, ptr X3, ptr Y3, ptr Z3, ptr X1, ptr Y1, ptr Z1) -> void {
+  ptr delta = gf(); ptr gamma = gf(); ptr beta = gf(); ptr alpha = gf();
+  ptr t1 = gf(); ptr t2 = gf(); ptr t3 = gf();
+
+  bn_modmul(Z1, Z1, p, 16, delta);   // delta = Z1^2
+  bn_modmul(Y1, Y1, p, 16, gamma);   // gamma = Y1^2
+  bn_modmul(X1, gamma, p, 16, beta); // beta = X1*gamma
+
+  bn_modsub(X1, delta, p, 16, t1);   // X1 - delta
+  bn_modadd(X1, delta, p, 16, t2);   // X1 + delta
+  bn_modmul(t1, t2, p, 16, t3);      // (X1-delta)(X1+delta)
+  bn_modadd(t3, t3, p, 16, t1);      // 2*t3
+  bn_modadd(t1, t3, p, 16, alpha);   // alpha = 3*t3
+
+  // X3 = alpha^2 - 8*beta
+  bn_modmul(alpha, alpha, p, 16, t1);
+  bn_modadd(beta, beta, p, 16, t2);
+  bn_modadd(t2, t2, p, 16, t2);
+  bn_modadd(t2, t2, p, 16, t2);      // t2 = 8*beta
+  bn_modsub(t1, t2, p, 16, X3);
+
+  // Z3 = (Y1+Z1)^2 - gamma - delta
+  bn_modadd(Y1, Z1, p, 16, t1);
+  bn_modmul(t1, t1, p, 16, t1);
+  bn_modsub(t1, gamma, p, 16, t1);
+  bn_modsub(t1, delta, p, 16, Z3);
+
+  // Y3 = alpha*(4*beta - X3) - 8*gamma^2
+  bn_modadd(beta, beta, p, 16, t1);
+  bn_modadd(t1, t1, p, 16, t1);      // 4*beta
+  bn_modsub(t1, X3, p, 16, t1);
+  bn_modmul(alpha, t1, p, 16, t2);   // alpha*(4beta - X3)
+  bn_modmul(gamma, gamma, p, 16, t1);
+  bn_modadd(t1, t1, p, 16, t1);
+  bn_modadd(t1, t1, p, 16, t1);
+  bn_modadd(t1, t1, p, 16, t1);      // 8*gamma^2
+  bn_modsub(t2, t1, p, 16, Y3);
+
+  release(delta); release(gamma); release(beta); release(alpha);
+  release(t1); release(t2); release(t3);
+}
+
+// Jacobian point addition: (X3,Y3,Z3) = P1 + P2 over the field p. add-2007-bl,
+// with the infinity / doubling special cases handled
+fun jadd(ptr p, ptr X3, ptr Y3, ptr Z3,
+         ptr X1, ptr Y1, ptr Z1, ptr X2, ptr Y2, ptr Z2) -> void {
+  if (is_zero(Z1) == 1) {
+    bn_copy(X3, X2, 16); bn_copy(Y3, Y2, 16); bn_copy(Z3, Z2, 16);
+  } elseif (is_zero(Z2) == 1) {
+    bn_copy(X3, X1, 16); bn_copy(Y3, Y1, 16); bn_copy(Z3, Z1, 16);
+  } else {
+    ptr Z1Z1 = gf(); ptr Z2Z2 = gf(); ptr U1 = gf(); ptr U2 = gf();
+    ptr S1 = gf(); ptr S2 = gf(); ptr H = gf(); ptr I = gf();
+    ptr J = gf(); ptr rr = gf(); ptr V = gf(); ptr t1 = gf(); ptr t2 = gf();
+
+    bn_modmul(Z1, Z1, p, 16, Z1Z1);
+    bn_modmul(Z2, Z2, p, 16, Z2Z2);
+    bn_modmul(X1, Z2Z2, p, 16, U1);
+    bn_modmul(X2, Z1Z1, p, 16, U2);
+    bn_modmul(Y1, Z2, p, 16, t1);
+    bn_modmul(t1, Z2Z2, p, 16, S1);    // S1 = Y1*Z2^3
+    bn_modmul(Y2, Z1, p, 16, t1);
+    bn_modmul(t1, Z1Z1, p, 16, S2);    // S2 = Y2*Z1^3
+
+    bn_modsub(U2, U1, p, 16, H);
+    bn_modsub(S2, S1, p, 16, rr);
+
+    if (is_zero(H) == 1) {
+      if (is_zero(rr) == 1) {
+        jdouble(p, X3, Y3, Z3, X1, Y1, Z1);   // P1 == P2 -> double
+      } else {
+        bn_zero(X3, 16); bn_set(X3, 0, 1);    // P1 == -P2 -> infinity
+        bn_zero(Y3, 16); bn_set(Y3, 0, 1);
+        bn_zero(Z3, 16);
+      }
+    } else {
+      bn_modadd(H, H, p, 16, t1);        // 2H
+      bn_modmul(t1, t1, p, 16, I);       // I = (2H)^2
+      bn_modmul(H, I, p, 16, J);         // J = H*I
+      bn_modadd(rr, rr, p, 16, rr);      // r = 2*(S2-S1)
+      bn_modmul(U1, I, p, 16, V);        // V = U1*I
+
+      // X3 = r^2 - J - 2V
+      bn_modmul(rr, rr, p, 16, t1);
+      bn_modsub(t1, J, p, 16, t1);
+      bn_modadd(V, V, p, 16, t2);
+      bn_modsub(t1, t2, p, 16, X3);
+
+      // Y3 = r*(V - X3) - 2*S1*J
+      bn_modsub(V, X3, p, 16, t1);
+      bn_modmul(rr, t1, p, 16, t1);
+      bn_modmul(S1, J, p, 16, t2);
+      bn_modadd(t2, t2, p, 16, t2);
+      bn_modsub(t1, t2, p, 16, Y3);
+
+      // Z3 = ((Z1+Z2)^2 - Z1Z1 - Z2Z2) * H
+      bn_modadd(Z1, Z2, p, 16, t1);
+      bn_modmul(t1, t1, p, 16, t1);
+      bn_modsub(t1, Z1Z1, p, 16, t1);
+      bn_modsub(t1, Z2Z2, p, 16, t1);
+      bn_modmul(t1, H, p, 16, Z3);
+    }
+
+    release(Z1Z1); release(Z2Z2); release(U1); release(U2);
+    release(S1); release(S2); release(H); release(I);
+    release(J); release(rr); release(V); release(t1); release(t2);
+  }
+}
+
+// (outX,outY,outZ) = k * (Px,Py,Pz), Jacobian, MSB-first double-and-add
+fun jscalarmul(ptr p, ptr outX, ptr outY, ptr outZ, ptr k, ptr Px, ptr Py, ptr Pz) -> void {
+  // R = infinity
+  bn_zero(outX, 16); bn_set(outX, 0, 1);
+  bn_zero(outY, 16); bn_set(outY, 0, 1);
+  bn_zero(outZ, 16);
+
+  ptr tx = gf(); ptr ty = gf(); ptr tz = gf();
+  int bit = 255;
+  while (bit >= 0) {
+    jdouble(p, tx, ty, tz, outX, outY, outZ);
+    bn_copy(outX, tx, 16); bn_copy(outY, ty, 16); bn_copy(outZ, tz, 16);
+
+    int limb = bn_get(k, bit >> 4);
+    int kb = (limb >> (bit & 15)) & 1;
+    if (kb == 1) {
+      jadd(p, tx, ty, tz, outX, outY, outZ, Px, Py, Pz);
+      bn_copy(outX, tx, 16); bn_copy(outY, ty, 16); bn_copy(outZ, tz, 16);
+    }
+    bit = bit - 1;
+  }
+  release(tx); release(ty); release(tz);
+}
+
+// outx = affine x of a Jacobian point: X / Z^2 mod p.  pm2 = p - 2
+fun jaffine_x(ptr p, ptr pm2, ptr outx, ptr X, ptr Z) -> void {
+  ptr zinv = gf(); ptr zinv2 = gf();
+  bn_modexp(Z, pm2, 16, p, 16, zinv);  // Z^(p-2) = Z^-1
+  bn_modmul(zinv, zinv, p, 16, zinv2);
+  bn_modmul(X, zinv2, p, 16, outx);
+  release(zinv); release(zinv2);
+}
+
+// Build the P-256 domain parameters into caller-provided bignums
+fun load_params(ptr p, ptr nn, ptr Gx, ptr Gy) -> void {
+  set_hex(p,  "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff");
+  set_hex(nn, "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
+  set_hex(Gx, "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296");
+  set_hex(Gy, "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5");
+}
+
+// Verify an ECDSA-P256 signature. qx_be/qy_be: public key affine coords (32 BE
+// bytes each); r_be/s_be: signature (32 BE bytes each); hash32: 32-byte message
+// digest (e.g. SHA-256). Returns 1 if valid, else 0
+pub fun ecdsa_p256_verify(ptr qx_be, ptr qy_be, ptr r_be, ptr s_be, ptr hash32) -> int {
+  ptr p = gf(); ptr nn = gf(); ptr Gx = gf(); ptr Gy = gf();
+  load_params(p, nn, Gx, Gy);
+
+  ptr one = gf(); bn_zero(one, 16); bn_set(one, 0, 1);
+  ptr two = gf(); bn_zero(two, 16); bn_set(two, 0, 2);
+  ptr pm2 = gf(); bn_sub(p, two, pm2, 16);
+  ptr nm2 = gf(); bn_sub(nn, two, nm2, 16);
+
+  ptr r = gf(); bn_from_bytes_be(r_be, 32, r, 16);
+  ptr s = gf(); bn_from_bytes_be(s_be, 32, s, 16);
+  ptr qx = gf(); bn_from_bytes_be(qx_be, 32, qx, 16);
+  ptr qy = gf(); bn_from_bytes_be(qy_be, 32, qy, 16);
+
+  // 1 <= r, s < n
+  if (is_zero(r) == 1) { return 0; }
+  if (is_zero(s) == 1) { return 0; }
+  if (bn_cmp(r, nn, 16) >= 0) { return 0; }
+  if (bn_cmp(s, nn, 16) >= 0) { return 0; }
+
+  // e = hash mod n
+  ptr ebn = gf(); bn_from_bytes_be(hash32, 32, ebn, 16);
+  ptr e = gf(); bn_mod(ebn, 16, nn, 16, e);
+
+  // w = s^-1 mod n ; u1 = e*w ; u2 = r*w (all mod n)
+  ptr w = gf(); bn_modexp(s, nm2, 16, nn, 16, w);
+  ptr u1 = gf(); bn_modmul(e, w, nn, 16, u1);
+  ptr u2 = gf(); bn_modmul(r, w, nn, 16, u2);
+
+  // R = u1*G + u2*Q
+  ptr R1x = gf(); ptr R1y = gf(); ptr R1z = gf();
+  ptr R2x = gf(); ptr R2y = gf(); ptr R2z = gf();
+  jscalarmul(p, R1x, R1y, R1z, u1, Gx, Gy, one);
+  jscalarmul(p, R2x, R2y, R2z, u2, qx, qy, one);
+  ptr Rx = gf(); ptr Ry = gf(); ptr Rz = gf();
+  jadd(p, Rx, Ry, Rz, R1x, R1y, R1z, R2x, R2y, R2z);
+
+  if (is_zero(Rz) == 1) { return 0; }
+
+  // valid iff (R.x mod n) == r
+  ptr rx = gf(); jaffine_x(p, pm2, rx, Rx, Rz);
+  ptr rxn = gf(); bn_mod(rx, 16, nn, 16, rxn);
+  if (bn_cmp(rxn, r, 16) == 0) { return 1; }
+  return 0;
+}
+
+// Test helper: out_be = (k * G).x as 32 big-endian bytes
+pub fun ecdsa_p256_base_x(ptr out_be, ptr k_be) -> void {
+  ptr p = gf(); ptr nn = gf(); ptr Gx = gf(); ptr Gy = gf();
+  load_params(p, nn, Gx, Gy);
+  ptr one = gf(); bn_zero(one, 16); bn_set(one, 0, 1);
+  ptr two = gf(); bn_zero(two, 16); bn_set(two, 0, 2);
+  ptr pm2 = gf(); bn_sub(p, two, pm2, 16);
+
+  ptr k = gf(); bn_from_bytes_be(k_be, 32, k, 16);
+  ptr Rx = gf(); ptr Ry = gf(); ptr Rz = gf();
+  jscalarmul(p, Rx, Ry, Rz, k, Gx, Gy, one);
+  ptr ax = gf(); jaffine_x(p, pm2, ax, Rx, Rz);
+  bn_to_bytes_be(ax, out_be);
+}

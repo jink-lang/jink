@@ -1,0 +1,207 @@
+// Minimal X.509 (RFC 5280) certificate parsing + signature checking
+//
+// Extracts the signed tbsCertificate, the signature algorithm/value, and the
+// SubjectPublicKeyInfo, then verifies a certificate's signature against an
+// issuer's public key. Supports the two common algorithms: RSA PKCS#1 v1.5 with
+// SHA-256, and ECDSA-P256 with SHA-256
+//
+// This is the recursive core of chain validation: verify cert C with issuer I's
+// key. A self-signed cert uses its own SPKI as the issuer key. Date/name/SAN
+// checks are a separate layer on top
+
+import from std.mem.raw { alloc, zero, release };
+import from std.crypto.asn1 { der_tag, der_len, der_hdr, der_content, der_next, der_total };
+import from std.crypto.sha256 { sha256, sha256_to_bytes };
+import from std.crypto.sha512 { sha384, sha384_to_bytes };
+import from std.crypto.rsa { rsa_pkcs1_sha256_verify_hash };
+import from std.crypto.ecdsa_p256 { ecdsa_p256_verify };
+import from std.crypto.ecdsa_p384 { ecdsa_p384_verify };
+
+// Copy buf[off .. off+len) into a fresh buffer (works around no pointer math)
+fun copy_range(ptr buf, int off, int len) -> ptr {
+  ptr out = alloc(len);
+  int i = 0;
+  while (i < len) { __ptr_write_byte(out, i, __ptr_read_byte(buf, off + i)); i = i + 1; }
+  return out;
+}
+
+// Read a small INTEGER element (e.g. RSA exponent) as an int
+fun der_int_small(ptr buf, int int_pos) -> int {
+  int off = der_content(buf, int_pos);
+  int len = der_len(buf, int_pos);
+  int v = 0;
+  int i = 0;
+  while (i < len) {
+    int nb = __ptr_read_byte(buf, off + i);
+    v = (v << 8) | nb;
+    i = i + 1;
+  }
+  return v;
+}
+
+// Extract an INTEGER into a right-aligned n-byte big-endian buffer (strips the
+// optional ASN.1 sign byte). Used for ECDSA r / s (n=32 for P-256, 48 for P-384).
+fun der_int_to_n(ptr buf, int int_pos, ptr out, int n) -> void {
+  int off = der_content(buf, int_pos);
+  int len = der_len(buf, int_pos);
+  int fb = __ptr_read_byte(buf, off);
+  if (fb == 0) { off = off + 1; len = len - 1; }
+  if (len > n) { off = off + (len - n); len = n; } // guard: never write at a negative offset
+  zero(out, n);
+  int i = 0;
+  while (i < len) {
+    __ptr_write_byte(out, n - len + i, __ptr_read_byte(buf, off + i));
+    i = i + 1;
+  }
+}
+
+// Identify an AlgorithmIdentifier OID: 1=RSA-SHA256, 2=ECDSA-SHA256,
+// 3=ECDSA-SHA384, 11=rsaEncryption, 12=ecPublicKey, 0=unknown
+fun alg_code(ptr buf, int algid_pos) -> int {
+  int oid_pos = der_content(buf, algid_pos);
+  int oid_off = der_content(buf, oid_pos);
+  int oid_len = der_len(buf, oid_pos);
+  int b3 = __ptr_read_byte(buf, oid_off + 3);
+  if (b3 == 134) { // 0x86 -> 1.2.840.113549 (RSA)
+    int last = __ptr_read_byte(buf, oid_off + oid_len - 1);
+    if (last == 11) { return 1; }
+    if (last == 1) { return 11; }
+    return 0;
+  }
+  if (b3 == 206) { // 0xce -> 1.2.840.10045 (EC)
+    if (oid_len == 8) {
+      int last = __ptr_read_byte(buf, oid_off + 7); // ecdsa-with-SHAxxx: ..04 03 NN
+      if (last == 2) { return 2; }  // SHA-256
+      if (last == 3) { return 3; }  // SHA-384
+      return 0;
+    }
+    if (oid_len == 7) { return 12; } // ecPublicKey (key)
+    return 0;
+  }
+  return 0;
+}
+
+// Offset of the issuer Name SEQUENCE within a certificate
+pub fun x509_issuer_pos(ptr buf) -> int {
+  int tbs_pos = der_content(buf, 0);
+  int p = der_content(buf, tbs_pos);
+  int t0 = der_tag(buf, p);
+  if (t0 == 160) { p = der_next(buf, p); } // skip [0] version
+  p = der_next(buf, p); // serialNumber
+  p = der_next(buf, p); // signature algid
+  return p;             // issuer
+}
+
+// Offset of the subject Name SEQUENCE within a certificate
+pub fun x509_subject_pos(ptr buf) -> int {
+  int p = x509_issuer_pos(buf);
+  p = der_next(buf, p); // issuer
+  p = der_next(buf, p); // validity
+  return p;             // subject
+}
+
+// Offset of the SubjectPublicKeyInfo SEQUENCE within a certificate
+pub fun x509_spki_pos(ptr buf) -> int {
+  int tbs_pos = der_content(buf, 0);
+  int p = der_content(buf, tbs_pos);
+  int t0 = der_tag(buf, p);
+  if (t0 == 160) { p = der_next(buf, p); } // skip [0] version
+  p = der_next(buf, p); // serialNumber
+  p = der_next(buf, p); // signature algid
+  p = der_next(buf, p); // issuer
+  p = der_next(buf, p); // validity
+  p = der_next(buf, p); // subject
+  return p;             // subjectPublicKeyInfo
+}
+
+// Verify that certificate `buf` is signed by the public key located at SPKI
+// offset `spki` inside `issuer`. Returns 1 if the signature is valid, else 0
+pub fun x509_verify_sig(ptr buf, ptr issuer, int spki) -> int {
+  int tbs_pos = der_content(buf, 0);
+  int tbs_len = der_total(buf, tbs_pos);
+  ptr tbs = copy_range(buf, tbs_pos, tbs_len);
+
+  int sigalg_pos = der_next(buf, tbs_pos);
+  int alg = alg_code(buf, sigalg_pos);
+
+  // Hash the tbsCertificate with the digest the signature uses (48-byte buffer
+  // holds either a 32-byte SHA-256 or a 48-byte SHA-384 digest)
+  ptr hash = alloc(48);
+  if (alg == 3) {
+    let d384 = sha384(tbs, tbs_len);
+    sha384_to_bytes(d384, hash);
+  } else {
+    let d256 = sha256(tbs, tbs_len);
+    sha256_to_bytes(d256, hash);
+  }
+  release(tbs);
+
+  // signatureValue BIT STRING: skip the leading unused-bits byte
+  int sigval_pos = der_next(buf, sigalg_pos);
+  int sv_off = der_content(buf, sigval_pos) + 1;
+  int sv_len = der_len(buf, sigval_pos) - 1;
+
+  // Issuer key material lives under its SubjectPublicKeyInfo
+  int algid = der_content(issuer, spki);
+  int bitstr = der_next(issuer, algid);
+
+  int result = 0;
+  if (alg == 1) {
+    // RSA: BIT STRING wraps RSAPublicKey SEQUENCE { modulus, exponent }
+    int rsa_seq = der_content(issuer, bitstr) + 1; // skip unused-bits byte
+    int mod_pos = der_content(issuer, rsa_seq);
+    int exp_pos = der_next(issuer, mod_pos);
+    int mod_off = der_content(issuer, mod_pos);
+    int mod_len = der_len(issuer, mod_pos);
+    int fb = __ptr_read_byte(issuer, mod_off);
+    if (fb == 0) { mod_off = mod_off + 1; mod_len = mod_len - 1; }
+    ptr modulus = copy_range(issuer, mod_off, mod_len);
+    int e = der_int_small(issuer, exp_pos);
+    ptr sig = copy_range(buf, sv_off, sv_len);
+    result = rsa_pkcs1_sha256_verify_hash(modulus, mod_len, e, sig, hash);
+    release(modulus); release(sig);
+  } elseif (alg == 2) {
+    // ECDSA P-256: BIT STRING wraps 0x04 || X(32) || Y(32); sig is SEQUENCE{r,s}
+    int pt = der_content(issuer, bitstr) + 1; // skip unused-bits byte -> 0x04
+    ptr qx = copy_range(issuer, pt + 1, 32);
+    ptr qy = copy_range(issuer, pt + 33, 32);
+    int r_pos = der_content(buf, sv_off);
+    int s_pos = der_next(buf, r_pos);
+    ptr r = alloc(32); der_int_to_n(buf, r_pos, r, 32);
+    ptr s = alloc(32); der_int_to_n(buf, s_pos, s, 32);
+    result = ecdsa_p256_verify(qx, qy, r, s, hash);
+    release(qx); release(qy); release(r); release(s);
+  } elseif (alg == 3) {
+    // ECDSA P-384: BIT STRING wraps 0x04 || X(48) || Y(48); sig is SEQUENCE{r,s}
+    int pt = der_content(issuer, bitstr) + 1;
+    ptr qx = copy_range(issuer, pt + 1, 48);
+    ptr qy = copy_range(issuer, pt + 49, 48);
+    int r_pos = der_content(buf, sv_off);
+    int s_pos = der_next(buf, r_pos);
+    ptr r = alloc(48); der_int_to_n(buf, r_pos, r, 48);
+    ptr s = alloc(48); der_int_to_n(buf, s_pos, s, 48);
+    result = ecdsa_p384_verify(qx, qy, r, s, hash);
+    release(qx); release(qy); release(r); release(s);
+  }
+
+  release(hash);
+  return result;
+}
+
+// Verify a self-signed certificate (issuer key == own SPKI) - returns 1 / 0
+pub fun x509_self_verify(ptr buf) -> int {
+  return x509_verify_sig(buf, buf, x509_spki_pos(buf));
+}
+
+// Extract an EC (P-256) public key from a certificate: the uncompressed point
+// 0x04 || X(32) || Y(32) inside the SubjectPublicKeyInfo BIT STRING
+pub fun x509_ec_point(ptr cert, ptr qx, ptr qy) -> void {
+  int spki = x509_spki_pos(cert);
+  int algid = der_content(cert, spki);
+  int bitstr = der_next(cert, algid);
+  int pt = der_content(cert, bitstr) + 1; // skip unused-bits byte -> 0x04
+  int i = 0;
+  while (i < 32) { __ptr_write_byte(qx, i, __ptr_read_byte(cert, pt + 1 + i)); i = i + 1; }
+  i = 0;
+  while (i < 32) { __ptr_write_byte(qy, i, __ptr_read_byte(cert, pt + 33 + i)); i = i + 1; }
+}

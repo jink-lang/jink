@@ -1,0 +1,253 @@
+// ECDSA signature verification on NIST P-384 (secp384r1)
+//
+// Same structure as ecdsa_p256 (Jacobian coords, dbl-2009-l + add-2007-bl,
+// Fermat inverses) but with 24-limb (384-bit) bignums and the P-384 domain
+// parameters. Pairs with SHA-384 (std.crypto.sha512). Not constant-time; fine for
+// verifying public signatures (e.g. cert-chain links above the leaf)
+
+import from std.mem.raw { alloc, release };
+import from std.crypto.bigint {
+  bn_get, bn_set, bn_zero, bn_copy, bn_cmp, bn_sub,
+  bn_mod, bn_modmul, bn_modadd, bn_modsub, bn_modexp, bn_from_bytes_be
+};
+
+fun gf() -> ptr { return alloc(192); } // 24 limbs
+
+fun hexbyte(int ch) -> int {
+  if (ch >= 97) { return ch - 87; }
+  return ch - 48;
+}
+
+// Fill a 24-limb bignum from a 96-char big-endian hex string
+fun set_hex(ptr bn, string h) -> void {
+  ptr bytes = alloc(48);
+  int i = 0;
+  while (i < 48) {
+    int hi = hexbyte(__ptr_read_byte(h, 2 * i));
+    int lo = hexbyte(__ptr_read_byte(h, 2 * i + 1));
+    __ptr_write_byte(bytes, i, (hi << 4) | lo);
+    i = i + 1;
+  }
+  bn_from_bytes_be(bytes, 48, bn, 24);
+  release(bytes);
+}
+
+fun is_zero(ptr a) -> int {
+  int i = 0;
+  while (i < 24) {
+    if (bn_get(a, i) != 0) { return 0; }
+    i = i + 1;
+  }
+  return 1;
+}
+
+// Serialize a 24-limb bignum to 48 big-endian bytes
+fun bn_to_bytes_be(ptr a, ptr out) -> void {
+  int i = 0;
+  while (i < 24) {
+    int limb = bn_get(a, i);
+    __ptr_write_byte(out, 47 - 2 * i, limb & 255);
+    __ptr_write_byte(out, 47 - (2 * i + 1), (limb >> 8) & 255);
+    i = i + 1;
+  }
+}
+
+// Jacobian doubling (dbl-2009-l, a = -3).
+fun jdouble(ptr p, ptr X3, ptr Y3, ptr Z3, ptr X1, ptr Y1, ptr Z1) -> void {
+  ptr delta = gf(); ptr gamma = gf(); ptr beta = gf(); ptr alpha = gf();
+  ptr t1 = gf(); ptr t2 = gf(); ptr t3 = gf();
+
+  bn_modmul(Z1, Z1, p, 24, delta);
+  bn_modmul(Y1, Y1, p, 24, gamma);
+  bn_modmul(X1, gamma, p, 24, beta);
+
+  bn_modsub(X1, delta, p, 24, t1);
+  bn_modadd(X1, delta, p, 24, t2);
+  bn_modmul(t1, t2, p, 24, t3);
+  bn_modadd(t3, t3, p, 24, t1);
+  bn_modadd(t1, t3, p, 24, alpha);
+
+  bn_modmul(alpha, alpha, p, 24, t1);
+  bn_modadd(beta, beta, p, 24, t2);
+  bn_modadd(t2, t2, p, 24, t2);
+  bn_modadd(t2, t2, p, 24, t2);
+  bn_modsub(t1, t2, p, 24, X3);
+
+  bn_modadd(Y1, Z1, p, 24, t1);
+  bn_modmul(t1, t1, p, 24, t1);
+  bn_modsub(t1, gamma, p, 24, t1);
+  bn_modsub(t1, delta, p, 24, Z3);
+
+  bn_modadd(beta, beta, p, 24, t1);
+  bn_modadd(t1, t1, p, 24, t1);
+  bn_modsub(t1, X3, p, 24, t1);
+  bn_modmul(alpha, t1, p, 24, t2);
+  bn_modmul(gamma, gamma, p, 24, t1);
+  bn_modadd(t1, t1, p, 24, t1);
+  bn_modadd(t1, t1, p, 24, t1);
+  bn_modadd(t1, t1, p, 24, t1);
+  bn_modsub(t2, t1, p, 24, Y3);
+
+  release(delta); release(gamma); release(beta); release(alpha);
+  release(t1); release(t2); release(t3);
+}
+
+// Jacobian addition (add-2007-bl), with infinity / doubling special cases
+fun jadd(ptr p, ptr X3, ptr Y3, ptr Z3,
+         ptr X1, ptr Y1, ptr Z1, ptr X2, ptr Y2, ptr Z2) -> void {
+  if (is_zero(Z1) == 1) {
+    bn_copy(X3, X2, 24); bn_copy(Y3, Y2, 24); bn_copy(Z3, Z2, 24);
+  } elseif (is_zero(Z2) == 1) {
+    bn_copy(X3, X1, 24); bn_copy(Y3, Y1, 24); bn_copy(Z3, Z1, 24);
+  } else {
+    ptr Z1Z1 = gf(); ptr Z2Z2 = gf(); ptr U1 = gf(); ptr U2 = gf();
+    ptr S1 = gf(); ptr S2 = gf(); ptr H = gf(); ptr I = gf();
+    ptr J = gf(); ptr rr = gf(); ptr V = gf(); ptr t1 = gf(); ptr t2 = gf();
+
+    bn_modmul(Z1, Z1, p, 24, Z1Z1);
+    bn_modmul(Z2, Z2, p, 24, Z2Z2);
+    bn_modmul(X1, Z2Z2, p, 24, U1);
+    bn_modmul(X2, Z1Z1, p, 24, U2);
+    bn_modmul(Y1, Z2, p, 24, t1);
+    bn_modmul(t1, Z2Z2, p, 24, S1);
+    bn_modmul(Y2, Z1, p, 24, t1);
+    bn_modmul(t1, Z1Z1, p, 24, S2);
+
+    bn_modsub(U2, U1, p, 24, H);
+    bn_modsub(S2, S1, p, 24, rr);
+
+    if (is_zero(H) == 1) {
+      if (is_zero(rr) == 1) {
+        jdouble(p, X3, Y3, Z3, X1, Y1, Z1);
+      } else {
+        bn_zero(X3, 24); bn_set(X3, 0, 1);
+        bn_zero(Y3, 24); bn_set(Y3, 0, 1);
+        bn_zero(Z3, 24);
+      }
+    } else {
+      bn_modadd(H, H, p, 24, t1);
+      bn_modmul(t1, t1, p, 24, I);
+      bn_modmul(H, I, p, 24, J);
+      bn_modadd(rr, rr, p, 24, rr);
+      bn_modmul(U1, I, p, 24, V);
+
+      bn_modmul(rr, rr, p, 24, t1);
+      bn_modsub(t1, J, p, 24, t1);
+      bn_modadd(V, V, p, 24, t2);
+      bn_modsub(t1, t2, p, 24, X3);
+
+      bn_modsub(V, X3, p, 24, t1);
+      bn_modmul(rr, t1, p, 24, t1);
+      bn_modmul(S1, J, p, 24, t2);
+      bn_modadd(t2, t2, p, 24, t2);
+      bn_modsub(t1, t2, p, 24, Y3);
+
+      bn_modadd(Z1, Z2, p, 24, t1);
+      bn_modmul(t1, t1, p, 24, t1);
+      bn_modsub(t1, Z1Z1, p, 24, t1);
+      bn_modsub(t1, Z2Z2, p, 24, t1);
+      bn_modmul(t1, H, p, 24, Z3);
+    }
+
+    release(Z1Z1); release(Z2Z2); release(U1); release(U2);
+    release(S1); release(S2); release(H); release(I);
+    release(J); release(rr); release(V); release(t1); release(t2);
+  }
+}
+
+// (outX,outY,outZ) = k * (Px,Py,Pz), Jacobian, MSB-first double-and-add (384 bits)
+fun jscalarmul(ptr p, ptr outX, ptr outY, ptr outZ, ptr k, ptr Px, ptr Py, ptr Pz) -> void {
+  bn_zero(outX, 24); bn_set(outX, 0, 1);
+  bn_zero(outY, 24); bn_set(outY, 0, 1);
+  bn_zero(outZ, 24);
+
+  ptr tx = gf(); ptr ty = gf(); ptr tz = gf();
+  int bit = 383;
+  while (bit >= 0) {
+    jdouble(p, tx, ty, tz, outX, outY, outZ);
+    bn_copy(outX, tx, 24); bn_copy(outY, ty, 24); bn_copy(outZ, tz, 24);
+
+    int limb = bn_get(k, bit >> 4);
+    int kb = (limb >> (bit & 15)) & 1;
+    if (kb == 1) {
+      jadd(p, tx, ty, tz, outX, outY, outZ, Px, Py, Pz);
+      bn_copy(outX, tx, 24); bn_copy(outY, ty, 24); bn_copy(outZ, tz, 24);
+    }
+    bit = bit - 1;
+  }
+  release(tx); release(ty); release(tz);
+}
+
+// outx = affine x: X / Z^2 mod p.  pm2 = p - 2
+fun jaffine_x(ptr p, ptr pm2, ptr outx, ptr X, ptr Z) -> void {
+  ptr zinv = gf(); ptr zinv2 = gf();
+  bn_modexp(Z, pm2, 24, p, 24, zinv);
+  bn_modmul(zinv, zinv, p, 24, zinv2);
+  bn_modmul(X, zinv2, p, 24, outx);
+  release(zinv); release(zinv2);
+}
+
+fun load_params(ptr p, ptr nn, ptr Gx, ptr Gy) -> void {
+  set_hex(p,  "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff");
+  set_hex(nn, "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973");
+  set_hex(Gx, "aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7");
+  set_hex(Gy, "3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f");
+}
+
+// Verify an ECDSA-P384 signature. qx_be/qy_be: public key coords (48 BE bytes);
+// r_be/s_be: signature (48 BE bytes); hash48: SHA-384 digest - returns 1/0
+pub fun ecdsa_p384_verify(ptr qx_be, ptr qy_be, ptr r_be, ptr s_be, ptr hash48) -> int {
+  ptr p = gf(); ptr nn = gf(); ptr Gx = gf(); ptr Gy = gf();
+  load_params(p, nn, Gx, Gy);
+
+  ptr one = gf(); bn_zero(one, 24); bn_set(one, 0, 1);
+  ptr two = gf(); bn_zero(two, 24); bn_set(two, 0, 2);
+  ptr pm2 = gf(); bn_sub(p, two, pm2, 24);
+  ptr nm2 = gf(); bn_sub(nn, two, nm2, 24);
+
+  ptr r = gf(); bn_from_bytes_be(r_be, 48, r, 24);
+  ptr s = gf(); bn_from_bytes_be(s_be, 48, s, 24);
+  ptr qx = gf(); bn_from_bytes_be(qx_be, 48, qx, 24);
+  ptr qy = gf(); bn_from_bytes_be(qy_be, 48, qy, 24);
+
+  if (is_zero(r) == 1) { return 0; }
+  if (is_zero(s) == 1) { return 0; }
+  if (bn_cmp(r, nn, 24) >= 0) { return 0; }
+  if (bn_cmp(s, nn, 24) >= 0) { return 0; }
+
+  ptr ebn = gf(); bn_from_bytes_be(hash48, 48, ebn, 24);
+  ptr e = gf(); bn_mod(ebn, 24, nn, 24, e);
+
+  ptr w = gf(); bn_modexp(s, nm2, 24, nn, 24, w);
+  ptr u1 = gf(); bn_modmul(e, w, nn, 24, u1);
+  ptr u2 = gf(); bn_modmul(r, w, nn, 24, u2);
+
+  ptr R1x = gf(); ptr R1y = gf(); ptr R1z = gf();
+  ptr R2x = gf(); ptr R2y = gf(); ptr R2z = gf();
+  jscalarmul(p, R1x, R1y, R1z, u1, Gx, Gy, one);
+  jscalarmul(p, R2x, R2y, R2z, u2, qx, qy, one);
+  ptr Rx = gf(); ptr Ry = gf(); ptr Rz = gf();
+  jadd(p, Rx, Ry, Rz, R1x, R1y, R1z, R2x, R2y, R2z);
+
+  if (is_zero(Rz) == 1) { return 0; }
+
+  ptr rx = gf(); jaffine_x(p, pm2, rx, Rx, Rz);
+  ptr rxn = gf(); bn_mod(rx, 24, nn, 24, rxn);
+  if (bn_cmp(rxn, r, 24) == 0) { return 1; }
+  return 0;
+}
+
+// Test helper: out_be = (k * G).x as 48 big-endian bytes
+pub fun ecdsa_p384_base_x(ptr out_be, ptr k_be) -> void {
+  ptr p = gf(); ptr nn = gf(); ptr Gx = gf(); ptr Gy = gf();
+  load_params(p, nn, Gx, Gy);
+  ptr one = gf(); bn_zero(one, 24); bn_set(one, 0, 1);
+  ptr two = gf(); bn_zero(two, 24); bn_set(two, 0, 2);
+  ptr pm2 = gf(); bn_sub(p, two, pm2, 24);
+
+  ptr k = gf(); bn_from_bytes_be(k_be, 48, k, 24);
+  ptr Rx = gf(); ptr Ry = gf(); ptr Rz = gf();
+  jscalarmul(p, Rx, Ry, Rz, k, Gx, Gy, one);
+  ptr ax = gf(); jaffine_x(p, pm2, ax, Rx, Rz);
+  bn_to_bytes_be(ax, out_be);
+}

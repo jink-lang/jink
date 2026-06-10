@@ -1,0 +1,75 @@
+// HKDF-SHA256 (RFC 5869) - builds on std.crypto.hmac
+//
+// Extract(salt, IKM) -> PRK = HMAC(salt, IKM)
+// Expand(PRK, info, L) -> OKM, where
+//   T(0) = "", T(i) = HMAC(PRK, T(i-1) || info || byte(i)), OKM = T(1..N)[:L]
+
+import from std.mem.raw { alloc, zero, release };
+import from std.crypto.hmac { hmac_sha256 };
+
+// HKDF-Extract - writes a 32-byte PRK to prk
+// Empty salt => 32 zero bytes
+pub fun hkdf_extract(ptr salt, int saltlen, ptr ikm, int ikmlen, ptr prk) -> void {
+  if (saltlen == 0) {
+    ptr zsalt = alloc(32);
+    zero(zsalt, 32);
+    hmac_sha256(zsalt, 32, ikm, ikmlen, prk);
+    release(zsalt);
+  } else {
+    hmac_sha256(salt, saltlen, ikm, ikmlen, prk);
+  }
+}
+
+// HKDF-Expand - writes L bytes of output key material to out
+pub fun hkdf_expand(ptr prk, int prklen, ptr info, int infolen, ptr out, int outlen) -> void {
+  ptr prev = alloc(32);              // T(i-1); empty (length 0) for the first round
+  int prevlen = 0;
+  ptr tblock = alloc(32);            // current T(i)
+  ptr block_in = alloc(32 + infolen + 1); // T(i-1) || info || counter
+
+  int generated = 0;
+  int counter = 1;
+  while (generated < outlen) {
+    // Assemble HMAC input: T(i-1) || info || counter
+    int pos = 0;
+    int i = 0;
+    while (i < prevlen) {
+      __ptr_write_byte(block_in, pos, __ptr_read_byte(prev, i));
+      pos = pos + 1;
+      i = i + 1;
+    }
+    i = 0;
+    while (i < infolen) {
+      __ptr_write_byte(block_in, pos, __ptr_read_byte(info, i));
+      pos = pos + 1;
+      i = i + 1;
+    }
+    __ptr_write_byte(block_in, pos, counter & 0xFF);
+    pos = pos + 1;
+
+    hmac_sha256(prk, prklen, block_in, pos, tblock);
+
+    // Copy up to 32 bytes (but not past outlen) into the output
+    int take = 32;
+    if (32 > outlen - generated) { take = outlen - generated; }
+    i = 0;
+    while (i < take) {
+      __ptr_write_byte(out, generated, __ptr_read_byte(tblock, i));
+      generated = generated + 1;
+      i = i + 1;
+    }
+
+    // T(i-1) <- T(i) for the next round
+    i = 0;
+    while (i < 32) {
+      __ptr_write_byte(prev, i, __ptr_read_byte(tblock, i));
+      i = i + 1;
+    }
+    prevlen = 32;
+    counter = counter + 1;
+  }
+
+  release(prev);
+  release(tblock);
+  release(block_in);
+}
