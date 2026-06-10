@@ -1996,6 +1996,12 @@ impl<'ctx> CodeGen<'ctx> {
             parameters.push(t.into());
             t.into()
           },
+          // First-class function parameter (fun(int)->int) is a function pointer
+          s if s.starts_with("fun(") => {
+            let t = self.context.ptr_type(AddressSpace::default());
+            parameters.push(t.into());
+            t.into()
+          },
           _ => {
             // Check for defined type (TODO: add aliases)
 
@@ -2321,6 +2327,8 @@ impl<'ctx> CodeGen<'ctx> {
             "float" => self.context.f64_type().into(),
             "bool" => self.context.bool_type().into(),
             "string" | "ptr" => self.context.ptr_type(AddressSpace::default()).into(),
+            // First-class function parameter (fun(int)->int) -> function pointer
+            s if s.starts_with("fun(") => self.context.ptr_type(AddressSpace::default()).into(),
             _ => {
               if self.get_struct(&type_name).is_some() {
                 self.context.ptr_type(AddressSpace::default()).into()
@@ -3556,6 +3564,35 @@ impl<'ctx> CodeGen<'ctx> {
             None => Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum()),
           }
 
+        // First-class functions - the callee names a local variable/parameter that
+        // holds a function value -> call indirectly through the function pointer
+        // The signature is reconstructed from the argument values and the call's
+        // inferred return type (typer validated arity/types via JType::Function)
+        } else if let Some((_, Some(var_ptr), _vtyp, _vval, _)) = self.get_symbol(&name.0)? {
+          let ptr_ty = self.context.ptr_type(AddressSpace::default());
+          let fn_ptr = self.builder.build_load(ptr_ty, var_ptr, "fn_val").unwrap().into_pointer_value();
+
+          let mut llvm_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len());
+          let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::with_capacity(args.len());
+          for arg in args.iter() {
+            let v = self.visit(arg, block)?;
+            param_types.push(v.get_type().into());
+            llvm_args.push(v.into());
+          }
+
+          let ret_jtype = expr.inferred_type.clone().unwrap_or(JType::Void);
+          let fn_type = if ret_jtype == JType::Void {
+            self.context.void_type().fn_type(&param_types, false)
+          } else {
+            self.jtype_to_basic_type(ret_jtype)?.fn_type(&param_types, false)
+          };
+
+          let call = self.builder.build_indirect_call(fn_type, fn_ptr, &llvm_args, "indirect_call").unwrap();
+          match call.try_as_basic_value().basic() {
+            Some(val) => Ok(val),
+            None => Ok(self.context.ptr_type(AddressSpace::default()).const_null().as_basic_value_enum()),
+          }
+
         // Mapping was not found, check for built-in functions
         } else {
 
@@ -3769,6 +3806,14 @@ impl<'ctx> CodeGen<'ctx> {
         return Ok((ptr, typ, var));
       }
     } else {
+      // First-class functions - bare function name used as value evaluates to
+      // its address (function pointer), so it can be stored or passed as an arg
+      let fname = self.get_import_origin(&name).unwrap_or_else(|| name.clone());
+      if let Some(fun_ctx) = self.functions.get(&fname) {
+        let fn_ptr = fun_ctx.llvm_fun.as_global_value().as_pointer_value();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default()).as_basic_type_enum();
+        return Ok((None, ptr_ty, fn_ptr.as_basic_value_enum()));
+      }
       return Err(Error::new(
         Error::CompilerError,
         None,
@@ -4282,6 +4327,7 @@ mod tests {
         .arg(&executable_file) // `test1.exe`
         .arg(&llvm_ir_file)    // `test1.ll`
         .arg("-lws2_32")       // Winsock (sockets)
+        .arg("-lcrypt32")      // Cert store
         .output()
         .expect(format!("Failed to execute clang for file {}", llvm_ir_file).as_str())
     } else {
@@ -4357,6 +4403,7 @@ mod tests {
         .arg(&llvm_ir_file)    // `test1.ll`
         .arg("-llegacy_stdio_definitions")
         .arg("-lws2_32")       // Winsock (sockets)
+        .arg("-lcrypt32")      // Cert store
         .output()
         .expect(format!("Failed to execute clang for file {}", llvm_ir_file).as_str())
     } else {
@@ -4804,6 +4851,24 @@ mod tests {
       printf(\"%s\", type(a));
     ",
     "int")
+  }
+
+  #[test]
+  fn test_build_first_class_functions() -> Result<(), Error> {
+    run_test("
+      fun square(int x)  -> int { return x * x; }
+      fun inc(int x)     -> int { return x + 1; }
+      fun apply(fun(int) -> int g, int x) -> int { return g(x); }
+      fun twice(fun(int) -> int g, int x) -> int { return g(g(x)); }
+
+      let f = square;
+      printf(\"%d \", f(5));             // 25
+      f = inc;
+      printf(\"%d \", f(5));             // 6
+      printf(\"%d \", apply(square, 6)); // 36
+      printf(\"%d\", twice(square, 3));  // 81
+    ",
+    "25 6 36 81")
   }
 
   #[test]

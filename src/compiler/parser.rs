@@ -732,9 +732,10 @@ impl Parser {
         ));
       } else {
         let raw = cur.value.unwrap();
-        // Hex literal (0x...) parsed via radix 16; otherwise decimal
+        // Hex literal (0x...) parsed as u64 (so full 64-bit patterns with the top
+        // bit set work, e.g. SHA-512 constants) then reinterpreted as i64
         let int_val = if raw.len() > 2 && (raw.starts_with("0x") || raw.starts_with("0X")) {
-          i64::from_str_radix(&raw[2..], 16).unwrap()
+          u64::from_str_radix(&raw[2..], 16).unwrap() as i64
         } else {
           raw.parse::<i64>().unwrap()
         };
@@ -1506,6 +1507,52 @@ impl Parser {
             Some(cur.line),
             cur.start_pos,
             Some(cur.line)
+          ));
+
+          if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type == TokenTypes::Comma {
+            self.iter.next();
+            self.skip_newlines(Some(1));
+          }
+          continue;
+        }
+
+        // First-class function parameter - fun(int, int) -> int callback
+        // Serialized to a canonical type string fun(int,int)->int
+        if cur.of_type == TokenTypes::Keyword && cur.value.as_ref().unwrap() == "fun" {
+          self.consume(&[TokenTypes::LParen], false)?;
+          let mut ptypes: Vec<String> = vec![];
+          while self.iter.current.is_some()
+            && self.iter.current.as_ref().unwrap().of_type != TokenTypes::RParen {
+            let t = self.consume(&[TokenTypes::Identifier], false)?;
+            ptypes.push(String::from(t.value.unwrap()));
+            if self.iter.current.as_ref().unwrap().of_type == TokenTypes::Comma {
+              self.iter.next();
+              self.skip_newlines(Some(1));
+            }
+          }
+          self.consume(&[TokenTypes::RParen], false)?;
+
+          // Return type after ->
+          let arrow = self.consume(&[TokenTypes::Operator], false)?;
+          if arrow.value.as_ref().unwrap() != "->" {
+            return Err(Error::new(
+              Error::UnexpectedToken,
+              Some(arrow.clone()),
+              self.code.lines().nth((arrow.line - 1) as usize).unwrap(),
+              arrow.start_pos,
+              arrow.end_pos,
+              "Expected \"->\" in function type".to_string()
+            ));
+          }
+          let ret = self.consume(&[TokenTypes::Identifier], false)?;
+          let canonical = format!("fun({})->{}", ptypes.join(","), String::from(ret.value.unwrap()));
+
+          // Parameter name
+          let name_tok = self.consume(&[TokenTypes::Identifier], false)?;
+          let ident = Literals::Identifier(Name(String::from(name_tok.value.unwrap())));
+          list.push(self.get_expr(
+            Expr::FunctionParam(Some(Type(canonical)), false, ident, None, false),
+            Some(cur.line), cur.start_pos, Some(cur.line)
           ));
 
           if self.iter.current.is_some() && self.iter.current.as_ref().unwrap().of_type == TokenTypes::Comma {

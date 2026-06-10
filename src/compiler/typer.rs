@@ -122,6 +122,24 @@ impl TypeChecker {
   }
 
   fn string_to_jtype(&self, type_name: &str) -> Result<JType, String> {
+    // Function type, e.g. "fun(int,int)->int" or "fun()->void" (first-class funs)
+    if let Some(rest) = type_name.strip_prefix("fun(") {
+      let close = rest.find(')')
+        .ok_or_else(|| format!("Malformed function type '{}'.", type_name))?;
+      let params_part = &rest[..close];
+      let ret_part = rest[close + 1..].strip_prefix("->")
+        .ok_or_else(|| format!("Malformed function type '{}': expected '->'.", type_name))?;
+      let mut param_types = Vec::new();
+      if !params_part.trim().is_empty() {
+        for p in params_part.split(',') {
+          let pt = self.string_to_jtype(p.trim())?;
+          param_types.push(JType::FunctionParam(Box::new(pt), None, false));
+        }
+      }
+      let ret = self.string_to_jtype(ret_part.trim())?;
+      return Ok(JType::Function(param_types, Box::new(ret)));
+    }
+
     match type_name {
       "int" => Ok(JType::Integer),
       "uint" => Ok(JType::UnsignedInteger),

@@ -11,14 +11,9 @@ The Jink programming language
 ## About
 Jink is a functional, object-oriented programming language designed with programmer familiarity in mind. Inspired by JavaScript, C++, Python and Go, Jink aims to offer a streamlined, modern and flexible but familiar syntax with enough power behind it to leave more room and time for actually writing good software.
 
-This is a WIP and any contributions are welcome. Read more in the [Contributing](#contributing) section below. <!-- To read on the current state of the language, visit the [Wiki](https://github.com/jink-lang/jink/wiki). -->
+Any and all contributions are welcome. Read more in the [Contributing](#contributing) section below. <!-- To read on the current state of the language, visit the [Wiki](https://github.com/jink-lang/jink/wiki). -->
 
 There is a [Discord](https://discord.gg/cWzcQz2) server that hosts the project where you can ask questions, get help, and chat with other contributors. And [another](https://discord.gg/hUhDG8cfF9) broader community from contributors to this project where we chat about projects in general. Jink repo updates are posted in both.
-
-## Status
-Jink is in its early stages and being actively developed. If you have familiarity with compilers and/or LLVM, your expertise would be greatly appreciated.
-
-We have begun implementing the first stage compiler in Rust. There are a number of issues and features that need to be addressed before we can move on to the next stage.
 
 #### Goal Checklist / TODOs
 
@@ -218,4 +213,4 @@ Contributions are very welcome. Please read the [CONTRIBUTING.md](./.github/docs
 
 This project is distributed under the GPLv3 License - see the [license file](LICENSE) for details.
 
-Copyright © 2024 Jacob Noah, jink-lang contributors
+Copyright © 2018-2026 Jacob Noah, jink-lang contributors
