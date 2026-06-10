@@ -1,0 +1,43 @@
+// std.yaml - block-YAML parsing of a package-manifest-shaped document
+
+import from std.yaml { yaml_parse };
+import from std.value { Value };
+import from std.testing { check_int, check_bytes };
+import from jink.ext.libc { exit };
+
+fun run() -> void {
+  int fails = 0;
+
+  let doc = yaml_parse("# Jink package manifest\nname: cool-lib\nversion: 1.2.3\nport: 8080\npublished: true\njink: \">=0.2.0\"   # quoted range\nauthors:\n  - Jane\n  - John\ndependencies:\n  http: ^1.0.0\n  json:\n    path: ../std/json\nrepository: https://github.com/jane/cool-lib\n");
+
+  fails = fails + check_int("is-object", doc.is_object(), 1);
+
+  // scalars + typing
+  fails = fails + check_bytes("name", doc.get("name").as_string(), "cool-lib", 8);
+  fails = fails + check_int("version-is-string", doc.get("version").is_string(), 1); // 1.2.3 -> string
+  fails = fails + check_bytes("version", doc.get("version").as_string(), "1.2.3", 5);
+  fails = fails + check_int("port-is-number", doc.get("port").is_number(), 1);
+  fails = fails + check_int("port", doc.get("port").as_int(), 8080);
+  fails = fails + check_int("published", doc.get("published").as_bool(), 1);
+  fails = fails + check_bytes("jink-quoted", doc.get("jink").as_string(), ">=0.2.0", 7);
+
+  // sequence of scalars
+  fails = fails + check_int("authors-size", doc.get("authors").size(), 2);
+  fails = fails + check_bytes("author-0", doc.get("authors").at(0).as_string(), "Jane", 4);
+  fails = fails + check_bytes("author-1", doc.get("authors").at(1).as_string(), "John", 4);
+
+  // nested mapping + string-vs-mapping dependency forms
+  fails = fails + check_bytes("dep-http", doc.get("dependencies").get("http").as_string(), "^1.0.0", 6);
+  fails = fails + check_int("dep-json-is-object", doc.get("dependencies").get("json").is_object(), 1);
+  fails = fails + check_bytes("dep-json-path", doc.get("dependencies").get("json").get("path").as_string(), "../std/json", 11);
+
+  // colon inside a URL is not a mapping separator
+  fails = fails + check_bytes("repository", doc.get("repository").as_string(), "https://github.com/jane/cool-lib", 32);
+
+  // missing key
+  fails = fails + check_int("missing", doc.has("nope"), 0);
+
+  exit(fails);
+}
+
+run();

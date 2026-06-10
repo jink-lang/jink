@@ -118,7 +118,10 @@ fun buf_hash(ByteBuf b, ptr out) -> void {
 // verify_name is normally the same as host; passing a name the cert does not
 // cover lets you prove the hostname binding rejects an otherwise-valid, trusted,
 // live connection (host is still used for DNS, the TCP connect, and SNI)
-pub fun tls_get_verify(string host, string verify_name, string path) -> int {
+//
+// The raw decrypted response bytes (status line + headers + body) are appended to
+// out; the caller parses them with std.net.http_parse
+pub fun tls_fetch(string host, string verify_name, string path, ByteBuf out) -> int {
   TcpStream conn = TcpStream();
   if (conn.open(host, "443") == 0) { printf("[tls] connect failed\n"); return 0; }
 
@@ -510,10 +513,9 @@ pub fun tls_get_verify(string host, string verify_name, string path) -> int {
           int it = __ptr_read_byte(dtype, 0);
           if (it == 23) {
             int i = 0;
-            while (i < clen) { printf("%c", __ptr_read_byte(dec, i)); i = i + 1; }
+            while (i < clen) { out.push(__ptr_read_byte(dec, i)); i = i + 1; }
           } elseif (it == 21) {
-            printf("\n[tls] server closed (alert)\n");
-            reading = 0;
+            reading = 0; // server close_notify
           }
           // it == 22 (NewSessionTicket): ignore
         }
@@ -522,9 +524,22 @@ pub fun tls_get_verify(string host, string verify_name, string path) -> int {
       }
     }
   }
-  printf("\n[tls] done\n");
+  printf("[tls] done\n");
   conn.close();
   return 1;
+}
+
+// Fetch host:path over TLS (validating the cert against verify_name) and print the
+// response to stdout. Back-compat demo helper; returns 1 on success, 0 on failure
+pub fun tls_get_verify(string host, string verify_name, string path) -> int {
+  ByteBuf out = ByteBuf();
+  int ok = tls_fetch(host, verify_name, path, out);
+  if (ok == 1) {
+    int i = 0;
+    while (i < out.size()) { printf("%c", out.get(i)); i = i + 1; }
+    printf("\n");
+  }
+  return ok;
 }
 
 // Convenience: validate the certificate against the same name we connected to.

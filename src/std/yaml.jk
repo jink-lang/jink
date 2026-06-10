@@ -1,0 +1,368 @@
+// Block-YAML parser (a pragmatic subset for config / package manifests), building
+// the shared std.value tree. Supports: block mappings (key: value), block
+// sequences (- item), indentation-based nesting, plain and quoted ('...' / "...")
+// scalars, and # comments. Returns a navigable Value:
+//
+//   let m = yaml_parse(src);
+//   m.get("dependencies").get("http").as_string();   // "^1.0.0"
+//   m.get("authors").at(0).as_string();
+//
+// Scalar typing is Norway-safe: a plain scalar is a STRING unless it's exactly
+// true/false/null/~ or matches a strict number (so 1.2.3 and ^1.0.0 stay strings)
+//
+// TODO: !! Not supported yet: flow style [..]/{..}, the compact "- key: val"
+// sequence-of-mappings form, anchors/aliases/tags, multi-document, block scalars
+
+import from std.mem.raw { alloc };
+import from std.value {
+  Value, value_bool, value_null, value_number, value_string, value_array,
+  value_object, pvec_new, pvec_push, pvec_get, streq, utf8_encode
+};
+import from jink.ext.libc { strlen };
+
+fun hexd(int c) -> int {
+  if (c >= 48 && c <= 57) { return c - 48; }
+  if (c >= 97 && c <= 102) { return c - 87; }
+  if (c >= 65 && c <= 70) { return c - 55; }
+  return 0;
+}
+
+// Copy buf[start..start+len) into a fresh null-terminated buffer
+fun copy_range_z(ptr buf, int start, int len) -> ptr {
+  ptr out = alloc(len + 1);
+  int i = 0;
+  while (i < len) { __ptr_write_byte(out, i, __ptr_read_byte(buf, start + i)); i = i + 1; }
+  __ptr_write_byte(out, len, 0);
+  return out;
+}
+
+// End offset of content in buf[start..end), with any trailing # comment removed
+// (a # at content start or preceded by whitespace, outside quotes)
+fun strip_comment(ptr buf, int start, int end) -> int {
+  int inq = 0; // 0 none, 1 single, 2 double
+  int i = start;
+  while (i < end) {
+    int c = __ptr_read_byte(buf, i);
+    if (inq == 0) {
+      if (c == 39) { inq = 1; }
+      elseif (c == 34) { inq = 2; }
+      elseif (c == 35) {
+        if (i == start) { return i; }
+        int prev = __ptr_read_byte(buf, i - 1);
+        if (prev == 32 || prev == 9) { return i; }
+      }
+    } elseif (inq == 1) {
+      if (c == 39) { inq = 0; }
+    } else {
+      if (c == 34) { inq = 0; }
+    }
+    i = i + 1;
+  }
+  return end;
+}
+
+// 1 if the content is a block-sequence item (- then space, or a bare -)
+fun is_seq_item(ptr buf, int len) -> int {
+  if (len == 0) { return 0; }
+  if (__ptr_read_byte(buf, 0) != 45) { return 0; }
+  if (len == 1) { return 1; }
+  if (__ptr_read_byte(buf, 1) == 32) { return 1; }
+  return 0;
+}
+
+// Index of the mapping : separator (a : followed by a space or end of line,
+// outside quotes), or -1. Colons inside URLs (://) are not separators
+fun find_colon(ptr buf, int len) -> int {
+  int inq = 0;
+  int i = 0;
+  while (i < len) {
+    int c = __ptr_read_byte(buf, i);
+    if (inq == 0) {
+      if (c == 39) { inq = 1; }
+      elseif (c == 34) { inq = 2; }
+      elseif (c == 58) {
+        if (i + 1 >= len) { return i; }
+        int nx = __ptr_read_byte(buf, i + 1);
+        if (nx == 32) { return i; }
+      }
+    } elseif (inq == 1) {
+      if (c == 39) { inq = 0; }
+    } else {
+      if (c == 34) { inq = 0; }
+    }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+// 1 if the null-terminated len-byte string is a strict integer or float
+fun is_number(ptr s, int len) -> int {
+  if (len == 0) { return 0; }
+  int i = 0;
+  if (__ptr_read_byte(s, 0) == 45) { i = 1; }
+  int digits = 0;
+  int dots = 0;
+  int es = 0;
+  while (i < len) {
+    int c = __ptr_read_byte(s, i);
+    if (c >= 48 && c <= 57) { digits = digits + 1; }
+    elseif (c == 46) { dots = dots + 1; }
+    elseif (c == 101 || c == 69) { es = es + 1; }
+    elseif (c == 43 || c == 45) { }
+    else { return 0; }
+    i = i + 1;
+  }
+  if (digits == 0) { return 0; }
+  if (dots > 1) { return 0; }
+  if (es > 1) { return 0; }
+  return 1;
+}
+
+// Decode a double-quoted scalar buf[start..end) (start at the opening quote)
+fun decode_double(ptr buf, int start, int end) -> ptr {
+  ptr out = alloc(end - start + 1);
+  int o = 0;
+  int i = start + 1;
+  int run = 1;
+  while (run == 1) {
+    if (i >= end) {
+      run = 0;
+    } else {
+      int c = __ptr_read_byte(buf, i);
+      if (c == 34) {
+        run = 0;
+        i = i + 1;
+      } elseif (c == 92) {
+        i = i + 1;
+        int e = __ptr_read_byte(buf, i);
+        i = i + 1;
+        if (e == 34) { __ptr_write_byte(out, o, 34); o = o + 1; }
+        elseif (e == 92) { __ptr_write_byte(out, o, 92); o = o + 1; }
+        elseif (e == 47) { __ptr_write_byte(out, o, 47); o = o + 1; }
+        elseif (e == 110) { __ptr_write_byte(out, o, 10); o = o + 1; }
+        elseif (e == 116) { __ptr_write_byte(out, o, 9); o = o + 1; }
+        elseif (e == 114) { __ptr_write_byte(out, o, 13); o = o + 1; }
+        elseif (e == 98) { __ptr_write_byte(out, o, 8); o = o + 1; }
+        elseif (e == 102) { __ptr_write_byte(out, o, 12); o = o + 1; }
+        elseif (e == 48) { __ptr_write_byte(out, o, 0); o = o + 1; }
+        elseif (e == 117) {
+          int cp = 0;
+          int k = 0;
+          while (k < 4) { cp = cp * 16 + hexd(__ptr_read_byte(buf, i)); i = i + 1; k = k + 1; }
+          o = utf8_encode(out, o, cp);
+        } else {
+          __ptr_write_byte(out, o, e);
+          o = o + 1;
+        }
+      } else {
+        __ptr_write_byte(out, o, c);
+        o = o + 1;
+        i = i + 1;
+      }
+    }
+  }
+  __ptr_write_byte(out, o, 0);
+  return out;
+}
+
+// Decode a single-quoted scalar buf[start..end) ('' is the only escape -> ')
+fun decode_single(ptr buf, int start, int end) -> ptr {
+  ptr out = alloc(end - start + 1);
+  int o = 0;
+  int i = start + 1;
+  int run = 1;
+  while (run == 1) {
+    if (i >= end) {
+      run = 0;
+    } else {
+      int c = __ptr_read_byte(buf, i);
+      if (c == 39) {
+        int nx = 0;
+        if (i + 1 < end) { nx = __ptr_read_byte(buf, i + 1); }
+        if (nx == 39) { __ptr_write_byte(out, o, 39); o = o + 1; i = i + 2; }
+        else { run = 0; i = i + 1; }
+      } else {
+        __ptr_write_byte(out, o, c);
+        o = o + 1;
+        i = i + 1;
+      }
+    }
+  }
+  __ptr_write_byte(out, o, 0);
+  return out;
+}
+
+// Parse a scalar in buf[start..end) into a typed Value node
+fun parse_scalar(ptr buf, int start, int end) -> ptr {
+  while (start < end && __ptr_read_byte(buf, start) == 32) { start = start + 1; }
+  while (end > start && __ptr_read_byte(buf, end - 1) == 32) { end = end - 1; }
+  int len = end - start;
+  if (len == 0) { return value_null(); }
+  int c0 = __ptr_read_byte(buf, start);
+  if (c0 == 34) { return value_string(decode_double(buf, start, end)); }
+  if (c0 == 39) { return value_string(decode_single(buf, start, end)); }
+  ptr s = copy_range_z(buf, start, len);
+  if (streq(s, "true") == 1) { return value_bool(1); }
+  if (streq(s, "false") == 1) { return value_bool(0); }
+  if (streq(s, "null") == 1) { return value_null(); }
+  if (streq(s, "~") == 1) { return value_null(); }
+  if (is_number(s, len) == 1) { return value_number(s); }
+  return value_string(s);
+}
+
+// A mapping key (plain or quoted) -> a null-terminated key buffer
+fun scalar_key(ptr buf, int start, int end) -> ptr {
+  while (start < end && __ptr_read_byte(buf, start) == 32) { start = start + 1; }
+  while (end > start && __ptr_read_byte(buf, end - 1) == 32) { end = end - 1; }
+  if (start >= end) { return copy_range_z(buf, start, 0); }
+  int c0 = __ptr_read_byte(buf, start);
+  if (c0 == 34) { return decode_double(buf, start, end); }
+  if (c0 == 39) { return decode_single(buf, start, end); }
+  return copy_range_z(buf, start, end - start);
+}
+
+// --- logical lines: pvec of {indent@0, text@1, len@2}; blanks/comments dropped --
+
+// Returns a state struct: {lines pvec@0, count@1, idx@2}
+fun split_lines(string text) -> ptr {
+  int n = strlen(text);
+  ptr lines = pvec_new();
+  int count = 0;
+  int i = 0;
+  while (i < n) {
+    int indent = 0;
+    while (i < n && __ptr_read_byte(text, i) == 32) { indent = indent + 1; i = i + 1; }
+    int cstart = i;
+    while (i < n && __ptr_read_byte(text, i) != 10) { i = i + 1; }
+    int cend = i;
+    if (i < n) { i = i + 1; } // past the newline
+    if (cend > cstart && __ptr_read_byte(text, cend - 1) == 13) { cend = cend - 1; } // CRLF
+    cend = strip_comment(text, cstart, cend);
+    while (cend > cstart && __ptr_read_byte(text, cend - 1) == 32) { cend = cend - 1; }
+    int clen = cend - cstart;
+    if (clen > 0) {
+      ptr ln = alloc(24);
+      __ptr_write_int(ln, 0, indent);
+      __ptr_write_ptr(ln, 1, copy_range_z(text, cstart, clen));
+      __ptr_write_int(ln, 2, clen);
+      lines = pvec_push(lines, ln);
+      count = count + 1;
+    }
+  }
+  ptr st = alloc(24);
+  __ptr_write_ptr(st, 0, lines);
+  __ptr_write_int(st, 1, count);
+  __ptr_write_int(st, 2, 0);
+  return st;
+}
+
+fun st_count(ptr st) -> int { return __ptr_read_int(st, 1); }
+fun st_idx(ptr st) -> int { return __ptr_read_int(st, 2); }
+fun st_advance(ptr st) -> void { __ptr_write_int(st, 2, st_idx(st) + 1); }
+fun st_atend(ptr st) -> int {
+  if (st_idx(st) >= st_count(st)) { return 1; }
+  return 0;
+}
+fun cur_line(ptr st) -> ptr { return pvec_get(__ptr_read_ptr(st, 0), st_idx(st)); }
+fun cur_indent(ptr st) -> int { return __ptr_read_int(cur_line(st), 0); }
+fun cur_text(ptr st) -> ptr { return __ptr_read_ptr(cur_line(st), 1); }
+fun cur_len(ptr st) -> int { return __ptr_read_int(cur_line(st), 2); }
+
+// --- block parsers. pn is parse_node (a function value) to break the
+//     mapping<->sequence<->node mutual recursion Jink can't express directly
+//
+// The value for a mapping entry / sequence item is computed by a helper that
+// RETURNS it (an inline scalar, a nested block, or null), rather than reassigning
+// a local across an if - reassignment across an if-merge doesn't propagate ---
+
+fun nested_or_null(ptr st, int indent, fun(ptr, int) -> ptr pn) -> ptr {
+  if (st_atend(st) == 1) { return value_null(); }
+  if (cur_indent(st) > indent) { return pn(st, cur_indent(st)); }
+  return value_null();
+}
+
+fun mapping_value(ptr st, ptr text, int vstart, int len, int indent, fun(ptr, int) -> ptr pn) -> ptr {
+  if (vstart < len) { return parse_scalar(text, vstart, len); }
+  return nested_or_null(st, indent, pn);
+}
+
+fun parse_mapping(ptr st, int indent, fun(ptr, int) -> ptr pn) -> ptr {
+  ptr keys = pvec_new();
+  ptr vals = pvec_new();
+  int count = 0;
+  int run = 1;
+  while (run == 1) {
+    if (st_atend(st) == 1) {
+      run = 0;
+    } elseif (cur_indent(st) != indent) {
+      run = 0;
+    } else {
+      ptr text = cur_text(st);
+      int len = cur_len(st);
+      int colon = find_colon(text, len);
+      if (colon < 0) {
+        run = 0;
+      } else {
+        ptr key = scalar_key(text, 0, colon);
+        int vstart = colon + 1;
+        while (vstart < len && __ptr_read_byte(text, vstart) == 32) { vstart = vstart + 1; }
+        st_advance(st);
+        ptr val = mapping_value(st, text, vstart, len, indent, pn);
+        keys = pvec_push(keys, key);
+        vals = pvec_push(vals, val);
+        count = count + 1;
+      }
+    }
+  }
+  return value_object(keys, vals, count);
+}
+
+fun sequence_item(ptr st, ptr text, int rstart, int len, int indent, fun(ptr, int) -> ptr pn) -> ptr {
+  if (rstart < len) { return parse_scalar(text, rstart, len); }
+  return nested_or_null(st, indent, pn);
+}
+
+fun parse_sequence(ptr st, int indent, fun(ptr, int) -> ptr pn) -> ptr {
+  ptr items = pvec_new();
+  int count = 0;
+  int run = 1;
+  while (run == 1) {
+    if (st_atend(st) == 1) {
+      run = 0;
+    } elseif (cur_indent(st) != indent) {
+      run = 0;
+    } else {
+      ptr text = cur_text(st);
+      int len = cur_len(st);
+      if (is_seq_item(text, len) == 0) {
+        run = 0;
+      } else {
+        int rstart = 1;
+        while (rstart < len && __ptr_read_byte(text, rstart) == 32) { rstart = rstart + 1; }
+        st_advance(st);
+        ptr item = sequence_item(st, text, rstart, len, indent, pn);
+        items = pvec_push(items, item);
+        count = count + 1;
+      }
+    }
+  }
+  return value_array(items, count);
+}
+
+// Parse the block at indent: a sequence, a mapping, or a lone scalar
+fun parse_node(ptr st, int indent) -> ptr {
+  if (st_atend(st) == 1) { return value_null(); }
+  ptr text = cur_text(st);
+  int len = cur_len(st);
+  if (is_seq_item(text, len) == 1) { return parse_sequence(st, indent, parse_node); }
+  if (find_colon(text, len) >= 0) { return parse_mapping(st, indent, parse_node); }
+  st_advance(st);
+  return parse_scalar(text, 0, len);
+}
+
+// Parse a block-YAML document into a navigable Value
+pub fun yaml_parse(string text) -> Value {
+  ptr st = split_lines(text);
+  if (st_count(st) == 0) { return Value(value_null()); }
+  return Value(parse_node(st, cur_indent(st)));
+}

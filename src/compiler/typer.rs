@@ -486,6 +486,7 @@ impl TypeChecker {
             if arg_type == JType::String || arg_type == JType::Pointer {
               println!("Warning: Calling ptr() on a {} type. This returns a pointer to the variable (double pointer), which is likely not what you want.", arg_type);
             }
+            expr.inferred_type = Some(JType::Pointer);
             return Ok(JType::Pointer);
           }
 
@@ -494,9 +495,20 @@ impl TypeChecker {
           }
           // Conversion builtins have concrete result types
           // TODO: Likely prudent to eventually represent built-ins with own type signatures for more accurate checking and error messages
-          if func_name == "int" { return Ok(JType::Integer); }
-          if func_name == "float" { return Ok(JType::FloatingPoint); }
-          return Ok(JType::Unknown);
+          // Pointer reads in particular get a precise type so they compose directly
+          // in expressions (no typed-local binding needed); these mirror what the
+          // builder emits for each intrinsic. Set inferred_type explicitly here:
+          // builtins return early, past the shared assignment at the end of check_expression
+          let builtin_type =
+            if func_name == "int" { JType::Integer }
+            else if func_name == "float" { JType::FloatingPoint }
+            else if func_name == "__ptr_read_byte" { JType::Integer }
+            else if func_name == "__ptr_read_int" { JType::Integer }
+            else if func_name == "__ptr_read_f32" { JType::FloatingPoint }
+            else if func_name == "__ptr_read_ptr" { JType::Pointer }
+            else { JType::Unknown };
+          expr.inferred_type = Some(builtin_type.clone());
+          return Ok(builtin_type);
         }
 
         let func_type = self.lookup_variable(func_name)

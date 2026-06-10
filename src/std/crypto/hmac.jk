@@ -30,8 +30,7 @@ pub fun hmac_sha256(ptr key, int keylen, ptr msg, int msglen, ptr out) -> void {
   ptr inner_in = alloc(64 + msglen);
   i = 0;
   while (i < 64) {
-    int kb = __ptr_read_byte(k0, i); // bind to int so `^` sees Integer operands
-    __ptr_write_byte(inner_in, i, kb ^ 0x36);
+    __ptr_write_byte(inner_in, i, __ptr_read_byte(k0, i) ^ 0x36);
     i = i + 1;
   }
   i = 0;
@@ -47,8 +46,7 @@ pub fun hmac_sha256(ptr key, int keylen, ptr msg, int msglen, ptr out) -> void {
   ptr outer_in = alloc(96);
   i = 0;
   while (i < 64) {
-    int kb = __ptr_read_byte(k0, i);
-    __ptr_write_byte(outer_in, i, kb ^ 0x5c);
+    __ptr_write_byte(outer_in, i, __ptr_read_byte(k0, i) ^ 0x5c);
     i = i + 1;
   }
   i = 0;

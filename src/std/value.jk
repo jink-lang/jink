@@ -1,0 +1,239 @@
+// Shared document value tree for structured formats (JSON, YAML, ...)
+//
+// A parsed document is a tree of 32-byte raw nodes; `Value` is a thin typed
+// wrapper over a node pointer with a chainable navigation API:
+//
+//   doc.get("deps").at(0).as_int()
+//
+// Format parsers (std.json, std.yaml) scan their own syntax and assemble the tree
+// with the value_* builders below, then hand back a Value. Numbers keep their
+// source text (as_int parses by hand to avoid atoi's sign bug; as_float uses atof)
+//
+// NOTE: leaks nodes/buffers (no GC yet) - fine for parse-once config/manifests
+
+import from std.mem.raw { alloc, zero, release };
+import from jink.ext.libc { atof };
+
+// kinds: 0 null, 1 bool, 2 number, 3 string, 4 array, 5 object
+
+// A null pointer value (read from a zeroed cell) for "absent" Values
+pub fun null_ptr() -> ptr {
+  ptr z = alloc(8);
+  zero(z, 8);
+  ptr n = __ptr_read_ptr(z, 0);
+  release(z);
+  return n;
+}
+
+// Compare two null-terminated byte strings for equality
+pub fun streq(ptr a, ptr b) -> int {
+  int i = 0;
+  while (1 == 1) {
+    int ca = __ptr_read_byte(a, i);
+    int cb = __ptr_read_byte(b, i);
+    if (ca != cb) { return 0; }
+    if (ca == 0) { return 1; }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// Encode codepoint cp as UTF-8 into out at offset o; returns the new offset
+pub fun utf8_encode(ptr out, int o, int cp) -> int {
+  if (cp < 128) {
+    __ptr_write_byte(out, o, cp);
+    return o + 1;
+  }
+  if (cp < 2048) {
+    __ptr_write_byte(out, o, 192 | (cp >> 6));
+    __ptr_write_byte(out, o + 1, 128 | (cp & 63));
+    return o + 2;
+  }
+  __ptr_write_byte(out, o, 224 | (cp >> 12));
+  __ptr_write_byte(out, o + 1, 128 | ((cp >> 6) & 63));
+  __ptr_write_byte(out, o + 2, 128 | (cp & 63));
+  return o + 3;
+}
+
+// --- growable pointer-vector ------------------------------------------------
+// A pvec is a fixed 24-byte HANDLE {data@slot0, cap@slot1, len@slot2}. The handle
+// pointer never moves - growth swaps the internal data buffer in place - so callers
+// keep the same `pvec` value across pushes (no reassignment needed, which also
+// dodges a compiler bug where a reassigned local isn't carried past an if/loop
+// when the new value is a different pointer)
+
+pub fun pvec_new() -> ptr {
+  ptr h = alloc(24);
+  __ptr_write_ptr(h, 0, alloc(8 * 8)); // 8 pointer slots
+  __ptr_write_int(h, 1, 8);
+  __ptr_write_int(h, 2, 0);
+  return h;
+}
+pub fun pvec_push(ptr h, ptr item) -> ptr {
+  int cap = __ptr_read_int(h, 1);
+  int len = __ptr_read_int(h, 2);
+  if (len >= cap) {
+    ptr data = __ptr_read_ptr(h, 0);
+    int newcap = cap * 2;
+    ptr nd = alloc(newcap * 8);
+    int b = 0;
+    while (b < len) { __ptr_write_ptr(nd, b, __ptr_read_ptr(data, b)); b = b + 1; }
+    __ptr_write_ptr(nd, len, item);
+    __ptr_write_ptr(h, 0, nd);
+    __ptr_write_int(h, 1, newcap);
+    __ptr_write_int(h, 2, len + 1);
+  } else {
+    ptr data = __ptr_read_ptr(h, 0);
+    __ptr_write_ptr(data, len, item);
+    __ptr_write_int(h, 2, len + 1);
+  }
+  return h;
+}
+pub fun pvec_get(ptr h, int i) -> ptr {
+  ptr data = __ptr_read_ptr(h, 0);
+  return __ptr_read_ptr(data, i);
+}
+pub fun pvec_len(ptr h) -> int { return __ptr_read_int(h, 2); }
+
+// --- node builders -----------------------------------------------------------
+// 32-byte node: kind@slot0, payload@slot1, vals@slot2 (objects), count@slot3
+
+fun node_new(int kind) -> ptr {
+  ptr n = alloc(32);
+  zero(n, 32);
+  __ptr_write_int(n, 0, kind);
+  return n;
+}
+
+pub fun value_null() -> ptr { return node_new(0); }
+
+pub fun value_bool(int b) -> ptr {
+  ptr n = node_new(1);
+  __ptr_write_int(n, 1, b);
+  return n;
+}
+
+// text is a null-terminated copy of the number's source text
+pub fun value_number(ptr text) -> ptr {
+  ptr n = node_new(2);
+  __ptr_write_ptr(n, 1, text);
+  return n;
+}
+
+// s is a null-terminated (already unescaped) string buffer
+pub fun value_string(ptr s) -> ptr {
+  ptr n = node_new(3);
+  __ptr_write_ptr(n, 1, s);
+  return n;
+}
+
+// items is a pvec of child node pointers
+pub fun value_array(ptr items, int count) -> ptr {
+  ptr n = node_new(4);
+  __ptr_write_ptr(n, 1, items);
+  __ptr_write_int(n, 3, count);
+  return n;
+}
+
+// keys is a pvec of key-string pointers; vals a pvec of child node pointers
+pub fun value_object(ptr keys, ptr vals, int count) -> ptr {
+  ptr n = node_new(5);
+  __ptr_write_ptr(n, 1, keys);
+  __ptr_write_ptr(n, 2, vals);
+  __ptr_write_int(n, 3, count);
+  return n;
+}
+
+// --- navigable wrapper -------------------------------------------------------
+
+pub cls Value = {
+  pub ptr node;
+
+  fun new(ptr n) -> self { self.node = n; }
+
+  // 0 null, 1 bool, 2 number, 3 string, 4 array, 5 object
+  pub fun kind() -> int {
+    if (self.node == null) { return 0; }
+    return __ptr_read_int(self.node, 0);
+  }
+  pub fun is_null() -> int {
+    if (self.kind() == 0) { return 1; }
+    return 0;
+  }
+  pub fun is_bool() -> int {
+    if (self.kind() == 1) { return 1; }
+    return 0;
+  }
+  pub fun is_number() -> int {
+    if (self.kind() == 2) { return 1; }
+    return 0;
+  }
+  pub fun is_string() -> int {
+    if (self.kind() == 3) { return 1; }
+    return 0;
+  }
+  pub fun is_array() -> int {
+    if (self.kind() == 4) { return 1; }
+    return 0;
+  }
+  pub fun is_object() -> int {
+    if (self.kind() == 5) { return 1; }
+    return 0;
+  }
+
+  pub fun as_bool() -> int { return __ptr_read_int(self.node, 1); }
+  pub fun as_string() -> ptr { return __ptr_read_ptr(self.node, 1); }
+  pub fun as_float() -> float { return atof(__ptr_read_ptr(self.node, 1)); }
+
+  // Parse the number text as a signed 64-bit integer (Done here rather than via
+  // libc atoi, whose 32-bit return is zero-extended and corrupts negatives)
+  pub fun as_int() -> int {
+    ptr t = __ptr_read_ptr(self.node, 1);
+    int i = 0;
+    int neg = 0;
+    int c0 = __ptr_read_byte(t, 0);
+    if (c0 == 45) { neg = 1; i = 1; }
+    int v = 0;
+    int run = 1;
+    while (run == 1) {
+      int c = __ptr_read_byte(t, i);
+      if (c >= 48 && c <= 57) { v = v * 10 + (c - 48); i = i + 1; } else { run = 0; }
+    }
+    if (neg == 1) { return 0 - v; }
+    return v;
+  }
+
+  // Element count of an array or object (0 otherwise)
+  pub fun size() -> int {
+    if (self.node == null) { return 0; }
+    return __ptr_read_int(self.node, 3);
+  }
+
+  // Array element i (absent Value if out of range / not an array)
+  pub fun at(int i) -> Value {
+    if (self.is_array() == 0) { return Value(null_ptr()); }
+    if (i < 0 || i >= self.size()) { return Value(null_ptr()); }
+    return Value(pvec_get(__ptr_read_ptr(self.node, 1), i));
+  }
+
+  // Object member by key (absent Value if missing / not an object)
+  pub fun get(string key) -> Value {
+    if (self.is_object() == 0) { return Value(null_ptr()); }
+    ptr keys = __ptr_read_ptr(self.node, 1);
+    ptr vals = __ptr_read_ptr(self.node, 2);
+    int n = __ptr_read_int(self.node, 3);
+    int i = 0;
+    while (i < n) {
+      if (streq(pvec_get(keys, i), key) == 1) { return Value(pvec_get(vals, i)); }
+      i = i + 1;
+    }
+    return Value(null_ptr());
+  }
+
+  // 1 if the object has member key
+  pub fun has(string key) -> int {
+    Value v = self.get(key);
+    if (v.is_null() == 1) { return 0; }
+    return 1;
+  }
+}

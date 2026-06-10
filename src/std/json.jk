@@ -1,0 +1,210 @@
+// JSON parser (RFC 8259). Scans JSON syntax and assembles a std.value tree,
+// returning a navigable Value:
+//
+//   let doc = json_parse("{\"name\":\"foo\",\"deps\":[1,2,3]}");
+//   doc.get("name").as_string();    // "foo"
+//   doc.get("deps").at(0).as_int(); // 1
+//
+// The node/Value representation and value_* builders live in std.value (shared
+// with the YAML parser). Strings are unescaped here with JSON rules (\" \\ \/ \b
+// \f \n \r \t and \uXXXX -> UTF-8; surrogate pairs not yet combined); numbers keep
+// their source text
+
+import from std.mem.raw { alloc, release };
+import from std.value {
+  Value, value_bool, value_null, value_number, value_string, value_array,
+  value_object, pvec_new, pvec_push, utf8_encode, null_ptr
+};
+import from jink.ext.libc { strlen };
+
+fun hexd(int c) -> int {
+  if (c >= 48 && c <= 57) { return c - 48; }
+  if (c >= 97 && c <= 102) { return c - 87; }
+  if (c >= 65 && c <= 70) { return c - 55; }
+  return 0;
+}
+
+// --- parser state: text@slot0, len@slot1, pos@slot2 --------------------------
+
+fun jtext(ptr st) -> ptr { return __ptr_read_ptr(st, 0); }
+fun jlen(ptr st) -> int { return __ptr_read_int(st, 1); }
+fun jpos(ptr st) -> int { return __ptr_read_int(st, 2); }
+fun jadv(ptr st) -> void { __ptr_write_int(st, 2, jpos(st) + 1); }
+
+// Current byte, or -1 at end of input
+fun jcur(ptr st) -> int {
+  int pos = jpos(st);
+  if (pos >= jlen(st)) { return 0 - 1; }
+  return __ptr_read_byte(jtext(st), pos);
+}
+
+fun skip_ws(ptr st) -> void {
+  int run = 1;
+  while (run == 1) {
+    int c = jcur(st);
+    if (c == 32 || c == 9 || c == 10 || c == 13) { jadv(st); } else { run = 0; }
+  }
+}
+
+// Decode the JSON string at the cursor (cur == '"') into a fresh null-terminated
+// buffer, consuming through the closing quote
+fun decode_string(ptr st) -> ptr {
+  jadv(st); // opening quote
+  ptr out = alloc(jlen(st) - jpos(st) + 1);
+  int o = 0;
+  int run = 1;
+  while (run == 1) {
+    int c = jcur(st);
+    if (c < 0) {
+      run = 0;
+    } elseif (c == 34) {
+      jadv(st);
+      run = 0;
+    } elseif (c == 92) {
+      jadv(st);
+      int e = jcur(st);
+      jadv(st);
+      if (e == 34) { __ptr_write_byte(out, o, 34); o = o + 1; }
+      elseif (e == 92) { __ptr_write_byte(out, o, 92); o = o + 1; }
+      elseif (e == 47) { __ptr_write_byte(out, o, 47); o = o + 1; }
+      elseif (e == 110) { __ptr_write_byte(out, o, 10); o = o + 1; }
+      elseif (e == 116) { __ptr_write_byte(out, o, 9); o = o + 1; }
+      elseif (e == 114) { __ptr_write_byte(out, o, 13); o = o + 1; }
+      elseif (e == 98) { __ptr_write_byte(out, o, 8); o = o + 1; }
+      elseif (e == 102) { __ptr_write_byte(out, o, 12); o = o + 1; }
+      elseif (e == 117) {
+        int cp = 0;
+        int k = 0;
+        while (k < 4) { cp = cp * 16 + hexd(jcur(st)); jadv(st); k = k + 1; }
+        o = utf8_encode(out, o, cp);
+      } else {
+        __ptr_write_byte(out, o, e);
+        o = o + 1;
+      }
+    } else {
+      __ptr_write_byte(out, o, c);
+      o = o + 1;
+      jadv(st);
+    }
+  }
+  __ptr_write_byte(out, o, 0);
+  return out;
+}
+
+fun is_num_char(int c) -> int {
+  if (c >= 48 && c <= 57) { return 1; }
+  if (c == 45 || c == 43 || c == 46 || c == 101 || c == 69) { return 1; }
+  return 0;
+}
+
+// Number: copy its source text into a fresh null-terminated buffer (as_int/as_float)
+fun parse_number(ptr st) -> ptr {
+  int start = jpos(st);
+  int run = 1;
+  while (run == 1) {
+    if (is_num_char(jcur(st)) == 1) { jadv(st); } else { run = 0; }
+  }
+  int end = jpos(st);
+  int n = end - start;
+  ptr txt = alloc(n + 1);
+  ptr src = jtext(st);
+  int i = 0;
+  while (i < n) { __ptr_write_byte(txt, i, __ptr_read_byte(src, start + i)); i = i + 1; }
+  __ptr_write_byte(txt, n, 0);
+  return value_number(txt);
+}
+
+// true / false / null (assumes well-formed input)
+fun parse_lit(ptr st) -> ptr {
+  int c = jcur(st);
+  if (c == 116) { // true
+    jadv(st); jadv(st); jadv(st); jadv(st);
+    return value_bool(1);
+  }
+  if (c == 102) { // false
+    jadv(st); jadv(st); jadv(st); jadv(st); jadv(st);
+    return value_bool(0);
+  }
+  jadv(st); jadv(st); jadv(st); jadv(st); // null
+  return value_null();
+}
+
+// Array / object take pv (parse_value) as a function value to break the mutual
+// recursion Jink's define-before-use rule would otherwise forbid
+fun parse_array(ptr st, fun(ptr) -> ptr pv) -> ptr {
+  jadv(st); // '['
+  ptr items = pvec_new();
+  int count = 0;
+  skip_ws(st);
+  if (jcur(st) == 93) {
+    jadv(st);
+  } else {
+    int run = 1;
+    while (run == 1) {
+      skip_ws(st);
+      ptr child = pv(st);
+      items = pvec_push(items, child);
+      count = count + 1;
+      skip_ws(st);
+      int c = jcur(st);
+      if (c == 44) { jadv(st); }
+      elseif (c == 93) { jadv(st); run = 0; }
+      else { run = 0; }
+    }
+  }
+  return value_array(items, count);
+}
+
+fun parse_object(ptr st, fun(ptr) -> ptr pv) -> ptr {
+  jadv(st); // '{'
+  ptr keys = pvec_new();
+  ptr vals = pvec_new();
+  int count = 0;
+  skip_ws(st);
+  if (jcur(st) == 125) {
+    jadv(st);
+  } else {
+    int run = 1;
+    while (run == 1) {
+      skip_ws(st);
+      ptr key = decode_string(st);
+      skip_ws(st);
+      if (jcur(st) == 58) { jadv(st); } // ':'
+      skip_ws(st);
+      ptr val = pv(st);
+      keys = pvec_push(keys, key);
+      vals = pvec_push(vals, val);
+      count = count + 1;
+      skip_ws(st);
+      int c = jcur(st);
+      if (c == 44) { jadv(st); }
+      elseif (c == 125) { jadv(st); run = 0; }
+      else { run = 0; }
+    }
+  }
+  return value_object(keys, vals, count);
+}
+
+// Parse any value at the cursor - self-recursive & passes itself as the function
+// value the array/object parsers call back into
+fun parse_value(ptr st) -> ptr {
+  skip_ws(st);
+  int c = jcur(st);
+  if (c == 123) { return parse_object(st, parse_value); } // '{'
+  if (c == 91) { return parse_array(st, parse_value); }   // '['
+  if (c == 34) { return value_string(decode_string(st)); } // '"'
+  if (c == 116 || c == 102 || c == 110) { return parse_lit(st); }
+  if (c == 45 || (c >= 48 && c <= 57)) { return parse_number(st); }
+  return null_ptr();
+}
+
+// Parse a JSON document - returns a Value; check .is_null() / kind() on error
+pub fun json_parse(string text) -> Value {
+  ptr st = alloc(24);
+  __ptr_write_ptr(st, 0, text);
+  __ptr_write_int(st, 1, strlen(text));
+  __ptr_write_int(st, 2, 0);
+  ptr root = parse_value(st);
+  release(st);
+  return Value(root);
+}

@@ -12,6 +12,18 @@ use compiler::typer::TypeChecker;
 use interpreter::simulator::Simulator;
 
 fn main() {
+  // The parser / type checker / LLVM builder can recurse deeply
+  // when compiling larger modules which overflows the small default main-thread
+  // stack (~1 MB on Windows). Run the whole compile on a thread with a big stack,
+  // the way most recursive compilers (incl. rustc) do
+  let child = std::thread::Builder::new()
+    .stack_size(512 * 1024 * 1024)
+    .spawn(run)
+    .expect("failed to spawn compiler thread");
+  child.join().expect("compiler thread panicked");
+}
+
+fn run() {
   // Get args input
   let args: Vec<String> = env::args().collect();
   if args.len() < 2 || args.contains(&"-h".to_string()) {

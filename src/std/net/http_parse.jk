@@ -1,0 +1,187 @@
+// HTTP/1.1 response parsing over a raw byte buffer (ptr + len)
+//
+// Deterministic and offline-testable - every function reads the received response
+// bytes in place (no sockets here). The plaintext and TLS clients use these to
+// turn a buffer into a status code, header values, and a framed body (handling
+// Content-Length and chunked transfer-encoding)
+
+import from std.mem.raw { alloc, release };
+import from jink.ext.libc { strlen };
+
+// ASCII lower-case
+fun lc(int c) -> int {
+  if (c >= 65 && c <= 90) { return c + 32; }
+  return c;
+}
+
+// Hex digit value, or -1 if not a hex digit
+fun hexv(int c) -> int {
+  if (c >= 48 && c <= 57) { return c - 48; }
+  if (c >= 97 && c <= 102) { return c - 87; }
+  if (c >= 65 && c <= 70) { return c - 55; }
+  return 0 - 1;
+}
+
+// Status code from the response line "HTTP/1.1 200 OK" -> 200 (0 if unparseable)
+pub fun http_status(ptr buf, int len) -> int {
+  int p = 0;
+  while (p < len && __ptr_read_byte(buf, p) != 32) { p = p + 1; } // to the first space
+  p = p + 1;
+  int code = 0;
+  int seen = 0;
+  while (p < len) {
+    int c = __ptr_read_byte(buf, p);
+    if (c < 48 || c > 57) { break; }
+    code = code * 10 + (c - 48);
+    seen = 1;
+    p = p + 1;
+  }
+  if (seen == 0) { return 0; }
+  return code;
+}
+
+// Offset just past the first CRLF CRLF (start of the body); len if there is none
+pub fun http_body_offset(ptr buf, int len) -> int {
+  int j = 0;
+  while (j + 3 < len) {
+    if (__ptr_read_byte(buf, j) == 13 && __ptr_read_byte(buf, j + 1) == 10 && __ptr_read_byte(buf, j + 2) == 13 && __ptr_read_byte(buf, j + 3) == 10) {
+      return j + 4;
+    }
+    j = j + 1;
+  }
+  return len;
+}
+
+// Copy the trimmed value of header name into out (<= max bytes) - returns the value length, or -1 if absent
+// Case-insensitive - only the header block is searched
+pub fun http_header_value(ptr buf, int len, string name, ptr out, int max) -> int {
+  int hend = http_body_offset(buf, len);
+  int nlen = strlen(name);
+
+  // Skip the status line
+  int p = 0;
+  while (p < hend && __ptr_read_byte(buf, p) != 10) { p = p + 1; }
+  p = p + 1;
+
+  while (p + nlen < hend) {
+    // Match the field name case-insensitively, expecting ':' immediately after
+    int match = 1;
+    int i = 0;
+    while (i < nlen) {
+      if (lc(__ptr_read_byte(buf, p + i)) != lc(__ptr_read_byte(name, i))) { match = 0; break; }
+      i = i + 1;
+    }
+    if (match == 1 && __ptr_read_byte(buf, p + nlen) == 58) {
+      int v = p + nlen + 1;
+      while (v < hend && __ptr_read_byte(buf, v) == 32) { v = v + 1; } // skip optional whitespace
+      int e = v;
+      while (e < hend && __ptr_read_byte(buf, e) != 13) { e = e + 1; } // value runs to CR
+      int vlen = e - v;
+      int k = 0;
+      while (k < vlen && k < max) { __ptr_write_byte(out, k, __ptr_read_byte(buf, v + k)); k = k + 1; }
+      return vlen;
+    }
+    // Advance to the next header line
+    while (p < hend && __ptr_read_byte(buf, p) != 10) { p = p + 1; }
+    p = p + 1;
+  }
+  return 0 - 1;
+}
+
+// Content-Length value, or -1 if the header is absent
+pub fun http_content_length(ptr buf, int len) -> int {
+  ptr tmp = alloc(32);
+  int n = http_header_value(buf, len, "Content-Length", tmp, 31);
+  if (n < 0) { release(tmp); return 0 - 1; }
+  int v = 0;
+  int i = 0;
+  while (i < n) {
+    int c = __ptr_read_byte(tmp, i);
+    if (c >= 48 && c <= 57) { v = v * 10 + (c - 48); }
+    i = i + 1;
+  }
+  release(tmp);
+  return v;
+}
+
+// 1 if n bytes at buf contain needle (case-insensitive), else 0
+fun ci_contains(ptr buf, int n, string needle) -> int {
+  int m = strlen(needle);
+  int i = 0;
+  while (i + m <= n) {
+    int j = 0;
+    int ok = 1;
+    while (j < m) {
+      if (lc(__ptr_read_byte(buf, i + j)) != lc(__ptr_read_byte(needle, j))) { ok = 0; break; }
+      j = j + 1;
+    }
+    if (ok == 1) { return 1; }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// 1 if the response uses chunked transfer-encoding, else 0
+pub fun http_is_chunked(ptr buf, int len) -> int {
+  ptr tmp = alloc(64);
+  int n = http_header_value(buf, len, "Transfer-Encoding", tmp, 63);
+  int chunked = 0;
+  // value may be a list, e.g. "gzip, chunked"
+  if (n > 0) { chunked = ci_contains(tmp, n, "chunked"); }
+  release(tmp);
+  return chunked;
+}
+
+// Decode a chunked body in buf[start..end) into out (<= max) - returns the decoded
+// length, or -1 on overflow / truncation
+pub fun http_chunked_decode(ptr buf, int start, int end, ptr out, int max) -> int {
+  int p = start;
+  int o = 0;
+  int running = 1;
+  while (running == 1) {
+    // chunk-size: hex digits up to CR or a ';' chunk-extension
+    int size = 0;
+    while (p < end) {
+      int h = hexv(__ptr_read_byte(buf, p));
+      if (h < 0) { break; }
+      size = (size << 4) | h;
+      p = p + 1;
+    }
+    // Skip the rest of the chunk-size line, past the LF
+    while (p < end && __ptr_read_byte(buf, p) != 10) { p = p + 1; }
+    p = p + 1;
+    if (size == 0) {
+      running = 0;
+    } else {
+      int k = 0;
+      while (k < size) {
+        if (p >= end || o >= max) { return 0 - 1; }
+        __ptr_write_byte(out, o, __ptr_read_byte(buf, p));
+        o = o + 1;
+        p = p + 1;
+        k = k + 1;
+      }
+      // Skip the CRLF that terminates the chunk data
+      if (p < end && __ptr_read_byte(buf, p) == 13) { p = p + 1; }
+      if (p < end && __ptr_read_byte(buf, p) == 10) { p = p + 1; }
+    }
+  }
+  return o;
+}
+
+// Extract the message body into out (<= max), choosing the framing automatically:
+// chunked transfer-encoding, then Content-Length, else everything to the end
+// Returns the body length, or -1 on a chunked-decode error
+pub fun http_body(ptr buf, int len, ptr out, int max) -> int {
+  int boff = http_body_offset(buf, len);
+  if (http_is_chunked(buf, len) == 1) {
+    return http_chunked_decode(buf, boff, len, out, max);
+  }
+  int avail = len - boff;
+  int blen = avail;
+  int cl = http_content_length(buf, len);
+  if (cl >= 0 && cl < avail) { blen = cl; }
+  int k = 0;
+  while (k < blen && k < max) { __ptr_write_byte(out, k, __ptr_read_byte(buf, boff + k)); k = k + 1; }
+  return blen;
+}

@@ -5,6 +5,7 @@
 // HTTPS will slot in here later by swapping TcpStream for a TLS stream
 
 import from std.net.socket { TcpStream };
+import from std.net.http_parse { http_status, http_body_offset, http_header_value, http_body };
 import from std.mem.buf { ByteBuf };
 import from std.mem.raw { alloc, release };
 import from jink.ext.libc { printf };
@@ -27,6 +28,18 @@ pub cls HttpResponse = {
     return self.len - self.body_off;
   }
 
+  // Copy the value of header `name` into out (<= max bytes); returns its length,
+  // or -1 if the header is absent (case-insensitive)
+  pub fun header(string name, ptr out, int max) -> int {
+    return http_header_value(self.data, self.len, name, out, max);
+  }
+
+  // Copy the framed message body (chunked / Content-Length aware) into out (<= max bytes)
+  // Returns the body length, or -1 on a chunked-decode error
+  pub fun body_into(ptr out, int max) -> int {
+    return http_body(self.data, self.len, out, max);
+  }
+
   // Write the response body to stdout
   pub fun print_body() -> void {
     int i = self.body_off;
@@ -37,7 +50,7 @@ pub cls HttpResponse = {
   }
 }
 
-// Perform `GET <path>` against `<host>:80` - returns an HttpResponse; check .ok
+// Perform GET <path> against <host>:80 - returns an HttpResponse; check .ok
 pub fun http_get(string host, string path) -> HttpResponse {
   let resp = HttpResponse();
 
@@ -82,32 +95,8 @@ pub fun http_get(string host, string path) -> HttpResponse {
   resp.data = out.raw();
   resp.len = out.size();
   resp.ok = 1;
-
-  // Status code: the 3 digits at offsets 9..11 of "HTTP/1.1 200 ..."
-  if (out.size() >= 12) {
-    int d0 = out.get(9) - 48;
-    int d1 = out.get(10) - 48;
-    int d2 = out.get(11) - 48;
-    resp.status = d0 * 100 + d1 * 10 + d2;
-  }
-
-  // Body starts just past the first CRLF CRLF (13 10 13 10)
-  resp.body_off = out.size();
-  int j = 0;
-  int end = out.size() - 3;
-  while (j < end) {
-    if (out.get(j) == 13) {
-      if (out.get(j + 1) == 10) {
-        if (out.get(j + 2) == 13) {
-          if (out.get(j + 3) == 10) {
-            resp.body_off = j + 4;
-            j = end;
-          }
-        }
-      }
-    }
-    j = j + 1;
-  }
+  resp.status = http_status(resp.data, resp.len);
+  resp.body_off = http_body_offset(resp.data, resp.len);
 
   return resp;
 }

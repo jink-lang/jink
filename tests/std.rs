@@ -1,11 +1,11 @@
 //! Integration tests for the Jink standard library
 //!
-//! Each `tests/jk/<name>.jk` is a self-asserting program (it prints [PASS]/[FAIL]
-//! and `exit(<failures>)`). This runner compiles each one with the jink binary
+//! Each tests/jk/<name>.jk is a self-asserting program (it prints [PASS]/[FAIL]
+//! and exit(<failures>)). This runner compiles each one with the jink binary
 //! and asserts the resulting program exits 0. Kept out of the compiler sources so
 //! builder.rs stays focused on the compiler itself
 //!
-//! Requires `clang` on PATH (the compiler shells out to it), same as the existing
+//! Requires clang on PATH (the compiler shells out to it), same as the existing
 //! builder tests
 
 use std::path::Path;
@@ -14,7 +14,7 @@ use std::process::Command;
 const JK_TESTS: &[&str] = &[
   "sha256", "hkdf", "chacha20", "poly1305", "aead", "x25519", "bigint", "rsa",
   "ecdsa", "x509", "x509_chain", "tls13_kdf", "random", "tls_record", "sha384",
-  "ecdsa_p384", "time", "rootstore", "functional",
+  "ecdsa_p384", "time", "rootstore", "functional", "http_parse", "json", "yaml",
 ];
 
 fn run_one(name: &str) {

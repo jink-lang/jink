@@ -1,0 +1,67 @@
+// std.net.http_parse - HTTP/1.1 response parsing over a raw buffer
+
+import from std.net.http_parse {
+  http_status, http_header_value, http_content_length,
+  http_is_chunked, http_body
+};
+import from std.mem.buf { ByteBuf };
+import from std.mem.raw { alloc };
+import from std.testing { check_int, check_bytes };
+import from jink.ext.libc { exit };
+
+fun run() -> void {
+  int fails = 0;
+
+  // --- Content-Length response ---
+  ByteBuf r1 = ByteBuf();
+  r1.push_str("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello");
+  ptr b1 = r1.raw();
+  int l1 = r1.size();
+
+  fails = fails + check_int("status-200", http_status(b1, l1), 200);
+  fails = fails + check_int("content-length-5", http_content_length(b1, l1), 5);
+  fails = fails + check_int("not-chunked", http_is_chunked(b1, l1), 0);
+
+  ptr ct = alloc(64);
+  int ctn = http_header_value(b1, l1, "Content-Type", ct, 63);
+  fails = fails + check_int("ctype-len", ctn, 10);
+  fails = fails + check_bytes("ctype-val", ct, "text/plain", 10);
+
+  // Header lookup is case-insensitive
+  ptr ct2 = alloc(64);
+  fails = fails + check_int("ctype-ci", http_header_value(b1, l1, "content-type", ct2, 63), 10);
+
+  ptr body1 = alloc(64);
+  fails = fails + check_int("body-len-5", http_body(b1, l1, body1, 63), 5);
+  fails = fails + check_bytes("body-hello", body1, "hello", 5);
+
+  // Missing header -> -1
+  ptr miss = alloc(16);
+  fails = fails + check_int("missing-header", http_header_value(b1, l1, "X-Nope", miss, 15), 0 - 1);
+
+  // --- Chunked response ---
+  ByteBuf r2 = ByteBuf();
+  r2.push_str("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
+  ptr b2 = r2.raw();
+  int l2 = r2.size();
+
+  fails = fails + check_int("is-chunked", http_is_chunked(b2, l2), 1);
+  ptr body2 = alloc(64);
+  fails = fails + check_int("chunked-len-11", http_body(b2, l2, body2, 63), 11);
+  fails = fails + check_bytes("chunked-hello-world", body2, "hello world", 11);
+
+  // --- Redirect response ---
+  ByteBuf r3 = ByteBuf();
+  r3.push_str("HTTP/1.1 301 Moved Permanently\r\nLocation: https://example.com/\r\nContent-Length: 0\r\n\r\n");
+  ptr b3 = r3.raw();
+  int l3 = r3.size();
+
+  fails = fails + check_int("status-301", http_status(b3, l3), 301);
+  ptr loc = alloc(128);
+  fails = fails + check_int("location-len", http_header_value(b3, l3, "Location", loc, 127), 20);
+  fails = fails + check_bytes("location-val", loc, "https://example.com/", 20);
+
+  exit(fails);
+}
+
+run();

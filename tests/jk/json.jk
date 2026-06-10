@@ -1,0 +1,64 @@
+// std.json - parse + navigate JSON documents
+
+import from std.json { json_parse };
+import from std.value { Value };
+import from std.testing { check_int, check_bytes };
+import from jink.ext.libc { exit };
+
+fun run() -> void {
+  int fails = 0;
+
+  // object with string values
+  let doc = json_parse("{\"name\":\"foo\",\"version\":\"1.2.3\"}");
+  fails = fails + check_int("is-object", doc.is_object(), 1);
+  fails = fails + check_int("size-2", doc.size(), 2);
+  fails = fails + check_int("name-is-string", doc.get("name").is_string(), 1);
+  fails = fails + check_bytes("name-val", doc.get("name").as_string(), "foo", 3);
+  fails = fails + check_bytes("version-val", doc.get("version").as_string(), "1.2.3", 5);
+
+  // numbers, bool, null
+  let d2 = json_parse("{\"port\":8080,\"neg\":-12,\"ok\":true,\"bad\":false,\"x\":null,\"half\":2.5}");
+  fails = fails + check_int("port", d2.get("port").as_int(), 8080);
+  fails = fails + check_int("neg", d2.get("neg").as_int(), 0 - 12);
+  fails = fails + check_int("ok-true", d2.get("ok").as_bool(), 1);
+  fails = fails + check_int("bad-false", d2.get("bad").as_bool(), 0);
+  fails = fails + check_int("x-null", d2.get("x").is_null(), 1);
+  let h = d2.get("half").as_float();
+  fails = fails + check_int("half-trunc", int(h), 2); // atof(2.5) -> ~2.5 -> 2
+
+  // arrays
+  let d3 = json_parse("{\"deps\":[10,20,30]}");
+  fails = fails + check_int("arr-size", d3.get("deps").size(), 3);
+  fails = fails + check_int("arr-0", d3.get("deps").at(0).as_int(), 10);
+  fails = fails + check_int("arr-2", d3.get("deps").at(2).as_int(), 30);
+
+  // nested object chaining
+  let d4 = json_parse("{\"a\":{\"b\":{\"c\":42}}}");
+  fails = fails + check_int("nested-chain", d4.get("a").get("b").get("c").as_int(), 42);
+
+  // missing key / has
+  fails = fails + check_int("missing", doc.get("nope").is_null(), 1);
+  fails = fails + check_int("has-name", doc.has("name"), 1);
+  fails = fails + check_int("has-nope", doc.has("nope"), 0);
+
+  // array of objects at the root
+  let d5 = json_parse("[{\"n\":1},{\"n\":2}]");
+  fails = fails + check_int("root-array", d5.is_array(), 1);
+  fails = fails + check_int("aoo-0", d5.at(0).get("n").as_int(), 1);
+  fails = fails + check_int("aoo-1", d5.at(1).get("n").as_int(), 2);
+
+  // string escape: JSON "a\tb" -> 'a', 0x09, 'b'
+  let d6 = json_parse("{\"s\":\"a\\tb\"}");
+  ptr s = d6.get("s").as_string();
+  fails = fails + check_int("esc-a", __ptr_read_byte(s, 0), 97);
+  fails = fails + check_int("esc-tab", __ptr_read_byte(s, 1), 9);
+  fails = fails + check_int("esc-b", __ptr_read_byte(s, 2), 98);
+
+  // whitespace tolerance
+  let d7 = json_parse("  {  \"k\" : 7 }  ");
+  fails = fails + check_int("ws", d7.get("k").as_int(), 7);
+
+  exit(fails);
+}
+
+run();
