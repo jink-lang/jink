@@ -11,11 +11,20 @@
 use std::path::Path;
 use std::process::Command;
 
+// Pure-computation tests - these link with plain clang and run on every platform
 const JK_TESTS: &[&str] = &[
   "sha256", "hkdf", "chacha20", "poly1305", "aead", "x25519", "bigint", "rsa",
-  "ecdsa", "x509", "x509_chain", "tls13_kdf", "random", "tls_record", "sha384",
-  "ecdsa_p384", "time", "rootstore", "functional", "http_parse", "json", "yaml",
+  "ecdsa", "x509", "x509_chain", "tls13_kdf", "tls_record", "sha384",
+  "ecdsa_p384", "functional", "http_parse", "json", "yaml",
 ];
+
+// Tests that pull in Windows-only system externs & only link on Windows:
+// random -> rand_s, time -> GetSystemTime, rootstore -> crypt32
+// AKA Windows-gated until the std grows POSIX backends behind conditional compilation
+// (getrandom / clock_gettime / system trust store)
+// Should be fairly temporary since it's getting annoying for me as a multi-OS dev
+#[cfg(windows)]
+const WINDOWS_ONLY_TESTS: &[&str] = &["random", "time", "rootstore"];
 
 fn run_one(name: &str) {
   let binary = env!("CARGO_BIN_EXE_jink");
@@ -50,6 +59,10 @@ fn run_one(name: &str) {
 #[test]
 fn std_library_suite() {
   for name in JK_TESTS {
+    run_one(name);
+  }
+  #[cfg(windows)]
+  for name in WINDOWS_ONLY_TESTS {
     run_one(name);
   }
 }
