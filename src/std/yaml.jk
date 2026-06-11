@@ -271,19 +271,14 @@ fun cur_len(ptr st) -> int { return __ptr_read_int(cur_line(st), 2); }
 // --- block parsers. pn is parse_node (a function value) to break the
 //     mapping<->sequence<->node mutual recursion Jink can't express directly
 //
-// The value for a mapping entry / sequence item is computed by a helper that
-// RETURNS it (an inline scalar, a nested block, or null), rather than reassigning
-// a local across an if - reassignment across an if-merge doesn't propagate ---
+// A mapping entry's value (and a sequence item's) is either an inline scalar or,
+// when the line ends right at the key/dash, a more-indented nested block below it.
+// nested_or_null returns that nested block (or null when nothing is indented under)
 
 fun nested_or_null(ptr st, int indent, fun(ptr, int) -> ptr pn) -> ptr {
   if (st_atend(st) == 1) { return value_null(); }
   if (cur_indent(st) > indent) { return pn(st, cur_indent(st)); }
   return value_null();
-}
-
-fun mapping_value(ptr st, ptr text, int vstart, int len, int indent, fun(ptr, int) -> ptr pn) -> ptr {
-  if (vstart < len) { return parse_scalar(text, vstart, len); }
-  return nested_or_null(st, indent, pn);
 }
 
 fun parse_mapping(ptr st, int indent, fun(ptr, int) -> ptr pn) -> ptr {
@@ -307,7 +302,9 @@ fun parse_mapping(ptr st, int indent, fun(ptr, int) -> ptr pn) -> ptr {
         int vstart = colon + 1;
         while (vstart < len && __ptr_read_byte(text, vstart) == 32) { vstart = vstart + 1; }
         st_advance(st);
-        ptr val = mapping_value(st, text, vstart, len, indent, pn);
+        ptr val = value_null();
+        if (vstart < len) { val = parse_scalar(text, vstart, len); }
+        else { val = nested_or_null(st, indent, pn); }
         keys = pvec_push(keys, key);
         vals = pvec_push(vals, val);
         count = count + 1;
@@ -315,11 +312,6 @@ fun parse_mapping(ptr st, int indent, fun(ptr, int) -> ptr pn) -> ptr {
     }
   }
   return value_object(keys, vals, count);
-}
-
-fun sequence_item(ptr st, ptr text, int rstart, int len, int indent, fun(ptr, int) -> ptr pn) -> ptr {
-  if (rstart < len) { return parse_scalar(text, rstart, len); }
-  return nested_or_null(st, indent, pn);
 }
 
 fun parse_sequence(ptr st, int indent, fun(ptr, int) -> ptr pn) -> ptr {
@@ -340,7 +332,9 @@ fun parse_sequence(ptr st, int indent, fun(ptr, int) -> ptr pn) -> ptr {
         int rstart = 1;
         while (rstart < len && __ptr_read_byte(text, rstart) == 32) { rstart = rstart + 1; }
         st_advance(st);
-        ptr item = sequence_item(st, text, rstart, len, indent, pn);
+        ptr item = value_null();
+        if (rstart < len) { item = parse_scalar(text, rstart, len); }
+        else { item = nested_or_null(st, indent, pn); }
         items = pvec_push(items, item);
         count = count + 1;
       }

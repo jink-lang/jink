@@ -57,10 +57,9 @@ pub fun utf8_encode(ptr out, int o, int cp) -> int {
 
 // --- growable pointer-vector ------------------------------------------------
 // A pvec is a fixed 24-byte HANDLE {data@slot0, cap@slot1, len@slot2}. The handle
-// pointer never moves - growth swaps the internal data buffer in place - so callers
-// keep the same `pvec` value across pushes (no reassignment needed, which also
-// dodges a compiler bug where a reassigned local isn't carried past an if/loop
-// when the new value is a different pointer)
+// pointer never moves - growth swaps the internal data buffer in place - so a pvec
+// has a stable identity: callers keep the same handle across pushes and can store
+// it in a field or pass it around without tracking a moved pointer
 
 pub fun pvec_new() -> ptr {
   ptr h = alloc(24);

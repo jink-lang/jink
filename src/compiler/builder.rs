@@ -1832,9 +1832,21 @@ impl<'ctx> CodeGen<'ctx> {
             }
           }
         },
-        // Custom type (we know exists from builder)
+        // Custom type: ptr, or a class/struct instance (we know it exists). Alloca-
+        // back it like the scalar types above so that reassigning the variable in a
+        // branch or loop is carried - the value is stored to memory rather than left
+        // as a bare SSA value, which an if-merge / loop-latch would otherwise drop
         _ => {
-          self.set_symbol(name.clone(), None, set.get_type(), set);
+          let ptr = if self.symbol_table_stack.len() == 1 {
+            let global = self.module.add_global(set.get_type(), None, &name);
+            global.set_linkage(Linkage::Internal);
+            global.set_initializer(&set.get_type().const_zero());
+            global.as_pointer_value()
+          } else {
+            self.create_entry_block_alloca(&name, set.get_type())
+          };
+          self.builder.build_store(ptr, set).unwrap();
+          self.set_symbol(name.clone(), Some(ptr), set.get_type(), set);
           if self.get_struct(ty.as_str()).is_some() || self.class_table.contains_key(ty.as_str()) {
             self.set_struct_mapping(name, ty);
           }
@@ -4869,6 +4881,33 @@ mod tests {
       printf(\"%d\", twice(square, 3));  // 81
     ",
     "25 6 36 81")
+  }
+
+  #[test]
+  fn test_build_ptr_reassignment_carried() -> Result<(), Error> {
+    // Reassigned ptr or class local must be carried past if-merge to next loop iteration
+    // even when new value is a different pointer
+    run_test("
+      extern(\"C\") malloc(int size) -> ptr;
+      fun cell(int v) -> ptr {
+        ptr p = malloc(8);
+        __ptr_write_int(p, 0, v);
+        return p;
+      }
+
+      // if-merge: reassign inside a branch, read after the merge
+      ptr a = cell(1);
+      int c = 1;
+      if (c == 1) { a = cell(42); }
+      printf(\"%d \", __ptr_read_int(a, 0));   // 42
+
+      // loop-latch: reassign to a fresh pointer each iteration
+      ptr b = cell(0);
+      int i = 0;
+      while (i < 3) { b = cell(i + 10); i = i + 1; }
+      printf(\"%d\", __ptr_read_int(b, 0));     // 12
+    ",
+    "42 12")
   }
 
   #[test]
